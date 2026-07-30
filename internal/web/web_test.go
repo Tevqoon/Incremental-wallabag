@@ -545,3 +545,218 @@ func TestHealthz(t *testing.T) {
 }
 
 func itoa(id int64) string { return strconv.FormatInt(id, 10) }
+
+// fakeEnricher is a source that can also supply highlights, the way wallabag
+// does when a single entry is fetched.
+type fakeEnricher struct {
+	fakeSource
+	highlights []source.Highlight
+}
+
+func (f *fakeEnricher) FullDocument(context.Context, string) (source.Document, error) {
+	f.contentCalls++
+	return source.Document{ContentHTML: f.body, Highlights: f.highlights}, nil
+}
+
+// newEnrichedServer builds a server whose source carries pre-existing highlights.
+func newEnrichedServer(t *testing.T, highlights []source.Highlight) (*Server, *store.Store, *fakeEnricher) {
+	t.Helper()
+
+	db, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
+		ExternalID: "1",
+		Title:      "A test article",
+		UpdatedAt:  time.Now(),
+	}}, time.Now()); err != nil {
+		t.Fatalf("seed document: %v", err)
+	}
+
+	provider := &fakeEnricher{
+		fakeSource: fakeSource{body: articleBody},
+		highlights: highlights,
+	}
+	server, err := New(Options{
+		Store:      db,
+		Sources:    map[string]source.Source{"wallabag": provider},
+		DailyLimit: 60,
+		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return server, db, provider
+}
+
+// TestHighlightsImportOnFirstOpen covers the whole annotation-import path:
+// highlights made in wallabag's own reader become extracts here, positioned in
+// the article so they show as already harvested.
+func TestHighlightsImportOnFirstOpen(t *testing.T) {
+	server, db, _ := newEnrichedServer(t, []source.Highlight{
+		{ExternalID: "97418", Quote: "quick brown"},
+		// Whitespace differs from this copy of the article, as it would when
+		// the other system wrapped its text differently.
+		{ExternalID: "97419", Quote: "  It jumps   over the  "},
+		// A passage that no longer appears, because the article was reworded.
+		{ExternalID: "97420", Quote: "a sentence that is not in this article"},
+	})
+
+	if response := get(t, server, "/read/1"); response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.Code)
+	}
+
+	extracts, err := db.ChildrenOf(1)
+	if err != nil {
+		t.Fatalf("ChildrenOf: %v", err)
+	}
+	if len(extracts) != 3 {
+		t.Fatalf("got %d extracts, want 3", len(extracts))
+	}
+
+	byRef := map[string]store.Element{}
+	for _, extract := range extracts {
+		byRef[extract.ExternalRef] = extract
+		if extract.Origin != store.OriginImport {
+			t.Errorf("extract %s has origin %q, want %q",
+				extract.ExternalRef, extract.Origin, store.OriginImport)
+		}
+	}
+
+	// A located highlight gets a position, so it renders as a highlight in the
+	// parent article.
+	located := byRef["97418"]
+	if !located.HasRange {
+		t.Error("an exactly matching highlight was not located in the article")
+	}
+	if located.Quote != "quick brown" {
+		t.Errorf("quote = %q, want %q", located.Quote, "quick brown")
+	}
+
+	// Whitespace differences must not prevent a match.
+	fuzzy := byRef["97419"]
+	if !fuzzy.HasRange {
+		t.Error("a highlight differing only in whitespace was not located")
+	}
+
+	// A highlight whose text is gone still becomes an extract — the passage
+	// mattered once — just without a position.
+	orphan := byRef["97420"]
+	if orphan.HasRange {
+		t.Error("a highlight that does not appear in the article was given a position")
+	}
+	if orphan.Quote != "a sentence that is not in this article" {
+		t.Errorf("orphan quote = %q", orphan.Quote)
+	}
+
+	// Located highlights show as marks when the article is rendered.
+	body := get(t, server, "/read/1").Body.String()
+	if !strings.Contains(body, `<mark class="extract"`) {
+		t.Error("imported highlights are not marked in the article")
+	}
+}
+
+// TestHighlightsAreNotImportedTwice covers the deduplication that makes a
+// re-fetch safe: the unique index on the provider's annotation id is what does
+// the work, and hitting it means "already have this", not a failure.
+func TestHighlightsAreNotImportedTwice(t *testing.T) {
+	highlights := []source.Highlight{
+		{ExternalID: "97418", Quote: "quick brown"},
+		{ExternalID: "97419", Quote: "lazy dog"},
+	}
+	server, db, provider := newEnrichedServer(t, highlights)
+
+	get(t, server, "/read/1")
+
+	// Simulate the article being re-fetched upstream, which is the only way
+	// the import runs a second time.
+	if _, err := db.DB().Exec(`UPDATE documents SET has_content = 0 WHERE id = 1`); err != nil {
+		t.Fatalf("reset content flag: %v", err)
+	}
+
+	if response := get(t, server, "/read/1"); response.Code != http.StatusOK {
+		t.Fatalf("second open: status = %d", response.Code)
+	}
+	if provider.contentCalls != 2 {
+		t.Fatalf("test premise is wrong: the article was fetched %d times", provider.contentCalls)
+	}
+
+	extracts, err := db.ChildrenOf(1)
+	if err != nil {
+		t.Fatalf("ChildrenOf: %v", err)
+	}
+	if len(extracts) != 2 {
+		t.Errorf("got %d extracts after a re-fetch, want 2 — highlights were duplicated", len(extracts))
+	}
+}
+
+// TestManualExtractsAreNotDeduplicated guards the partial index: extracts made
+// here carry no provider id, and many of them must be able to coexist.
+func TestManualExtractsAreNotDeduplicated(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	selections := []url.Values{
+		{"start_block": {"0"}, "start_offset": {"4"}, "end_block": {"0"},
+			"end_offset": {"9"}, "quote": {"quick"}},
+		{"start_block": {"0"}, "start_offset": {"10"}, "end_block": {"0"},
+			"end_offset": {"15"}, "quote": {"brown"}},
+		{"start_block": {"2"}, "start_offset": {"0"}, "end_block": {"2"},
+			"end_offset": {"7"}, "quote": {"A third"}},
+	}
+	for i, selection := range selections {
+		if response := post(t, server, "/elements/1/extract", selection); response.Code != http.StatusOK {
+			t.Fatalf("extract %d: status = %d: %s", i, response.Code, response.Body.String())
+		}
+	}
+
+	extracts, err := db.ChildrenOf(1)
+	if err != nil {
+		t.Fatalf("ChildrenOf: %v", err)
+	}
+	if len(extracts) != 3 {
+		t.Errorf("got %d extracts, want 3", len(extracts))
+	}
+}
+
+func TestLibraryListsAndSearches(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "2", Title: "On the difficulty of reading", Author: "A. Writer",
+			UpdatedAt: time.Now()},
+		{ExternalID: "3", Title: "Something unrelated", UpdatedAt: time.Now()},
+	}, time.Now()); err != nil {
+		t.Fatalf("seed documents: %v", err)
+	}
+
+	all := get(t, server, "/library").Body.String()
+	for _, want := range []string{"A test article", "On the difficulty of reading", "Something unrelated"} {
+		if !strings.Contains(all, want) {
+			t.Errorf("library does not list %q", want)
+		}
+	}
+
+	// Title search.
+	filtered := get(t, server, "/library?q=difficulty").Body.String()
+	if !strings.Contains(filtered, "On the difficulty of reading") {
+		t.Error("search did not find a matching title")
+	}
+	if strings.Contains(filtered, "Something unrelated") {
+		t.Error("search returned a document that does not match")
+	}
+
+	// Author search hits the same row.
+	byAuthor := get(t, server, "/library?q="+url.QueryEscape("A. Writer")).Body.String()
+	if !strings.Contains(byAuthor, "On the difficulty of reading") {
+		t.Error("search by author did not find the document")
+	}
+
+	// Library entries link into the reader, not to the document id — the two
+	// are only equal by coincidence in small databases.
+	if !strings.Contains(all, `href="/read/`) {
+		t.Error("library entries do not link into the reader")
+	}
+}

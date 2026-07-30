@@ -8,6 +8,7 @@ package store
 import (
 	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -18,11 +19,13 @@ import (
 	// cross-compiles to a static binary with CGO_ENABLED=0 — which is what
 	// lets the container image be distroless with no libc.
 	//
-	// Go note: the blank import runs the package's init(), which registers the
-	// "sqlite" driver name with database/sql. Nothing from it is called
-	// directly, so without the blank identifier the compiler would reject the
-	// unused import.
-	_ "modernc.org/sqlite"
+	// Go note: importing it also runs its init(), which is what registers the
+	// "sqlite" driver name with database/sql. That registration — not any
+	// function called by name — is why sql.Open("sqlite", …) works below. Only
+	// IsDuplicate refers to the package directly; the /lib subpackage supplies
+	// SQLite's own result codes.
+	sqlite "modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // migrationFiles holds the schema, compiled into the binary.
@@ -171,4 +174,18 @@ func parseTime(value sql.NullString) time.Time {
 		return time.Time{}
 	}
 	return parsed
+}
+
+// IsDuplicate reports whether an error is a unique-constraint violation.
+//
+// Used where a duplicate is an expected outcome rather than a failure — most
+// importantly re-importing a highlight that has already been imported, where
+// the constraint is doing the deduplication and hitting it means "already
+// have this", not "something went wrong".
+func IsDuplicate(err error) bool {
+	var sqliteErr *sqlite.Error
+	if errors.As(err, &sqliteErr) {
+		return sqliteErr.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE
+	}
+	return false
 }

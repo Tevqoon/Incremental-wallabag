@@ -34,6 +34,27 @@ type Source interface {
 	Content(ctx context.Context, externalID string) (string, error)
 }
 
+// Enricher is an optional extension a Source may also satisfy: it returns a
+// whole Document — body and highlights together — for one identifier.
+//
+// It is separate from Source because not every provider can do it cheaply. In
+// wallabag's case the listing that drives syncing omits annotations, and only
+// a per-entry fetch carries them, so highlights arrive with the article body
+// rather than during the sync.
+//
+// Go note: this is the "optional interface" pattern. A caller holding a Source
+// asks whether it also satisfies Enricher with a type assertion —
+// `enricher, ok := provider.(Enricher)` — and falls back when it does not. That
+// is how Go extends a published interface without breaking implementations
+// that predate the extension.
+type Enricher interface {
+	Source
+
+	// FullDocument returns the document with everything the provider knows
+	// about it, including Highlights.
+	FullDocument(ctx context.Context, externalID string) (Document, error)
+}
+
 // Document is one importable piece of content, normalised across providers.
 type Document struct {
 	// ExternalID is the provider's own identifier. Combined with the source

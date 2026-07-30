@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/microcosm-cc/bluemonday"
@@ -30,7 +31,7 @@ var assets embed.FS
 // pageNames are the full-page templates. Each is parsed together with the
 // layout into its own template set, because they all define a "content"
 // block and parsing them into one set would make those definitions collide.
-var pageNames = []string{"queue.html", "reader.html"}
+var pageNames = []string{"queue.html", "reader.html", "library.html"}
 
 // Server holds everything the handlers need. Dependencies arrive through this
 // struct rather than package-level variables, so a test can build a Server with
@@ -92,6 +93,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /{$}", s.handleQueue)
 	mux.HandleFunc("GET /next", s.handleNext)
+	mux.HandleFunc("GET /library", s.handleLibrary)
 	mux.HandleFunc("GET /read/{id}", s.handleRead)
 
 	mux.HandleFunc("POST /elements/{id}/extract", s.handleExtract)
@@ -177,23 +179,119 @@ func (s *Server) articleHTML(ctx context.Context, element store.Element) (string
 	}
 
 	if !document.HasContent {
-		provider, ok := s.sources[document.Source]
-		if !ok {
-			return "", fmt.Errorf("web: document %d came from source %q, which is not configured",
-				document.ID, document.Source)
-		}
-
-		body, err := provider.Content(ctx, document.ExternalID)
+		body, highlights, err := s.fetchBody(ctx, document)
 		if err != nil {
-			return "", fmt.Errorf("web: fetch body of document %d: %w", document.ID, err)
+			return "", err
 		}
 		if err := s.store.SetDocumentContent(document.ID, body); err != nil {
 			return "", err
 		}
 		document.ContentHTML = body
+
+		// Highlights are imported here, at the moment the article is first
+		// opened, so passages already marked elsewhere are visible in the
+		// very session where they are useful.
+		sanitized := s.policy.Sanitize(body)
+		if err := s.importHighlights(element, sanitized, highlights); err != nil {
+			// A failed import must not stop the article from being read; the
+			// highlights can be imported again on the next open.
+			s.logger.Error("could not import highlights",
+				"document", document.ID, "error", err)
+		}
 	}
 
 	return s.policy.Sanitize(document.ContentHTML), nil
+}
+
+// fetchBody retrieves an article body, and its highlights when the provider
+// can supply them.
+func (s *Server) fetchBody(ctx context.Context, document store.Document) (string, []source.Highlight, error) {
+	provider, ok := s.sources[document.Source]
+	if !ok {
+		return "", nil, fmt.Errorf("web: document %d came from source %q, which is not configured",
+			document.ID, document.Source)
+	}
+
+	// Ask for the richer form when the provider offers it, and fall back to a
+	// plain body fetch when it does not.
+	if enricher, ok := provider.(source.Enricher); ok {
+		full, err := enricher.FullDocument(ctx, document.ExternalID)
+		if err != nil {
+			return "", nil, fmt.Errorf("web: fetch document %d: %w", document.ID, err)
+		}
+		return full.ContentHTML, full.Highlights, nil
+	}
+
+	body, err := provider.Content(ctx, document.ExternalID)
+	if err != nil {
+		return "", nil, fmt.Errorf("web: fetch body of document %d: %w", document.ID, err)
+	}
+	return body, nil, nil
+}
+
+// importHighlights turns a provider's existing annotations into extracts.
+//
+// Each highlight is located by its text rather than by the offsets the other
+// system recorded: those were measured against its own copy of the article and
+// do not survive increader's sanitising. A highlight whose text cannot be found
+// — because the article was re-fetched and reworded — still becomes an extract,
+// just without a position in the parent.
+func (s *Server) importHighlights(element store.Element, sanitizedHTML string, highlights []source.Highlight) error {
+	if len(highlights) == 0 {
+		return nil
+	}
+
+	article, err := ir.ParseArticle(sanitizedHTML)
+	if err != nil {
+		return err
+	}
+
+	now := time.Now()
+	for _, highlight := range highlights {
+		if strings.TrimSpace(highlight.Quote) == "" {
+			continue
+		}
+
+		found, located := article.Locate(highlight.Quote)
+		quote := highlight.Quote
+		contentHTML := "<p>" + template.HTMLEscapeString(highlight.Quote) + "</p>"
+
+		if located {
+			// Prefer the article's own copy of the passage: it carries the
+			// inline markup, and its whitespace matches the offsets stored
+			// alongside it.
+			if text, err := article.Text(found); err == nil {
+				quote = text
+			}
+			if markup, err := article.HTML(found); err == nil {
+				contentHTML = markup
+			}
+		}
+
+		_, err := s.store.CreateExtract(store.NewExtract{
+			ParentID:    element.ID,
+			DocumentID:  element.DocumentID,
+			Kind:        store.KindTopic,
+			Title:       summarise(quote),
+			ContentHTML: contentHTML,
+			Quote:       quote,
+			Range:       found,
+			HasRange:    located,
+			Priority:    element.Schedule.Priority,
+			Origin:      store.OriginImport,
+			// Keyed by the provider's annotation id, so re-importing the same
+			// highlight is rejected by the unique index rather than duplicated.
+			ExternalRef: highlight.ExternalID,
+		}, now)
+		if err != nil {
+			if store.IsDuplicate(err) {
+				continue
+			}
+			return err
+		}
+	}
+
+	return nil
 }
 
 // parseArticle sanitises, parses and returns an element's article together with

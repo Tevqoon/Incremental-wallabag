@@ -204,3 +204,59 @@ func (s *Store) CountDocuments(sourceName string) (int, error) {
 	}
 	return count, nil
 }
+
+// LibraryEntry is a document together with the id of its root topic, so the
+// library can link straight into the reader.
+type LibraryEntry struct {
+	Document
+	RootElementID int64
+	State         string
+	ExtractCount  int
+}
+
+// SearchDocuments lists documents whose title, author or URL matches query,
+// most recently updated first. An empty query lists everything.
+func (s *Store) SearchDocuments(query string, limit int) ([]LibraryEntry, error) {
+	// LIKE with wildcards on both sides cannot use an index, which is fine at
+	// personal-library scale and avoids carrying an FTS5 table that would have
+	// to be kept in step with every write.
+	pattern := "%" + query + "%"
+
+	rows, err := s.db.Query(`
+		SELECT d.id, d.source, d.external_id, d.url, d.title, d.author,
+		       d.language, d.has_content, d.published_at, d.source_updated_at,
+		       root.id, root.state,
+		       (SELECT COUNT(*) FROM elements child WHERE child.parent_id = root.id)
+		FROM documents d
+		JOIN elements root ON root.document_id = d.id AND root.parent_id IS NULL
+		WHERE ? = '' OR d.title LIKE ? OR d.author LIKE ? OR d.url LIKE ?
+		ORDER BY d.source_updated_at DESC
+		LIMIT ?`,
+		query, pattern, pattern, pattern, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: search documents: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []LibraryEntry
+	for rows.Next() {
+		var (
+			entry     LibraryEntry
+			published sql.NullString
+			updated   sql.NullString
+		)
+		err := rows.Scan(
+			&entry.ID, &entry.Source, &entry.ExternalID, &entry.URL, &entry.Title,
+			&entry.Author, &entry.Language, &entry.HasContent, &published, &updated,
+			&entry.RootElementID, &entry.State, &entry.ExtractCount,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("store: scan library row: %w", err)
+		}
+		entry.PublishedAt = parseTime(published)
+		entry.SourceUpdatedAt = parseTime(updated)
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
+}

@@ -1,0 +1,36 @@
+{{define "content"}}
+<section class="queue">
+  <h1>Library</h1>
+
+  <form class="search" method="get" action="/library">
+    <input type="search" name="q" value="{{.Query}}"
+           placeholder="Search title, author or URL" autofocus>
+    <button type="submit">Search</button>
+  </form>
+
+  {{if .Entries}}
+    <ol class="items">
+      {{range .Entries}}
+        <li class="item">
+          <a class="item-title" href="/read/{{.RootElementID}}">{{.Title}}</a>
+          <div class="item-meta">
+            <span class="badge">{{.State}}</span>
+            {{if .Author}}<span>{{.Author}}</span>{{end}}
+            {{if .ExtractCount}}
+              <span>{{.ExtractCount}} extract{{if ne .ExtractCount 1}}s{{end}}</span>
+            {{end}}
+            {{if not .HasContent}}<span title="fetched on first open">not yet fetched</span>{{end}}
+            {{if .URL}}
+              <a href="{{.URL}}" rel="noopener noreferrer" target="_blank">source ↗</a>
+            {{end}}
+          </div>
+        </li>
+      {{end}}
+    </ol>
+  {{else}}
+    <div class="empty">
+      <p>{{if .Query}}Nothing matches “{{.Query}}”.{{else}}Nothing synced yet.{{end}}</p>
+    </div>
+  {{end}}
+</section>
+{{end}}

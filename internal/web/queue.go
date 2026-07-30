@@ -3,6 +3,7 @@ package web
 import (
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Tevqoon/increader/internal/ir"
@@ -188,4 +189,32 @@ func (s *Server) notFoundOrFail(w http.ResponseWriter, err error) {
 		return
 	}
 	s.fail(w, err)
+}
+
+// libraryData is what the library page renders.
+type libraryData struct {
+	Title   string
+	Query   string
+	Entries []store.LibraryEntry
+}
+
+// handleLibrary lists and searches every synced document.
+//
+// The queue answers "what should I read now"; this answers "where is that
+// article I remember". Both are needed, and conflating them would make the
+// queue's ordering meaningless.
+func (s *Server) handleLibrary(w http.ResponseWriter, r *http.Request) {
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+
+	entries, err := s.store.SearchDocuments(query, 200)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+
+	s.render(w, "library.html", libraryData{
+		Title:   "Library",
+		Query:   query,
+		Entries: entries,
+	})
 }
