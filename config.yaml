@@ -1,0 +1,35 @@
+# increader configuration.
+#
+# ${VAR} references are replaced with environment variables at load time, so
+# this file carries no secrets and is safe to commit. Only the braced form is
+# substituted — a bare $ is left alone, since passwords contain them.
+
+# Listen address. 0.0.0.0 is correct inside a container: 127.0.0.1 there is the
+# container's own loopback and would be unreachable. Exposure is controlled by
+# the port mapping in compose.yaml, which publishes to the host's loopback only.
+bind: 0.0.0.0:8080
+
+# Path to the SQLite database. Under compose this is the mounted volume.
+database: /data/increader.db
+
+# Decides what "today" means. Scheduling works in whole days, so this
+# determines when material becomes due.
+timezone: Europe/Ljubljana
+
+# How often sources are polled in the background.
+sync_interval: 30m
+
+# Maximum elements the queue offers in a day.
+daily_limit: 60
+
+sources:
+  wallabag:
+    # The official hosted instance. Use your own base URL if self-hosting.
+    url: https://app.wallabag.it
+
+    # From the wallabag web UI:
+    #   Settings -> API clients management -> Create a new client
+    client_id: ${WALLABAG_CLIENT_ID}
+    client_secret: ${WALLABAG_CLIENT_SECRET}
+    username: ${WALLABAG_USERNAME}
+    password: ${WALLABAG_PASSWORD}

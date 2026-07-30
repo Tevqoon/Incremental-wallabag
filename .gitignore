@@ -1,0 +1,15 @@
+# Build output
+/increader
+/dist/
+
+# Local runtime state
+/data/
+*.db
+*.db-wal
+*.db-shm
+
+# Secrets and local config
+.env
+config.local.yaml
+
+.DS_Store

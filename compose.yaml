@@ -1,0 +1,35 @@
+services:
+  increader:
+    build: .
+    image: increader:latest
+    restart: unless-stopped
+
+    # Published on the host's loopback only. On the VPS, Tailscale is what
+    # reaches it; nothing is exposed to the public internet, which is why the
+    # app itself has no login.
+    ports:
+      - "127.0.0.1:8080:8080"
+
+    volumes:
+      # SQLite lives here. Must be owned by uid 65532 on the host:
+      #   mkdir -p data && sudo chown 65532:65532 data
+      - ./data:/data
+      - ./config.yaml:/config.yaml:ro
+
+    # Credentials come from a gitignored .env; see .env.example.
+    env_file: .env
+
+    environment:
+      # The binary embeds the timezone database (via time/tzdata), so this is
+      # honoured even though the image has no /usr/share/zoneinfo.
+      TZ: Europe/Ljubljana
+
+    command: ["serve", "-config", "/config.yaml"]
+
+    healthcheck:
+      # distroless has no shell, curl or wget, so the binary probes itself.
+      test: ["CMD", "/increader", "-config", "/config.yaml", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
