@@ -73,13 +73,11 @@
   // htmx calls these through hx-vals="js:...".
   window.selectionPayload = () => captured || {};
 
-  // A cloze is addressed against the extract's stored text, which is a single
-  // run of characters rather than a set of blocks. Because an extract's own
-  // text starts at block zero, the offsets within it are what the server wants.
-  window.clozePayload = () => {
-    if (!captured) return {};
-    return { start: captured.start_offset, end: captured.end_offset };
-  };
+  // A cloze is stored as offsets into the extract's flat text, but the browser
+  // only knows block coordinates. Send those and let the server convert: it
+  // has the extract's block structure and can account for the separators
+  // between paragraphs, which the browser cannot see.
+  window.clozePayload = () => captured || {};
 
   window.clearSelection = () => {
     captured = null;

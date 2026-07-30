@@ -185,7 +185,44 @@ func (a *Article) Text(r Range) (string, error) {
 		parts = append(parts, a.blocks[index].Text)
 	}
 	parts = append(parts, a.blocks[r.EndBlock].Text[:r.EndOffset])
-	return strings.Join(parts, "\n\n"), nil
+	return strings.Join(parts, blockSeparator), nil
+}
+
+// blockSeparator joins blocks in the flat text an article renders to.
+const blockSeparator = "\n\n"
+
+// FlatOffset converts a block/offset position into an offset into the article's
+// flat text — the string Text returns for a range covering everything.
+//
+// Cloze deletions need this. They are stored as offsets into an element's saved
+// text, which is flat, but the browser reports positions in block coordinates
+// like everything else. For a single-block element the two agree and the
+// conversion is invisible; for one spanning paragraphs they diverge by the
+// separators, and using block offsets directly would silently delete the wrong
+// words.
+func (a *Article) FlatOffset(block, offset int) (int, bool) {
+	if block < 0 || block >= len(a.blocks) {
+		return 0, false
+	}
+	if offset < 0 || offset > len(a.blocks[block].Text) {
+		return 0, false
+	}
+
+	flat := 0
+	for index := 0; index < block; index++ {
+		flat += len(a.blocks[index].Text) + len(blockSeparator)
+	}
+	return flat + offset, true
+}
+
+// FlatText returns the article's entire text, laid out the way FlatOffset
+// measures it.
+func (a *Article) FlatText() string {
+	texts := make([]string, 0, len(a.blocks))
+	for _, block := range a.blocks {
+		texts = append(texts, block.Text)
+	}
+	return strings.Join(texts, blockSeparator)
 }
 
 // NormalizeSpace collapses every run of whitespace to a single space and trims

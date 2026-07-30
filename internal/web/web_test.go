@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Tevqoon/increader/internal/ir"
 	"github.com/Tevqoon/increader/internal/source"
 	"github.com/Tevqoon/increader/internal/store"
 )
@@ -296,10 +297,13 @@ func TestClozePromotesExtractToItem(t *testing.T) {
 		t.Errorf("a fresh extract is kind %q, want %q", children[0].Kind, store.KindTopic)
 	}
 
-	// Delete "brown" from "quick brown fox".
+	// Delete "brown" from "quick brown fox", in the extract's own coordinates.
 	response := post(t, server, "/elements/"+itoa(extractID)+"/cloze", url.Values{
-		"start": {"6"},
-		"end":   {"11"},
+		"start_block":  {"0"},
+		"start_offset": {"6"},
+		"end_block":    {"0"},
+		"end_offset":   {"11"},
+		"quote":        {"brown"},
 	})
 	if response.Code != http.StatusSeeOther && response.Code != http.StatusNoContent {
 		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
@@ -332,11 +336,104 @@ func TestClozeRejectedOnWholeArticle(t *testing.T) {
 	server, _, _ := newTestServer(t, true)
 
 	response := post(t, server, "/elements/1/cloze", url.Values{
-		"start": {"0"},
-		"end":   {"5"},
+		"start_block":  {"0"},
+		"start_offset": {"0"},
+		"end_block":    {"0"},
+		"end_offset":   {"5"},
+		"quote":        {"The q"},
 	})
 	if response.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400 — clozes belong on extracts", response.Code)
+	}
+}
+
+// TestClozeOnMultiBlockExtract is the case where block coordinates and stored
+// offsets diverge. The extract's text is flat, with separators between what
+// were separate paragraphs; taking the browser's block offset at face value
+// would delete a different span entirely and give no sign of it.
+func TestClozeOnMultiBlockExtract(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	// Extract across two paragraphs: "quick brown fox." + "It jumps".
+	if response := post(t, server, "/elements/1/extract", url.Values{
+		"start_block":  {"0"},
+		"start_offset": {"4"},
+		"end_block":    {"1"},
+		"end_offset":   {"8"},
+		"quote":        {"quick brown fox.\n\nIt jumps"},
+	}); response.Code != http.StatusOK {
+		t.Fatalf("extract: status = %d: %s", response.Code, response.Body.String())
+	}
+
+	children, _ := db.ChildrenOf(1)
+	extract := children[0]
+	if extract.Quote != "quick brown fox.\n\nIt jumps" {
+		t.Fatalf("stored quote = %q", extract.Quote)
+	}
+
+	// "jumps" sits at offsets 3..8 of the extract's *second* block, which is
+	// offsets 21..26 of its flat text.
+	if response := post(t, server, "/elements/"+itoa(extract.ID)+"/cloze", url.Values{
+		"start_block":  {"1"},
+		"start_offset": {"3"},
+		"end_block":    {"1"},
+		"end_offset":   {"8"},
+		"quote":        {"jumps"},
+	}); response.Code != http.StatusSeeOther && response.Code != http.StatusNoContent {
+		t.Fatalf("cloze: status = %d: %s", response.Code, response.Body.String())
+	}
+
+	clozes, err := db.ClozesOf(extract.ID)
+	if err != nil {
+		t.Fatalf("ClozesOf: %v", err)
+	}
+	if len(clozes) != 1 {
+		t.Fatalf("got %d deletions, want 1", len(clozes))
+	}
+
+	deleted := extract.Quote[clozes[0].Start:clozes[0].End]
+	if deleted != "jumps" {
+		t.Errorf("the deletion covers %q, want %q — block offsets were not converted",
+			deleted, "jumps")
+	}
+
+	rendered, err := ir.RenderCloze(extract.Quote, clozes)
+	if err != nil {
+		t.Fatalf("RenderCloze: %v", err)
+	}
+	if !strings.Contains(rendered, "It {{c1::jumps}}") {
+		t.Errorf("card renders as %q", rendered)
+	}
+}
+
+// TestClozeRejectsStaleSelection mirrors the same guard on extracts: if the
+// browser's text disagrees with what is stored, the offsets are not usable.
+func TestClozeRejectsStaleSelection(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	post(t, server, "/elements/1/extract", url.Values{
+		"start_block":  {"0"},
+		"start_offset": {"4"},
+		"end_block":    {"0"},
+		"end_offset":   {"19"},
+		"quote":        {"quick brown fox"},
+	})
+	children, _ := db.ChildrenOf(1)
+
+	response := post(t, server, "/elements/"+itoa(children[0].ID)+"/cloze", url.Values{
+		"start_block":  {"0"},
+		"start_offset": {"6"},
+		"end_block":    {"0"},
+		"end_offset":   {"11"},
+		"quote":        {"something else"},
+	})
+	if response.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", response.Code)
+	}
+
+	clozes, _ := db.ClozesOf(children[0].ID)
+	if len(clozes) != 0 {
+		t.Errorf("a mismatched deletion was stored anyway")
 	}
 }
 

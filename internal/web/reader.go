@@ -234,14 +234,9 @@ func (s *Server) handleCloze(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	start, startErr := strconv.Atoi(r.FormValue("start"))
-	end, endErr := strconv.Atoi(r.FormValue("end"))
-	if startErr != nil || endErr != nil {
-		http.Error(w, "start and end must be integers", http.StatusBadRequest)
-		return
-	}
-	if start < 0 || end > len(element.Quote) || end <= start {
-		http.Error(w, "that deletion does not fit the extract", http.StatusBadRequest)
+	start, end, err := s.clozeOffsets(r, element)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -260,6 +255,47 @@ func (s *Server) handleCloze(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.redirect(w, r, "/read/"+strconv.FormatInt(id, 10))
+}
+
+// clozeOffsets converts a selection inside an extract into offsets against the
+// extract's stored text, which is what cloze deletions are recorded in.
+//
+// The browser reports positions in block coordinates, like everywhere else. For
+// a single-block extract those already equal the flat offsets and the
+// conversion changes nothing; for an extract spanning paragraphs they differ by
+// the separators, and using the block offsets directly would delete the wrong
+// words with nothing to show that it had happened.
+func (s *Server) clozeOffsets(r *http.Request, element store.Element) (int, int, error) {
+	chosen, err := parseSelection(r)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	// An extract's own content is the article here, not the document it came
+	// from: the offsets are relative to the passage being clozed.
+	article, err := ir.ParseArticle(s.policy.Sanitize(element.ContentHTML))
+	if err != nil {
+		return 0, 0, err
+	}
+
+	start, startOK := article.FlatOffset(chosen.Range.StartBlock, chosen.Range.StartOffset)
+	end, endOK := article.FlatOffset(chosen.Range.EndBlock, chosen.Range.EndOffset)
+	if !startOK || !endOK || end <= start {
+		return 0, 0, errors.New("that deletion does not fit the extract")
+	}
+	if end > len(element.Quote) {
+		return 0, 0, errors.New("that deletion runs past the end of the extract")
+	}
+
+	// The stored quote and the re-parsed content must agree, or the offsets
+	// address different text than the export will render.
+	if got := element.Quote[start:end]; ir.NormalizeSpace(got) != ir.NormalizeSpace(chosen.Quote) {
+		s.logger.Warn("cloze selection did not match the stored extract",
+			"element", element.ID, "browser", chosen.Quote, "stored", got)
+		return 0, 0, errors.New("that selection no longer matches the extract; reload and try again")
+	}
+
+	return start, end, nil
 }
 
 // writeArticleFragment returns the article container for an htmx swap.
