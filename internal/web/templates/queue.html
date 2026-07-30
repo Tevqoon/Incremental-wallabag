@@ -1,0 +1,47 @@
+{{define "content"}}
+<section class="queue">
+  <h1>Queue</h1>
+  <p class="meta">
+    {{.Due}} due today · {{.Total}} elements in total
+  </p>
+
+  {{if .Items}}
+    <ol class="items">
+      {{range .Items}}
+        <li class="item {{if .IsRoot}}is-article{{else}}is-extract{{end}}">
+          <a class="item-title" href="/read/{{.ID}}">
+            {{if .IsRoot}}
+              {{.DocumentTitle}}
+            {{else}}
+              {{.Title}}
+            {{end}}
+          </a>
+
+          <div class="item-meta">
+            <span class="badge">{{if .IsRoot}}article{{else}}extract{{end}}</span>
+            {{if eq .Kind "item"}}<span class="badge badge-item">cloze</span>{{end}}
+            <span title="priority: lower is more important">p{{percent .Schedule.Priority}}</span>
+            <span title="current interval">{{days .Schedule.IntervalDays}}</span>
+            <span title="repetitions">×{{.Schedule.Reps}}</span>
+            {{if not .IsRoot}}
+              <span class="source">from {{.DocumentTitle}}</span>
+            {{end}}
+          </div>
+        </li>
+      {{end}}
+    </ol>
+
+    <p class="continue">
+      <a class="button primary" href="/next">Start reading</a>
+    </p>
+  {{else}}
+    <div class="empty">
+      <p>Nothing is due today.</p>
+      <p class="meta">
+        New articles appear here as they sync from wallabag, and extracts come
+        back on their own schedule.
+      </p>
+    </div>
+  {{end}}
+</section>
+{{end}}

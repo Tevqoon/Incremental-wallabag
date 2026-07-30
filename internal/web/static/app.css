@@ -1,0 +1,273 @@
+/* increader — a reading interface, so the article column sets the rules and
+   everything else stays out of its way. */
+
+:root {
+  --bg: #fdfcfa;
+  --fg: #1f1d1a;
+  --muted: #6b6660;
+  --rule: #e3ded6;
+  --accent: #2f6f4e;
+  --mark: #fdf0b8;
+  --mark-edge: #e8d47a;
+  --danger: #9a3b2f;
+  --measure: 34rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16151300;
+    --bg: #161513;
+    --fg: #e8e4dc;
+    --muted: #9a938a;
+    --rule: #2f2c28;
+    --accent: #7fb896;
+    --mark: #4a4322;
+    --mark-edge: #6d6231;
+    --danger: #d98a7c;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 1rem/1.65 Charter, Georgia, "Iowan Old Style", serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+main { padding: 1.5rem 1.25rem 6rem; }
+
+/* ---- Top bar ---------------------------------------------------------- */
+
+.bar {
+  display: flex;
+  align-items: baseline;
+  gap: 1.25rem;
+  padding: 0.9rem 1.25rem;
+  border-bottom: 1px solid var(--rule);
+  font-family: system-ui, sans-serif;
+  font-size: 0.85rem;
+}
+
+.brand { font-weight: 600; letter-spacing: 0.02em; }
+.bar nav { display: flex; gap: 1rem; }
+.bar a { color: var(--muted); text-decoration: none; }
+.bar a:hover, .brand { color: var(--fg); }
+
+/* ---- Queue ------------------------------------------------------------ */
+
+.queue { max-width: var(--measure); margin: 0 auto; }
+
+h1 { font-size: 1.5rem; line-height: 1.25; margin: 0 0 0.35rem; }
+
+.meta {
+  font-family: system-ui, sans-serif;
+  font-size: 0.8rem;
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+  margin: 0 0 1.5rem;
+}
+
+.items { list-style: none; padding: 0; margin: 0; }
+
+.item {
+  padding: 0.85rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.item-title {
+  color: inherit;
+  text-decoration: none;
+  font-size: 1.05rem;
+  display: block;
+  margin-bottom: 0.3rem;
+}
+.item-title:hover { color: var(--accent); }
+
+/* An extract is subordinate to its article, and the indent says so without
+   needing a label. */
+.item.is-extract { padding-left: 1.25rem; border-left: 2px solid var(--rule); }
+.item.is-extract .item-title { font-size: 0.95rem; color: var(--muted); }
+.item.is-extract .item-title:hover { color: var(--accent); }
+
+.item-meta {
+  font-family: system-ui, sans-serif;
+  font-size: 0.72rem;
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+
+.badge {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 0.65rem;
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  padding: 0.05rem 0.3rem;
+}
+.badge-item { border-color: var(--accent); color: var(--accent); }
+
+.source { font-style: italic; }
+
+.empty { padding: 3rem 0; text-align: center; }
+.empty .meta { justify-content: center; }
+
+.continue { margin-top: 2rem; }
+
+/* ---- Reader ----------------------------------------------------------- */
+
+.reader { max-width: var(--measure); margin: 0 auto; }
+.reader-head { margin-bottom: 2rem; }
+.reader-head a { color: var(--muted); }
+
+#article > * { margin: 0 0 1.15em; }
+#article p { line-height: 1.7; }
+
+#article h1, #article h2, #article h3,
+#article h4, #article h5, #article h6 {
+  font-size: 1.15rem;
+  line-height: 1.35;
+  margin: 2rem 0 0.75em;
+}
+
+#article blockquote {
+  margin-left: 0;
+  padding-left: 1rem;
+  border-left: 2px solid var(--rule);
+  color: var(--muted);
+}
+
+#article pre {
+  font: 0.85rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-x: auto;
+  padding: 0.75rem;
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+  border-radius: 3px;
+}
+
+#article img { max-width: 100%; height: auto; }
+
+#article a { color: var(--accent); }
+
+/* Blocks that were list items before the reader flattened the article. */
+#article .list-item { padding-left: 1.25rem; position: relative; }
+#article .list-item::before {
+  content: "•";
+  position: absolute;
+  left: 0.25rem;
+  color: var(--muted);
+}
+
+/* Already-extracted passages. Deliberately quiet: the point is to see at a
+   glance what has been harvested, not to make the text harder to re-read. */
+mark.extract {
+  background: var(--mark);
+  color: inherit;
+  box-shadow: 0 1px 0 var(--mark-edge);
+  border-radius: 1px;
+}
+
+/* ---- Selection toolbar ------------------------------------------------ */
+
+.toolbar {
+  position: absolute;
+  z-index: 10;
+  display: flex;
+  gap: 1px;
+  background: var(--rule);
+  border-radius: 4px;
+  overflow: hidden;
+  box-shadow: 0 2px 12px rgb(0 0 0 / 0.18);
+}
+
+.toolbar button {
+  border: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 600 0.75rem/1 system-ui, sans-serif;
+  padding: 0.5rem 0.8rem;
+  cursor: pointer;
+}
+.toolbar button:hover { background: var(--accent); color: var(--bg); }
+
+/* ---- Clozes and extracts --------------------------------------------- */
+
+.clozes, .extracts {
+  margin-top: 2.5rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--rule);
+}
+
+.clozes h2, .extracts h2 {
+  font: 600 0.75rem/1 system-ui, sans-serif;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin: 0 0 0.75rem;
+}
+
+.cloze-preview {
+  font: 0.85rem/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap;
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+  padding: 0.75rem;
+  border-radius: 3px;
+}
+
+.extracts ul { list-style: none; padding: 0; margin: 0; }
+.extracts li { padding: 0.4rem 0; border-bottom: 1px solid var(--rule); }
+.extracts a { color: inherit; text-decoration: none; }
+.extracts a:hover { color: var(--accent); }
+
+/* ---- Grading ---------------------------------------------------------- */
+
+.grades {
+  position: sticky;
+  bottom: 0;
+  margin-top: 3rem;
+  padding: 0.9rem 0;
+  background: var(--bg);
+  border-top: 1px solid var(--rule);
+}
+
+.grade-buttons { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+
+button, .button {
+  font: 600 0.8rem/1 system-ui, sans-serif;
+  padding: 0.6rem 1rem;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-block;
+}
+button:hover, .button:hover { border-color: var(--accent); color: var(--accent); }
+
+.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+.primary:hover { opacity: 0.9; color: var(--bg); }
+
+button.danger:hover { border-color: var(--danger); color: var(--danger); }
+
+.priority {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 0.9rem;
+  font: 0.75rem/1 system-ui, sans-serif;
+  color: var(--muted);
+}
+.priority input { flex: 1; max-width: 12rem; }
+.priority .hint { font-style: italic; }
+
+@media (max-width: 30rem) {
+  .priority .hint { display: none; }
+}

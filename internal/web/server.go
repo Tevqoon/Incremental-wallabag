@@ -1,0 +1,245 @@
+// Package web serves the reading interface.
+//
+// Pages are rendered server-side with html/template; htmx handles partial
+// updates so that extracting a passage re-renders one element rather than the
+// page. The only hand-written JavaScript translates a text selection into the
+// block/offset coordinates the ir package addresses passages by.
+package web
+
+import (
+	"bytes"
+	"context"
+	"embed"
+	"fmt"
+	"html/template"
+	"log/slog"
+	"net/http"
+	"strconv"
+	"time"
+
+	"github.com/microcosm-cc/bluemonday"
+
+	"github.com/Tevqoon/increader/internal/ir"
+	"github.com/Tevqoon/increader/internal/source"
+	"github.com/Tevqoon/increader/internal/store"
+)
+
+//go:embed templates/*.html static/*
+var assets embed.FS
+
+// pageNames are the full-page templates. Each is parsed together with the
+// layout into its own template set, because they all define a "content"
+// block and parsing them into one set would make those definitions collide.
+var pageNames = []string{"queue.html", "reader.html"}
+
+// Server holds everything the handlers need. Dependencies arrive through this
+// struct rather than package-level variables, so a test can build a Server with
+// its own store and no global setup.
+type Server struct {
+	store      *store.Store
+	sources    map[string]source.Source
+	dailyLimit int
+	logger     *slog.Logger
+	policy     *bluemonday.Policy
+	pages      map[string]*template.Template
+}
+
+// Options configures a Server.
+type Options struct {
+	Store      *store.Store
+	Sources    map[string]source.Source
+	DailyLimit int
+	Logger     *slog.Logger
+}
+
+// New builds a Server and parses its templates.
+//
+// Template parsing happens once at startup rather than per request: a syntax
+// error should stop the process immediately, not surface as a 500 the first
+// time someone opens that page.
+func New(options Options) (*Server, error) {
+	server := &Server{
+		store:      options.Store,
+		sources:    options.Sources,
+		dailyLimit: options.DailyLimit,
+		logger:     options.Logger,
+		policy:     newPolicy(),
+		pages:      make(map[string]*template.Template),
+	}
+
+	for _, name := range pageNames {
+		page, err := template.New(name).
+			Funcs(templateFuncs).
+			ParseFS(assets, "templates/layout.html", "templates/"+name)
+		if err != nil {
+			return nil, fmt.Errorf("web: parse template %s: %w", name, err)
+		}
+		server.pages[name] = page
+	}
+
+	return server, nil
+}
+
+// Handler returns the router.
+//
+// Patterns use Go 1.22's method-and-path routing ("POST /elements/{id}/grade"),
+// which is why there is no third-party router in this project.
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.Handle("GET /static/", http.FileServerFS(assets))
+
+	mux.HandleFunc("GET /{$}", s.handleQueue)
+	mux.HandleFunc("GET /next", s.handleNext)
+	mux.HandleFunc("GET /read/{id}", s.handleRead)
+
+	mux.HandleFunc("POST /elements/{id}/extract", s.handleExtract)
+	mux.HandleFunc("POST /elements/{id}/cloze", s.handleCloze)
+	mux.HandleFunc("POST /elements/{id}/grade", s.handleGrade)
+	mux.HandleFunc("POST /elements/{id}/priority", s.handlePriority)
+	mux.HandleFunc("POST /elements/{id}/progress", s.handleProgress)
+
+	return mux
+}
+
+// today is the reader's current day.
+//
+// It reads time.Local rather than carrying its own *time.Location, and that is
+// deliberate. Due dates are stored as bare dates, so writing them and comparing
+// them must use the same zone; two components each holding their own idea of
+// "today" would disagree by a day whenever they were configured differently,
+// and the symptom — material appearing a day early or late — gives no hint of
+// the cause. main pins time.Local to the configured timezone at startup, which
+// makes the process's local zone the single answer to the question.
+func (s *Server) today() time.Time {
+	return ir.Day(time.Now())
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.DB().PingContext(r.Context()); err != nil {
+		http.Error(w, "database unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	fmt.Fprintln(w, "ok")
+}
+
+// render writes a full page.
+func (s *Server) render(w http.ResponseWriter, name string, data any) {
+	page, ok := s.pages[name]
+	if !ok {
+		s.fail(w, fmt.Errorf("web: no such page %q", name))
+		return
+	}
+
+	// Rendered into a buffer first. Executing straight into the ResponseWriter
+	// would commit a 200 and a half-written page before a template error could
+	// be reported, leaving the reader with a truncated article and no clue why.
+	var buffer bytes.Buffer
+	if err := page.ExecuteTemplate(&buffer, "layout", data); err != nil {
+		s.fail(w, fmt.Errorf("web: render %s: %w", name, err))
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	buffer.WriteTo(w)
+}
+
+// fail logs an error and returns a generic 500. The detail stays in the log:
+// error text can carry SQL and file paths, which do not belong in a response.
+func (s *Server) fail(w http.ResponseWriter, err error) {
+	s.logger.Error("request failed", "error", err)
+	http.Error(w, "internal error", http.StatusInternalServerError)
+}
+
+// elementID reads the {id} path parameter.
+func elementID(r *http.Request) (int64, error) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("web: invalid element id %q: %w", r.PathValue("id"), err)
+	}
+	return id, nil
+}
+
+// articleHTML returns the sanitised HTML for an element, fetching the article
+// body from its source the first time a document is opened.
+//
+// Lazy fetching is what makes syncing a large library cheap: the sync stores
+// metadata only, and the body arrives when someone actually reads it.
+func (s *Server) articleHTML(ctx context.Context, element store.Element) (string, error) {
+	if !element.IsRoot() {
+		return s.policy.Sanitize(element.ContentHTML), nil
+	}
+
+	document, err := s.store.DocumentByID(element.DocumentID)
+	if err != nil {
+		return "", err
+	}
+
+	if !document.HasContent {
+		provider, ok := s.sources[document.Source]
+		if !ok {
+			return "", fmt.Errorf("web: document %d came from source %q, which is not configured",
+				document.ID, document.Source)
+		}
+
+		body, err := provider.Content(ctx, document.ExternalID)
+		if err != nil {
+			return "", fmt.Errorf("web: fetch body of document %d: %w", document.ID, err)
+		}
+		if err := s.store.SetDocumentContent(document.ID, body); err != nil {
+			return "", err
+		}
+		document.ContentHTML = body
+	}
+
+	return s.policy.Sanitize(document.ContentHTML), nil
+}
+
+// parseArticle sanitises, parses and returns an element's article together with
+// the marks for extracts already taken from it.
+func (s *Server) parseArticle(ctx context.Context, element store.Element) (*ir.Article, []ir.Mark, error) {
+	sanitized, err := s.articleHTML(ctx, element)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	article, err := ir.ParseArticle(sanitized)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	children, err := s.store.ChildrenOf(element.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	marks := make([]ir.Mark, 0, len(children))
+	for _, child := range children {
+		if child.HasRange {
+			marks = append(marks, ir.Mark{Range: child.Range, ElementID: child.ID})
+		}
+	}
+
+	return article, marks, nil
+}
+
+// templateFuncs are the helpers available inside templates.
+var templateFuncs = template.FuncMap{
+	// percent renders a 0..1 priority as a whole number for display.
+	"percent": func(value float64) int { return int(value*100 + 0.5) },
+
+	"date": func(t time.Time) string {
+		if t.IsZero() {
+			return "—"
+		}
+		return t.Format("2 Jan 2006")
+	},
+
+	"days": func(interval float64) string {
+		if interval < 1 {
+			return "new"
+		}
+		return strconv.Itoa(int(interval+0.5)) + "d"
+	},
+}

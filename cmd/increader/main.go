@@ -30,6 +30,7 @@ import (
 	"github.com/Tevqoon/increader/internal/store"
 	"github.com/Tevqoon/increader/internal/syncer"
 	"github.com/Tevqoon/increader/internal/wallabag"
+	"github.com/Tevqoon/increader/internal/web"
 )
 
 func main() {
@@ -54,6 +55,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
+
+	// Pin the process's local timezone to the configured one, so that every
+	// date — in the scheduler, in SQL, in the templates — agrees on when today
+	// began without each of them having to be handed a *time.Location.
+	// Assigning time.Local is legitimate for an application (as opposed to a
+	// library) and must happen before anything computes a date.
+	time.Local = settings.Location
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
@@ -148,23 +156,26 @@ func serve(settings config.Config, logger *slog.Logger) error {
 
 	go syncer.New(db, logger, sources...).Run(ctx, settings.SyncInterval.Duration)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		if err := db.DB().PingContext(r.Context()); err != nil {
-			http.Error(w, "database unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		fmt.Fprintln(w, "ok")
+	// The reader looks documents up by their source name when it needs to fetch
+	// an article body on first open.
+	byName := make(map[string]source.Source, len(sources))
+	for _, provider := range sources {
+		byName[provider.Name()] = provider
+	}
+
+	reader, err := web.New(web.Options{
+		Store:      db,
+		Sources:    byName,
+		DailyLimit: settings.DailyLimit,
+		Logger:     logger,
 	})
-	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-		total, _ := db.CountElements("")
-		due, _ := db.CountDue(time.Now().In(settings.Location))
-		fmt.Fprintf(w, "increader\n%d elements, %d due today\n", total, due)
-	})
+	if err != nil {
+		return err
+	}
 
 	server := &http.Server{
 		Addr:              settings.Bind,
-		Handler:           mux,
+		Handler:           reader.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

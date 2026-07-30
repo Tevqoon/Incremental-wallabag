@@ -1,0 +1,547 @@
+package web
+
+import (
+	"context"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/Tevqoon/increader/internal/source"
+	"github.com/Tevqoon/increader/internal/store"
+)
+
+// fakeSource stands in for wallabag. Content records whether the lazy body
+// fetch actually happened.
+type fakeSource struct {
+	body         string
+	contentCalls int
+}
+
+func (f *fakeSource) Name() string { return "wallabag" }
+
+func (f *fakeSource) Fetch(context.Context, time.Time) ([]source.Document, error) {
+	return nil, nil
+}
+
+func (f *fakeSource) Content(context.Context, string) (string, error) {
+	f.contentCalls++
+	return f.body, nil
+}
+
+const articleBody = `<p>The quick brown fox.</p>` +
+	`<p>It jumps over the <a href="https://example.com/dog">lazy dog</a> daily.</p>` +
+	`<p>A third paragraph exists.</p>`
+
+// newTestServer builds a server over a fresh database holding one article.
+func newTestServer(t *testing.T, withContent bool) (*Server, *store.Store, *fakeSource) {
+	t.Helper()
+
+	db, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	document := source.Document{
+		ExternalID: "1",
+		Title:      "A test article",
+		URL:        "https://example.com/article",
+		Author:     "Someone",
+		UpdatedAt:  time.Now(),
+	}
+	if withContent {
+		document.ContentHTML = articleBody
+	}
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, time.Now()); err != nil {
+		t.Fatalf("seed document: %v", err)
+	}
+
+	provider := &fakeSource{body: articleBody}
+	server, err := New(Options{
+		Store:      db,
+		Sources:    map[string]source.Source{"wallabag": provider},
+		DailyLimit: 60,
+		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return server, db, provider
+}
+
+func get(t *testing.T, server *Server, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+	return recorder
+}
+
+func post(t *testing.T, server *Server, path string, form url.Values) *httptest.ResponseRecorder {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	return recorder
+}
+
+func TestQueueListsTheArticle(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	response := get(t, server, "/")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.Code)
+	}
+
+	body := response.Body.String()
+	if !strings.Contains(body, "A test article") {
+		t.Error("queue does not list the article")
+	}
+	if !strings.Contains(body, "1 due today") {
+		t.Errorf("queue does not report the article as due:\n%s", body)
+	}
+}
+
+// TestReaderFetchesBodyLazily covers the design that makes syncing cheap:
+// listings store metadata only, and the article body arrives on first open.
+func TestReaderFetchesBodyLazily(t *testing.T) {
+	server, db, provider := newTestServer(t, false)
+
+	document, err := db.DocumentByID(1)
+	if err != nil {
+		t.Fatalf("DocumentByID: %v", err)
+	}
+	if document.HasContent {
+		t.Fatal("test premise is wrong: the document should start without a body")
+	}
+
+	if response := get(t, server, "/read/1"); response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.Code)
+	}
+	if provider.contentCalls != 1 {
+		t.Errorf("source was asked for content %d times, want 1", provider.contentCalls)
+	}
+
+	// The body must be cached, or every page view would re-fetch the article.
+	if response := get(t, server, "/read/1"); response.Code != http.StatusOK {
+		t.Fatalf("second read: status = %d", response.Code)
+	}
+	if provider.contentCalls != 1 {
+		t.Errorf("source was asked again after caching (%d calls)", provider.contentCalls)
+	}
+}
+
+func TestReaderEmitsBlockIndices(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	body := get(t, server, "/read/1").Body.String()
+
+	for _, want := range []string{`data-b="0"`, `data-b="1"`, `data-b="2"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("reader output is missing %s — the browser cannot address blocks without it", want)
+		}
+	}
+}
+
+// TestExtractRoundTrip is the core workflow: highlight a passage, get an
+// extract that appears marked in the parent and enters the queue on its own.
+func TestExtractRoundTrip(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	// Warm the reader once so the article is parsed the same way the browser
+	// would have seen it.
+	get(t, server, "/read/1")
+
+	response := post(t, server, "/elements/1/extract", url.Values{
+		"start_block":  {"0"},
+		"start_offset": {"4"},
+		"end_block":    {"0"},
+		"end_offset":   {"15"},
+		"quote":        {"quick brown"},
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
+	}
+
+	// The returned fragment re-renders the article with the new highlight, so
+	// the reader's scroll position survives.
+	fragment := response.Body.String()
+	if !strings.Contains(fragment, `<mark class="extract"`) {
+		t.Errorf("returned fragment has no highlight:\n%s", fragment)
+	}
+	if !strings.Contains(fragment, "quick brown</mark>") {
+		t.Errorf("the highlight does not cover the extracted text:\n%s", fragment)
+	}
+
+	children, err := db.ChildrenOf(1)
+	if err != nil {
+		t.Fatalf("ChildrenOf: %v", err)
+	}
+	if len(children) != 1 {
+		t.Fatalf("got %d extracts, want 1", len(children))
+	}
+
+	extract := children[0]
+	if extract.Quote != "quick brown" {
+		t.Errorf("stored quote = %q, want %q", extract.Quote, "quick brown")
+	}
+	if extract.ContentHTML != "<p>quick brown</p>" {
+		t.Errorf("stored HTML = %q", extract.ContentHTML)
+	}
+	if !extract.HasRange {
+		t.Error("the extract did not record its position in the parent")
+	}
+
+	// A new extract is due immediately, so it can be refined in this session.
+	queue, err := db.Queue(time.Now(), 10)
+	if err != nil {
+		t.Fatalf("Queue: %v", err)
+	}
+	if len(queue) != 2 {
+		t.Errorf("queue holds %d elements, want the article plus its extract", len(queue))
+	}
+}
+
+func TestExtractPreservesLinks(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	// "It jumps over the lazy dog daily." — select "lazy dog", which is a link.
+	response := post(t, server, "/elements/1/extract", url.Values{
+		"start_block":  {"1"},
+		"start_offset": {"18"},
+		"end_block":    {"1"},
+		"end_offset":   {"26"},
+		"quote":        {"lazy dog"},
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+
+	children, err := db.ChildrenOf(1)
+	if err != nil {
+		t.Fatalf("ChildrenOf: %v", err)
+	}
+	if !strings.Contains(children[0].ContentHTML, `href="https://example.com/dog"`) {
+		t.Errorf("the extract lost its link: %q", children[0].ContentHTML)
+	}
+}
+
+// TestExtractRejectsStaleSelection is the guard against silent corruption: if
+// the browser's idea of the text disagrees with the server's, the offsets are
+// stale and saving would attach the extract to the wrong passage.
+func TestExtractRejectsStaleSelection(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	response := post(t, server, "/elements/1/extract", url.Values{
+		"start_block":  {"0"},
+		"start_offset": {"4"},
+		"end_block":    {"0"},
+		"end_offset":   {"15"},
+		// Offsets that no longer correspond to this text.
+		"quote": {"something else entirely"},
+	})
+
+	if response.Code != http.StatusConflict {
+		t.Errorf("status = %d, want 409", response.Code)
+	}
+
+	children, _ := db.ChildrenOf(1)
+	if len(children) != 0 {
+		t.Errorf("a mismatched selection was saved anyway (%d extracts)", len(children))
+	}
+}
+
+func TestExtractRejectsOutOfRangeSelection(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	response := post(t, server, "/elements/1/extract", url.Values{
+		"start_block":  {"99"},
+		"start_offset": {"0"},
+		"end_block":    {"99"},
+		"end_offset":   {"5"},
+		"quote":        {"anything"},
+	})
+	if response.Code != http.StatusConflict {
+		t.Errorf("status = %d, want 409", response.Code)
+	}
+}
+
+// TestClozePromotesExtractToItem covers the second stage: a refined extract
+// gains a deletion and becomes a card destined for Anki.
+func TestClozePromotesExtractToItem(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	post(t, server, "/elements/1/extract", url.Values{
+		"start_block":  {"0"},
+		"start_offset": {"4"},
+		"end_block":    {"0"},
+		"end_offset":   {"19"},
+		"quote":        {"quick brown fox"},
+	})
+
+	children, _ := db.ChildrenOf(1)
+	if len(children) != 1 {
+		t.Fatalf("expected one extract, got %d", len(children))
+	}
+	extractID := children[0].ID
+
+	if children[0].Kind != store.KindTopic {
+		t.Errorf("a fresh extract is kind %q, want %q", children[0].Kind, store.KindTopic)
+	}
+
+	// Delete "brown" from "quick brown fox".
+	response := post(t, server, "/elements/"+itoa(extractID)+"/cloze", url.Values{
+		"start": {"6"},
+		"end":   {"11"},
+	})
+	if response.Code != http.StatusSeeOther && response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+
+	updated, err := db.ElementByID(extractID)
+	if err != nil {
+		t.Fatalf("ElementByID: %v", err)
+	}
+	if updated.Kind != store.KindItem {
+		t.Errorf("kind = %q, want %q once it has a deletion", updated.Kind, store.KindItem)
+	}
+
+	clozes, err := db.ClozesOf(extractID)
+	if err != nil {
+		t.Fatalf("ClozesOf: %v", err)
+	}
+	if len(clozes) != 1 || clozes[0].Ordinal != 1 {
+		t.Fatalf("got %+v, want one deletion numbered c1", clozes)
+	}
+
+	// The reader shows the card as Anki will receive it.
+	body := get(t, server, "/read/"+itoa(extractID)).Body.String()
+	if !strings.Contains(body, "quick {{c1::brown}} fox") {
+		t.Errorf("reader does not preview the cloze:\n%s", body)
+	}
+}
+
+func TestClozeRejectedOnWholeArticle(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	response := post(t, server, "/elements/1/cloze", url.Values{
+		"start": {"0"},
+		"end":   {"5"},
+	})
+	if response.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 — clozes belong on extracts", response.Code)
+	}
+}
+
+func TestGradeReschedulesAndMovesOn(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	before, _ := db.ElementByID(1)
+	if before.Schedule.Reps != 0 {
+		t.Fatalf("test premise is wrong: reps = %d", before.Schedule.Reps)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/elements/1/grade",
+		strings.NewReader("grade=next"))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("HX-Request", "true")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+
+	// htmx must be told to navigate; a 303 would nest a whole page inside the
+	// element the button targeted.
+	if got := recorder.Header().Get("HX-Redirect"); got != "/next" {
+		t.Errorf("HX-Redirect = %q, want %q", got, "/next")
+	}
+
+	after, _ := db.ElementByID(1)
+	if after.Schedule.Reps != 1 {
+		t.Errorf("reps = %d, want 1", after.Schedule.Reps)
+	}
+	if after.Schedule.State != "reading" {
+		t.Errorf("state = %q, want %q", after.Schedule.State, "reading")
+	}
+	if after.Schedule.DueOn.IsZero() {
+		t.Error("grading did not set a due date")
+	}
+	// Having just been read, it must not still be due today.
+	if !after.Schedule.DueOn.After(time.Now()) {
+		t.Errorf("due %v, want a future date", after.Schedule.DueOn)
+	}
+}
+
+func TestGradeDismissRemovesFromQueue(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	post(t, server, "/elements/1/grade", url.Values{"grade": {"dismiss"}})
+
+	queue, err := db.Queue(time.Now(), 10)
+	if err != nil {
+		t.Fatalf("Queue: %v", err)
+	}
+	if len(queue) != 0 {
+		t.Errorf("dismissed material is still queued: %d elements", len(queue))
+	}
+}
+
+func TestGradeRejectsUnknownValue(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	response := post(t, server, "/elements/1/grade", url.Values{"grade": {"excellent"}})
+	if response.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", response.Code)
+	}
+}
+
+func TestPriorityUpdate(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if response := post(t, server, "/elements/1/priority", url.Values{
+		"priority": {"0.1"},
+	}); response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", response.Code)
+	}
+
+	element, _ := db.ElementByID(1)
+	if element.Schedule.Priority != 0.1 {
+		t.Errorf("priority = %v, want 0.1", element.Schedule.Priority)
+	}
+
+	// Out-of-range values must be rejected, not clamped silently.
+	for _, bad := range []string{"-0.5", "1.5", "high"} {
+		if response := post(t, server, "/elements/1/priority", url.Values{
+			"priority": {bad},
+		}); response.Code != http.StatusBadRequest {
+			t.Errorf("priority %q: status = %d, want 400", bad, response.Code)
+		}
+	}
+}
+
+func TestProgressRecordsReadPosition(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if response := post(t, server, "/elements/1/progress", url.Values{
+		"block": {"2"},
+	}); response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", response.Code)
+	}
+
+	element, _ := db.ElementByID(1)
+	if element.ReadBlock != 2 {
+		t.Errorf("read_block = %d, want 2", element.ReadBlock)
+	}
+
+	// The reader passes the position to the browser so it can resume there.
+	body := get(t, server, "/read/1").Body.String()
+	if !strings.Contains(body, `data-read-block="2"`) {
+		t.Error("the reader does not carry the resume position")
+	}
+}
+
+func TestNextRedirectsToMostImportant(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	// Add a second, more important article.
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
+		ExternalID: "2",
+		Title:      "More important",
+		UpdatedAt:  time.Now(),
+	}}, time.Now()); err != nil {
+		t.Fatalf("seed second document: %v", err)
+	}
+	if err := db.SetPriority(2, 0.1, time.Now()); err != nil {
+		t.Fatalf("SetPriority: %v", err)
+	}
+
+	response := get(t, server, "/next")
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", response.Code)
+	}
+	if got := response.Header().Get("Location"); got != "/read/2" {
+		t.Errorf("Location = %q, want /read/2 (the higher-priority element)", got)
+	}
+}
+
+func TestNextFallsBackToQueueWhenEmpty(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	post(t, server, "/elements/1/grade", url.Values{"grade": {"done"}})
+
+	response := get(t, server, "/next")
+	if got := response.Header().Get("Location"); got != "/" {
+		t.Errorf("Location = %q, want / when nothing is due", got)
+	}
+}
+
+func TestMissingElementIsNotFound(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	if response := get(t, server, "/read/999"); response.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", response.Code)
+	}
+}
+
+// TestSanitizerStripsScripts guards the reader against a hostile article. The
+// deployment being private makes this more important, not less: a script here
+// would run with full access to increader's own origin.
+func TestSanitizerStripsScripts(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	hostile := `<p>Before.</p>` +
+		`<script>alert(1)</script>` +
+		`<p onclick="steal()">Clickable.</p>` +
+		`<a href="javascript:alert(1)">bad link</a>` +
+		`<iframe src="https://evil.example"></iframe>`
+	if err := db.SetDocumentContent(1, hostile); err != nil {
+		t.Fatalf("SetDocumentContent: %v", err)
+	}
+
+	body := get(t, server, "/read/1").Body.String()
+
+	// Asserted against the hostile payload rather than against "<script",
+	// because the page's own layout legitimately loads htmx and app.js.
+	for _, forbidden := range []string{
+		"alert(1)", "steal()", "onclick", "javascript:", "<iframe", "evil.example",
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("rendered page contains %q:\n%s", forbidden, body)
+		}
+	}
+	if !strings.Contains(body, "Before.") {
+		t.Error("sanitising removed the legitimate text too")
+	}
+	if !strings.Contains(body, "Clickable.") {
+		t.Error("sanitising dropped an element instead of just its handler")
+	}
+}
+
+func TestStaticAssetsAreServed(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	for _, path := range []string{"/static/htmx.min.js", "/static/app.js", "/static/app.css"} {
+		response := get(t, server, path)
+		if response.Code != http.StatusOK {
+			t.Errorf("%s: status = %d, want 200", path, response.Code)
+		}
+		if response.Body.Len() == 0 {
+			t.Errorf("%s: served an empty body", path)
+		}
+	}
+}
+
+func TestHealthz(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	if response := get(t, server, "/healthz"); response.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", response.Code)
+	}
+}
+
+func itoa(id int64) string { return strconv.FormatInt(id, 10) }

@@ -1,0 +1,93 @@
+{{define "content"}}
+<article class="reader" data-element="{{.Element.ID}}" data-read-block="{{.Element.ReadBlock}}">
+
+  <header class="reader-head">
+    <h1>{{.Title}}</h1>
+    <p class="meta">
+      {{if .Element.IsRoot}}
+        <span class="badge">article</span>
+      {{else}}
+        <span class="badge">extract</span>
+        <a href="/read/{{.Element.ParentID}}">↑ parent</a>
+      {{end}}
+      {{if .Document.URL}}
+        <a href="{{.Document.URL}}" rel="noopener noreferrer" target="_blank">source ↗</a>
+      {{end}}
+      {{if .Document.Author}}<span>{{.Document.Author}}</span>{{end}}
+      <span title="repetitions">×{{.Element.Schedule.Reps}}</span>
+      <span title="current interval">{{days .Element.Schedule.IntervalDays}}</span>
+      <span>{{.Remaining}} due</span>
+    </p>
+  </header>
+
+  <!-- The selection toolbar is positioned next to whatever text is selected. -->
+  <div id="selection-toolbar" class="toolbar" hidden>
+    <button type="button"
+            hx-post="/elements/{{.Element.ID}}/extract"
+            hx-vals="js:selectionPayload()"
+            hx-target="#article"
+            hx-swap="outerHTML"
+            hx-on::after-request="clearSelection()">
+      Extract
+    </button>
+    {{if not .Element.IsRoot}}
+      <button type="button"
+              hx-post="/elements/{{.Element.ID}}/cloze"
+              hx-vals="js:clozePayload()"
+              hx-on::after-request="clearSelection()">
+        Cloze
+      </button>
+    {{end}}
+  </div>
+
+  <div id="article" data-element="{{.Element.ID}}">{{.ArticleHTML}}</div>
+
+  {{if .ClozePreview}}
+    <section class="clozes">
+      <h2>Card</h2>
+      <p class="meta">{{len .Clozes}} deletion(s); exported to Anki as a Cloze note.</p>
+      <pre class="cloze-preview">{{.ClozePreview}}</pre>
+    </section>
+  {{end}}
+
+  {{if .Extracts}}
+    <section class="extracts">
+      <h2>Extracts from this</h2>
+      <ul>
+        {{range .Extracts}}
+          <li>
+            <a href="/read/{{.ID}}">{{.Title}}</a>
+            {{if eq .Kind "item"}}<span class="badge badge-item">cloze</span>{{end}}
+          </li>
+        {{end}}
+      </ul>
+    </section>
+  {{end}}
+
+  <footer class="grades">
+    <div class="grade-buttons">
+      <button hx-post="/elements/{{.Element.ID}}/grade" hx-vals='{"grade":"next"}'
+              title="Read a slice; come back on schedule">Next</button>
+      <button hx-post="/elements/{{.Element.ID}}/grade" hx-vals='{"grade":"sooner"}'
+              title="More interesting than expected; bring it back sooner">Sooner</button>
+      <button hx-post="/elements/{{.Element.ID}}/grade" hx-vals='{"grade":"later"}'
+              title="Not now; push it further out each time">Later</button>
+      <button hx-post="/elements/{{.Element.ID}}/grade" hx-vals='{"grade":"done"}'
+              title="Finished with this">Done</button>
+      <button class="danger" hx-post="/elements/{{.Element.ID}}/grade" hx-vals='{"grade":"dismiss"}'
+              title="Abandon unread">Dismiss</button>
+    </div>
+
+    <label class="priority">
+      Priority
+      <input type="range" min="0" max="100" step="5"
+             value="{{percent .Element.Schedule.Priority}}"
+             hx-post="/elements/{{.Element.ID}}/priority"
+             hx-trigger="change"
+             hx-vals="js:{priority: event.target.value / 100}">
+      <output>{{percent .Element.Schedule.Priority}}</output>
+      <span class="hint">lower is more important</span>
+    </label>
+  </footer>
+</article>
+{{end}}
