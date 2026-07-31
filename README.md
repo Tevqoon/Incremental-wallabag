@@ -73,7 +73,13 @@ no image rebuild. `config.local.yaml` is gitignored.
 |---|---|
 | **Queue** | What is due today, most important first. Articles and extracts interleave by priority. |
 | **Read next** | Jumps straight to the most important due element. |
-| **Library** | Everything synced, searchable — for finding a specific article rather than reading the queue. |
+| **Extracts** | Everything harvested, filterable by origin — your own extracts and the ones imported from wallabag highlights. |
+| **Library** | Everything synced, searchable — for finding a specific article, or putting an archived one back in the queue. |
+
+Articles you have **archived in wallabag do not enter the queue**: they stay in
+the Library, keep their extracts, and can be put back with one click. Their
+highlights are still imported, which matters because in a real library that is
+where nearly all of them are.
 
 In the reader, **select any text** to raise a toolbar:
 
@@ -89,17 +95,21 @@ there is nothing to recall, you are deciding what deserves attention next:
 
 | | |
 |---|---|
-| **Next** | Read a slice; come back on schedule. Interval × A-Factor. |
+| **Pause** | Stop here. Records the read point, reschedules by interval × A-Factor, moves on. The everyday action. |
 | **Sooner** | More interesting than expected. Halves the interval and slows future growth. |
 | **Later** | Not now. Pushes it out, and *compounds* — repeatedly postponing something makes it recede faster and faster, so uninteresting material drains out of the queue without ever being explicitly abandoned. |
+| **Suspend** | Park it indefinitely. Keeps the interval, A-Factor and read point, so unsuspending resumes rather than restarts. |
 | **Done** / **Dismiss** | Finished with it / abandoning it unread. |
+
+Pausing marks the **read point** — the boundary between what you have read and
+what you have not — and reopening the article scrolls there and shows it.
 
 **Priority** (0 = most important) caps how far an interval can grow: a week at
 the top of the scale, a year at the bottom. Important material can never drift
 out of sight.
 
 Highlights you already made in wallabag's own reader are imported as extracts
-the first time increader opens that article, located by their text.
+during sync, and located in the article text the first time you open it.
 
 ## Development
 
@@ -139,8 +149,13 @@ and every date would otherwise silently be UTC.
 
 ## Status
 
-Working: wallabag sync, the reading queue, extracts, clozes, scheduling,
-annotation import, library search.
+Working: wallabag sync including archive state, the reading queue, extracts and
+clozes, scheduling with read points and suspension, annotation import, library
+and extract browsing.
+
+`increader sync -full` ignores the watermark and re-reads everything. Needed
+after a release that starts storing a field it did not before, since incremental
+sync would otherwise never see it on entries that have not changed.
 
 Not yet built: the Anki and org-roam exporters. The `exports` ledger they need
 already exists in the schema — idempotent re-export requires that history to
