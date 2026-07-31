@@ -1,6 +1,12 @@
 # Build stage. The full Go toolchain lives here and is discarded afterwards.
 FROM golang:1.26-alpine AS build
 
+# The Go toolchain stamps the commit into the binary by shelling out to git,
+# and the alpine image has no git binary. Without this the stamp is skipped
+# *silently* — the build succeeds and produces a binary that cannot say which
+# revision it is, which is exactly the confusion the stamp exists to prevent.
+RUN apk add --no-cache git
+
 WORKDIR /src
 
 # Copy the module files first and download dependencies as their own layer.
@@ -16,9 +22,13 @@ COPY . .
 # rather than the usual cgo binding, and it is what lets the final image below
 # contain nothing but the binary.
 #
-#   -trimpath   strips local filesystem paths from the binary
+#   -trimpath       strips local filesystem paths from the binary
 #   -ldflags -s -w  drops the symbol table and DWARF data, ~30% smaller
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /increader ./cmd/increader
+#   -buildvcs=true  stamps the commit — and *fails* if it cannot, rather than
+#                   the default "auto", which quietly omits it. An image that
+#                   cannot identify itself is how a stale container goes
+#                   unnoticed, so this is worth failing the build over.
+RUN CGO_ENABLED=0 go build -trimpath -buildvcs=true -ldflags="-s -w" -o /increader ./cmd/increader
 
 # Runtime stage. distroless/static has no shell, no package manager and no libc:
 # only CA certificates (needed for HTTPS to wallabag.it), /etc/passwd and a
