@@ -182,7 +182,7 @@ func TestRenderMarksExtracts(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			article := mustParse(t, test.html)
-			if got := article.Render(test.marks); got != test.want {
+			if got := article.Render(RenderOptions{Marks: test.marks, ReadPoint: NoReadPoint}); got != test.want {
 				t.Errorf("got  %s\nwant %s", got, test.want)
 			}
 		})
@@ -195,9 +195,12 @@ func TestRenderMarksExtracts(t *testing.T) {
 func TestRenderMergesOverlappingMarks(t *testing.T) {
 	article := mustParse(t, `<p>The quick brown fox jumps.</p>`)
 
-	got := article.Render([]Mark{
-		{Range: Range{StartBlock: 0, StartOffset: 4, EndBlock: 0, EndOffset: 15}, ElementID: 1},
-		{Range: Range{StartBlock: 0, StartOffset: 10, EndBlock: 0, EndOffset: 19}, ElementID: 2},
+	got := article.Render(RenderOptions{
+		ReadPoint: NoReadPoint,
+		Marks: []Mark{
+			{Range: Range{StartBlock: 0, StartOffset: 4, EndBlock: 0, EndOffset: 15}, ElementID: 1},
+			{Range: Range{StartBlock: 0, StartOffset: 10, EndBlock: 0, EndOffset: 19}, ElementID: 2},
+		},
 	})
 
 	want := `<p data-b="0">The <mark class="extract" data-element="1">quick brown fox</mark> jumps.</p>`
@@ -230,7 +233,10 @@ func TestRenderAndHTMLAgreeOnOffsets(t *testing.T) {
 
 		// The text inside the <mark> elements of a render must reconstruct the
 		// same passage Text reports.
-		rendered := article.Render([]Mark{{Range: r, ElementID: 1}})
+		rendered := article.Render(RenderOptions{
+			Marks:     []Mark{{Range: r, ElementID: 1}},
+			ReadPoint: NoReadPoint,
+		})
 		gotText := textInsideMarks(t, rendered)
 
 		if NormalizeSpace(gotText) != NormalizeSpace(wantText) {
@@ -292,4 +298,67 @@ func hasAttr(node *html.Node, name string) bool {
 		}
 	}
 	return false
+}
+
+// TestRenderMarksTheReadPoint covers the visible read point. SuperMemo shows
+// where you stopped on return rather than only scrolling there, and seeing the
+// boundary between read and unread is most of its value.
+func TestRenderMarksTheReadPoint(t *testing.T) {
+	article := mustParse(t, `<p>First.</p><p>Second.</p><p>Third.</p>`)
+
+	got := article.Render(RenderOptions{ReadPoint: 1})
+
+	want := `<p data-b="0">First.</p>` +
+		`<p class="read-point" data-b="1">Second.</p>` +
+		`<p data-b="2">Third.</p>`
+	if got != want {
+		t.Errorf("got  %s\nwant %s", got, want)
+	}
+}
+
+// TestReadPointZeroIsNotMarked keeps an unread article clean: block 0 is where
+// everything starts, so marking it would put a "read to here" flag on every
+// article that has never been opened.
+func TestReadPointZeroIsNotMarked(t *testing.T) {
+	article := mustParse(t, `<p>First.</p><p>Second.</p>`)
+
+	for _, readPoint := range []int{0, NoReadPoint} {
+		got := article.Render(RenderOptions{ReadPoint: readPoint})
+		if strings.Contains(got, "read-point") {
+			t.Errorf("ReadPoint %d marked a block: %s", readPoint, got)
+		}
+	}
+}
+
+// TestReadPointCombinesWithMarks checks the two annotations coexist: a block can
+// be both where reading stopped and where an extract was taken.
+func TestReadPointCombinesWithMarks(t *testing.T) {
+	article := mustParse(t, `<p>First.</p><p>Second passage.</p>`)
+
+	got := article.Render(RenderOptions{
+		ReadPoint: 1,
+		Marks: []Mark{{
+			Range:     Range{StartBlock: 1, StartOffset: 0, EndBlock: 1, EndOffset: 6},
+			ElementID: 4,
+		}},
+	})
+
+	if !strings.Contains(got, `class="read-point" data-b="1"`) {
+		t.Errorf("read point lost when the block also carries a mark:\n%s", got)
+	}
+	if !strings.Contains(got, `<mark class="extract" data-element="4">Second</mark>`) {
+		t.Errorf("mark lost when the block is also the read point:\n%s", got)
+	}
+}
+
+// TestReadPointOnAListItemKeepsBothClasses guards the class concatenation: a
+// list item already carries a class, and the read point must not replace it.
+func TestReadPointOnAListItemKeepsBothClasses(t *testing.T) {
+	article := mustParse(t, `<ul><li>One</li><li>Two</li></ul>`)
+
+	got := article.Render(RenderOptions{ReadPoint: 1})
+
+	if !strings.Contains(got, `class="list-item read-point"`) {
+		t.Errorf("classes were not combined:\n%s", got)
+	}
 }

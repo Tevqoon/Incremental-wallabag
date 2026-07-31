@@ -23,6 +23,8 @@ type Document struct {
 	Language        string
 	ContentHTML     string
 	HasContent      bool
+	IsArchived      bool
+	IsStarred       bool
 	PublishedAt     time.Time
 	SourceUpdatedAt time.Time
 	ImportedAt      time.Time
@@ -32,6 +34,13 @@ type Document struct {
 type UpsertResult struct {
 	Created int
 	Updated int
+
+	// Suspended counts articles that wallabag archived since the last sync and
+	// which therefore left the reading queue.
+	Suspended int
+
+	// Highlights counts provider annotations turned into extracts.
+	Highlights int
 
 	// Watermark is the newest SourceUpdatedAt seen, which becomes the `since`
 	// value for the next sync.
@@ -64,19 +73,29 @@ func (s *Store) UpsertDocuments(sourceName string, documents []source.Document, 
 			updatedAt = now
 		}
 
-		var existingID int64
+		var (
+			existingID  int64
+			wasArchived bool
+		)
 		err := transaction.QueryRow(
-			`SELECT id FROM documents WHERE source = ? AND external_id = ?`,
+			`SELECT id, is_archived FROM documents WHERE source = ? AND external_id = ?`,
 			sourceName, document.ExternalID,
-		).Scan(&existingID)
+		).Scan(&existingID, &wasArchived)
+
+		var documentID, rootID int64
 
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
-			id, err := insertDocument(transaction, sourceName, document, updatedAt, now)
+			documentID, err = insertDocument(transaction, sourceName, document, updatedAt, now)
 			if err != nil {
 				return result, err
 			}
-			if err := insertRootTopic(transaction, id, document.Title, now); err != nil {
+			// An article already archived in wallabag has been read; it belongs
+			// in the library, not the reading queue. Creating its root topic
+			// suspended reuses the same mechanism as a manual suspension, so
+			// "queue this" is just an unsuspend rather than a second concept.
+			rootID, err = insertRootTopic(transaction, documentID, document.Title, document.IsArchived, now)
+			if err != nil {
 				return result, err
 			}
 			result.Created++
@@ -86,11 +105,33 @@ func (s *Store) UpsertDocuments(sourceName string, documents []source.Document, 
 				sourceName, document.ExternalID, err)
 
 		default:
+			documentID = existingID
 			if err := updateDocument(transaction, existingID, document, updatedAt); err != nil {
 				return result, err
 			}
+			rootID, err = rootTopicID(transaction, existingID)
+			if err != nil {
+				return result, err
+			}
 			result.Updated++
+
+			// Archiving in wallabag is an explicit "I am finished with this",
+			// so honour it here too. Only on the transition, and never in
+			// reverse: unsuspending is the reader's decision and a later sync
+			// must not undo it, or the app ends up arguing with them.
+			if document.IsArchived && !wasArchived {
+				if err := suspendIfActive(transaction, rootID, now); err != nil {
+					return result, err
+				}
+				result.Suspended++
+			}
 		}
+
+		imported, err := insertHighlights(transaction, documentID, rootID, document.Highlights, now)
+		if err != nil {
+			return result, err
+		}
+		result.Highlights += imported
 
 		if updatedAt.After(result.Watermark) {
 			result.Watermark = updatedAt
@@ -109,10 +150,12 @@ func insertDocument(tx *sql.Tx, sourceName string, document source.Document, upd
 	outcome, err := tx.Exec(`
 		INSERT INTO documents
 		    (source, external_id, url, title, author, language,
-		     content_html, has_content, published_at, source_updated_at, imported_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		     content_html, has_content, is_archived, is_starred,
+		     published_at, source_updated_at, imported_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sourceName, document.ExternalID, document.URL, document.Title,
 		document.Author, document.Language, document.ContentHTML, hasContent,
+		document.IsArchived, document.IsStarred,
 		formatTime(document.PublishedAt), formatTime(updatedAt), formatTime(now),
 	)
 	if err != nil {
@@ -134,11 +177,13 @@ func updateDocument(tx *sql.Tx, id int64, document source.Document, updatedAt ti
 	_, err := tx.Exec(`
 		UPDATE documents SET
 		    url = ?, title = ?, author = ?, language = ?,
+		    is_archived = ?, is_starred = ?,
 		    published_at = ?, source_updated_at = ?,
 		    content_html = CASE WHEN ? <> '' THEN ? ELSE content_html END,
 		    has_content  = CASE WHEN ? <> '' THEN 1  ELSE has_content  END
 		WHERE id = ?`,
 		document.URL, document.Title, document.Author, document.Language,
+		document.IsArchived, document.IsStarred,
 		formatTime(document.PublishedAt), formatTime(updatedAt),
 		document.ContentHTML, document.ContentHTML,
 		document.ContentHTML,
@@ -172,12 +217,14 @@ func (s *Store) DocumentByID(id int64) (Document, error) {
 	)
 	err := s.db.QueryRow(`
 		SELECT id, source, external_id, url, title, author, language,
-		       content_html, has_content, published_at, source_updated_at, imported_at
+		       content_html, has_content, is_archived, is_starred,
+		       published_at, source_updated_at, imported_at
 		FROM documents WHERE id = ?`, id,
 	).Scan(
 		&document.ID, &document.Source, &document.ExternalID, &document.URL,
 		&document.Title, &document.Author, &document.Language,
 		&document.ContentHTML, &document.HasContent,
+		&document.IsArchived, &document.IsStarred,
 		&published, &updated, &imported,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -224,7 +271,8 @@ func (s *Store) SearchDocuments(query string, limit int) ([]LibraryEntry, error)
 
 	rows, err := s.db.Query(`
 		SELECT d.id, d.source, d.external_id, d.url, d.title, d.author,
-		       d.language, d.has_content, d.published_at, d.source_updated_at,
+		       d.language, d.has_content, d.is_archived, d.is_starred,
+		       d.published_at, d.source_updated_at,
 		       root.id, root.state,
 		       (SELECT COUNT(*) FROM elements child WHERE child.parent_id = root.id)
 		FROM documents d
@@ -248,7 +296,8 @@ func (s *Store) SearchDocuments(query string, limit int) ([]LibraryEntry, error)
 		)
 		err := rows.Scan(
 			&entry.ID, &entry.Source, &entry.ExternalID, &entry.URL, &entry.Title,
-			&entry.Author, &entry.Language, &entry.HasContent, &published, &updated,
+			&entry.Author, &entry.Language, &entry.HasContent,
+			&entry.IsArchived, &entry.IsStarred, &published, &updated,
 			&entry.RootElementID, &entry.State, &entry.ExtractCount,
 		)
 		if err != nil {

@@ -32,6 +32,13 @@ type ListOptions struct {
 
 	// PerPage overrides the page size. Zero means defaultPerPage.
 	PerPage int
+
+	// Annotated restricts results to entries that carry annotations.
+	//
+	// wallabag added this filter in 2.6; on older servers the parameter is
+	// ignored and the listing comes back unfiltered, which is why callers must
+	// check SupportsAnnotationFilter rather than relying on it silently.
+	Annotated bool
 }
 
 // AllEntries walks every page of a listing and returns the entries.
@@ -60,6 +67,9 @@ func (c *Client) AllEntries(ctx context.Context, opts ListOptions) ([]Entry, err
 		}
 		if !opts.Since.IsZero() {
 			query.Set("since", strconv.FormatInt(opts.Since.Unix(), 10))
+		}
+		if opts.Annotated {
+			query.Set("annotations", "1")
 		}
 
 		var result entryPage

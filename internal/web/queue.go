@@ -68,6 +68,12 @@ func (s *Server) handleNext(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleGrade applies a grade and moves on.
+//
+// Every grade first records the read point, because every one of them is a
+// decision to stop reading here. Taking it from the request rather than from
+// the background scroll tracker matters: the tracker is throttled to a second,
+// and the moment the reader presses a button is exactly when it is most likely
+// to be stale.
 func (s *Server) handleGrade(w http.ResponseWriter, r *http.Request) {
 	id, err := elementID(r)
 	if err != nil {
@@ -87,6 +93,13 @@ func (s *Server) handleGrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if block, err := strconv.Atoi(r.FormValue("block")); err == nil && block >= 0 {
+		if err := s.store.SetReadBlock(id, block); err != nil {
+			s.fail(w, err)
+			return
+		}
+	}
+
 	// The whole scheduling decision is one pure function call. Everything
 	// stateful — reading the row, writing it back — stays here.
 	updated := ir.Next(element.Schedule, grade, s.today())
@@ -97,6 +110,26 @@ func (s *Server) handleGrade(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.redirect(w, r, "/next")
+}
+
+// handleUnsuspend returns a suspended element to the queue.
+//
+// The counterpart to suspending, and also how an archived article is pulled
+// back in for re-reading — archived material arrives suspended, so there is
+// only one mechanism to understand.
+func (s *Server) handleUnsuspend(w http.ResponseWriter, r *http.Request) {
+	id, err := elementID(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := s.store.Unsuspend(id, s.today(), time.Now()); err != nil {
+		s.fail(w, err)
+		return
+	}
+
+	s.redirect(w, r, "/read/"+strconv.FormatInt(id, 10))
 }
 
 // handlePriority changes how urgently an element competes for attention.
@@ -151,8 +184,8 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 // parseGrade maps a form value onto a grade.
 func parseGrade(value string) (ir.Grade, bool) {
 	switch value {
-	case "next":
-		return ir.GradeNext, true
+	case "pause":
+		return ir.GradePause, true
 	case "later":
 		return ir.GradeLater, true
 	case "sooner":
@@ -161,6 +194,8 @@ func parseGrade(value string) (ir.Grade, bool) {
 		return ir.GradeDone, true
 	case "dismiss":
 		return ir.GradeDismiss, true
+	case "suspend":
+		return ir.GradeSuspend, true
 	default:
 		return 0, false
 	}
@@ -216,5 +251,63 @@ func (s *Server) handleLibrary(w http.ResponseWriter, r *http.Request) {
 		Title:   "Library",
 		Query:   query,
 		Entries: entries,
+	})
+}
+
+// extractsData is what the extracts browse page renders.
+type extractsData struct {
+	Title      string
+	Extracts   []store.ExtractRow
+	Query      string
+	Origin     string
+	WithClozes bool
+	Imported   int
+	Manual     int
+}
+
+// handleExtracts lists everything harvested, independently of what is due.
+//
+// Separate from the queue on purpose. The queue interleaves articles and
+// extracts by priority — that mixing is much of what makes incremental reading
+// work — so filtering it by kind would undermine the ordering it exists to
+// provide. This page answers the other question: what have I pulled out, and
+// what still needs turning into cards.
+func (s *Server) handleExtracts(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+
+	filter := store.ExtractFilter{
+		Origin:     query.Get("origin"),
+		WithClozes: query.Get("clozes") == "1",
+		Query:      strings.TrimSpace(query.Get("q")),
+	}
+	if filter.Origin != "" && filter.Origin != store.OriginImport && filter.Origin != store.OriginManual {
+		http.Error(w, "unknown origin filter", http.StatusBadRequest)
+		return
+	}
+
+	extracts, err := s.store.Extracts(filter)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	imported, err := s.store.CountExtracts(store.OriginImport)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	manual, err := s.store.CountExtracts(store.OriginManual)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+
+	s.render(w, "extracts.html", extractsData{
+		Title:      "Extracts",
+		Extracts:   extracts,
+		Query:      filter.Query,
+		Origin:     filter.Origin,
+		WithClozes: filter.WithClozes,
+		Imported:   imported,
+		Manual:     manual,
 	})
 }

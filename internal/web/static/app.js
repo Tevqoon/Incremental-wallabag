@@ -129,16 +129,26 @@
     return 0;
   }
 
+  // Exposed for the grading buttons, which send the read point with the grade.
+  // Reading it at click time rather than trusting the throttled scroll tracker
+  // matters: the tracker can be a second behind, and pressing a grade button is
+  // exactly the moment that staleness would be recorded as your place.
+  window.topBlock = topVisibleBlock;
+
   function trackReadingPosition() {
     const reader = document.querySelector(".reader");
     if (!reader) return;
 
     // Resume where reading stopped. Doing this before wiring up the scroll
     // listener avoids recording the jump itself as progress.
+    //
+    // The server has already marked that block with .read-point, so the reader
+    // sees the boundary between what they have read and what they have not,
+    // rather than just arriving mysteriously partway down.
     const resumeAt = parseInt(reader.dataset.readBlock, 10);
     if (resumeAt > 0) {
       const target = document.querySelector(`#article [data-b="${resumeAt}"]`);
-      if (target) target.scrollIntoView();
+      if (target) target.scrollIntoView({ block: "start" });
     }
 
     const elementID = reader.dataset.element;

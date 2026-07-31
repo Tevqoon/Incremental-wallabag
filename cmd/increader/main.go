@@ -67,6 +67,7 @@ func run() error {
 
 	flags := flag.NewFlagSet("increader", flag.ExitOnError)
 	configPath := flags.String("config", "config.yaml", "path to the configuration file")
+	full := flags.Bool("full", false, "sync: ignore the watermark and re-read every entry")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -97,7 +98,7 @@ func run() error {
 	case "healthcheck":
 		return healthcheck(settings)
 	case "sync":
-		return runSync(settings, logger)
+		return runSync(settings, logger, *full)
 	case "serve":
 		return serve(settings, logger)
 	default:
@@ -137,12 +138,24 @@ func openStore(settings config.Config, logger *slog.Logger) (*store.Store, []sou
 	return db, sources, nil
 }
 
-func runSync(settings config.Config, logger *slog.Logger) error {
+func runSync(settings config.Config, logger *slog.Logger, full bool) error {
 	db, sources, err := openStore(settings, logger)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
+
+	// A full sync is the repair path: it re-reads state that only arrives with
+	// a listing — archive flags, annotations — for entries that have not
+	// changed since the last run and would otherwise be skipped entirely.
+	if full {
+		for _, provider := range sources {
+			if err := db.ResetWatermark(provider.Name()); err != nil {
+				return err
+			}
+		}
+		logger.Info("watermark cleared; re-reading every entry")
+	}
 
 	// A one-shot sync should not hang forever on an unresponsive server, but
 	// a first full-library sync is genuinely slow, so the budget is generous.
@@ -151,8 +164,9 @@ func runSync(settings config.Config, logger *slog.Logger) error {
 
 	results, err := syncer.New(db, logger, sources...).SyncAll(ctx)
 	for _, result := range results {
-		fmt.Printf("%s: %d fetched, %d new, %d updated\n",
-			result.Source, result.Fetched, result.Created, result.Updated)
+		fmt.Printf("%s: %d fetched, %d new, %d updated, %d archived, %d highlights\n",
+			result.Source, result.Fetched, result.Created, result.Updated,
+			result.Suspended, result.Highlights)
 	}
 	if err != nil {
 		return err

@@ -64,3 +64,17 @@ func (s *Store) SaveSyncState(state SyncState) error {
 	}
 	return nil
 }
+
+// ResetWatermark clears a source's bookmark so the next sync re-reads
+// everything.
+//
+// Needed whenever increader starts caring about a field it did not store
+// before: incremental sync only asks for entries changed since the watermark,
+// so a library that is already up to date would never see the new field at all.
+func (s *Store) ResetWatermark(sourceName string) error {
+	_, err := s.db.Exec(`UPDATE sync_state SET watermark = NULL WHERE source = ?`, sourceName)
+	if err != nil {
+		return fmt.Errorf("store: reset watermark for %s: %w", sourceName, err)
+	}
+	return nil
+}

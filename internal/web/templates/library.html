@@ -15,6 +15,11 @@
           <a class="item-title" href="/read/{{.RootElementID}}">{{.Title}}</a>
           <div class="item-meta">
             <span class="badge">{{.State}}</span>
+            {{if .IsArchived}}<span class="badge">archived</span>{{end}}
+            {{if .IsStarred}}<span class="badge badge-item">starred</span>{{end}}
+            {{if eq .State "suspended"}}
+              <button class="tiny" hx-post="/elements/{{.RootElementID}}/unsuspend">queue it</button>
+            {{end}}
             {{if .Author}}<span>{{.Author}}</span>{{end}}
             {{if .ExtractCount}}
               <span>{{.ExtractCount}} extract{{if ne .ExtractCount 1}}s{{end}}</span>

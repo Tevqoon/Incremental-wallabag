@@ -37,6 +37,13 @@ func (s *Source) Name() string { return "wallabag" }
 // Bodies are deliberately left out: pulling full HTML for a whole library on
 // every sync is slow and mostly wasted, since only articles that reach the top
 // of the reading queue are ever read. Content fills them in on demand.
+//
+// Annotations, however, are pulled here. A metadata listing carries them even
+// though it omits content, so the whole library's highlights arrive in one
+// extra pass over the annotated entries — against a real library that is 151
+// entries rather than 1231, and it means highlights on archived articles are
+// imported at all. Waiting to import them until an article is opened would
+// strand every one of them, because archived articles are never opened.
 func (s *Source) Fetch(ctx context.Context, since time.Time) ([]source.Document, error) {
 	entries, err := s.client.AllEntries(ctx, ListOptions{
 		Since:  since,
@@ -50,7 +57,52 @@ func (s *Source) Fetch(ctx context.Context, since time.Time) ([]source.Document,
 	for _, entry := range entries {
 		documents = append(documents, toDocument(entry))
 	}
+
+	if err := s.mergeAnnotations(ctx, since, documents); err != nil {
+		return nil, err
+	}
 	return documents, nil
+}
+
+// mergeAnnotations runs the annotated-only listing and copies the highlights it
+// finds onto the matching documents.
+//
+// On a server too old for the filter it does nothing, leaving the lazy
+// per-article import to handle highlights as before. Silently sending the
+// parameter anyway would be worse than skipping: an old server ignores unknown
+// query parameters, so the "annotated" pass would return the entire library.
+func (s *Source) mergeAnnotations(ctx context.Context, since time.Time, documents []source.Document) error {
+	if !s.client.SupportsAnnotationFilter(ctx) {
+		return nil
+	}
+
+	annotated, err := s.client.AllEntries(ctx, ListOptions{
+		Since:     since,
+		Detail:    DetailMetadata,
+		Annotated: true,
+	})
+	if err != nil {
+		return err
+	}
+
+	// Index the documents so the merge is one pass rather than a nested scan;
+	// at library scale the difference is real.
+	byExternalID := make(map[string]int, len(documents))
+	for index, document := range documents {
+		byExternalID[document.ExternalID] = index
+	}
+
+	for _, entry := range annotated {
+		index, found := byExternalID[strconv.Itoa(entry.ID)]
+		if !found {
+			// Updated between the two listings, so it missed the first pass.
+			// The next sync picks it up; skipping beats attaching highlights
+			// to a document that is not being imported.
+			continue
+		}
+		documents[index].Highlights = toDocument(entry).Highlights
+	}
+	return nil
 }
 
 // Content fetches one article's HTML body.
@@ -115,6 +167,9 @@ func toDocument(entry Entry) source.Document {
 		Language:    entry.Language,
 		ContentHTML: entry.Content,
 		Highlights:  highlights,
+		// The API reports these as ints rather than bools.
+		IsArchived:  entry.IsArchived != 0,
+		IsStarred:   entry.IsStarred != 0,
 		PublishedAt: entry.PublishedAt.Time,
 		UpdatedAt:   entry.UpdatedAt.Time,
 	}

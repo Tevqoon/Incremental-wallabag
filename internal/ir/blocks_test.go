@@ -271,7 +271,7 @@ func TestParseArticleHandlesEmptyInput(t *testing.T) {
 			t.Errorf("ParseArticle(%q) produced %d blocks, want 0", source, article.Len())
 		}
 		// Rendering an empty article must not panic.
-		if out := article.Render(nil); strings.TrimSpace(out) != "" {
+		if out := article.Render(RenderOptions{ReadPoint: NoReadPoint}); strings.TrimSpace(out) != "" {
 			t.Errorf("Render of an empty article = %q, want empty", out)
 		}
 	}

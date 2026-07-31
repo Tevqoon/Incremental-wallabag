@@ -31,7 +31,7 @@ var assets embed.FS
 // pageNames are the full-page templates. Each is parsed together with the
 // layout into its own template set, because they all define a "content"
 // block and parsing them into one set would make those definitions collide.
-var pageNames = []string{"queue.html", "reader.html", "library.html"}
+var pageNames = []string{"queue.html", "reader.html", "library.html", "extracts.html"}
 
 // Server holds everything the handlers need. Dependencies arrive through this
 // struct rather than package-level variables, so a test can build a Server with
@@ -94,6 +94,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /{$}", s.handleQueue)
 	mux.HandleFunc("GET /next", s.handleNext)
 	mux.HandleFunc("GET /library", s.handleLibrary)
+	mux.HandleFunc("GET /extracts", s.handleExtracts)
 	mux.HandleFunc("GET /read/{id}", s.handleRead)
 
 	mux.HandleFunc("POST /elements/{id}/extract", s.handleExtract)
@@ -101,6 +102,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /elements/{id}/grade", s.handleGrade)
 	mux.HandleFunc("POST /elements/{id}/priority", s.handlePriority)
 	mux.HandleFunc("POST /elements/{id}/progress", s.handleProgress)
+	mux.HandleFunc("POST /elements/{id}/unsuspend", s.handleUnsuspend)
 
 	return mux
 }
@@ -188,9 +190,8 @@ func (s *Server) articleHTML(ctx context.Context, element store.Element) (string
 		}
 		document.ContentHTML = body
 
-		// Highlights are imported here, at the moment the article is first
-		// opened, so passages already marked elsewhere are visible in the
-		// very session where they are useful.
+		// Highlights that only arrive with a full fetch are imported here, at
+		// the moment the article is first opened.
 		sanitized := s.policy.Sanitize(body)
 		if err := s.importHighlights(element, sanitized, highlights); err != nil {
 			// A failed import must not stop the article from being read; the
@@ -200,7 +201,17 @@ func (s *Server) articleHTML(ctx context.Context, element store.Element) (string
 		}
 	}
 
-	return s.policy.Sanitize(document.ContentHTML), nil
+	sanitized := s.policy.Sanitize(document.ContentHTML)
+
+	// Highlights imported during sync have no position, because the listing
+	// that carries them omits the article text. Now that the text is here they
+	// can be anchored, which is what makes them render as marks.
+	if err := s.anchorHighlights(element, sanitized); err != nil {
+		s.logger.Error("could not anchor highlights",
+			"document", document.ID, "error", err)
+	}
+
+	return sanitized, nil
 }
 
 // fetchBody retrieves an article body, and its highlights when the provider
@@ -229,13 +240,73 @@ func (s *Server) fetchBody(ctx context.Context, document store.Document) (string
 	return body, nil, nil
 }
 
-// importHighlights turns a provider's existing annotations into extracts.
+// anchorHighlights gives imported extracts their position in the parent, now
+// that the article body is available.
 //
-// Each highlight is located by its text rather than by the offsets the other
-// system recorded: those were measured against its own copy of the article and
-// do not survive increader's sanitising. A highlight whose text cannot be found
-// — because the article was re-fetched and reworded — still becomes an extract,
-// just without a position in the parent.
+// Highlights arrive during sync from a metadata listing, which carries the
+// annotation text but no article HTML — so they are stored without a position.
+// The first time the article is actually opened its text exists, and each quote
+// can be located and anchored. Anchoring is what makes an imported highlight
+// render as a mark in the article rather than sitting there as a detached
+// passage.
+//
+// Located by text, never by the offsets wallabag recorded: those were measured
+// against wallabag's own copy and do not survive increader's sanitising. A
+// quote that can no longer be found — the article was reworded upstream — is
+// left unanchored rather than discarded; the passage mattered once.
+func (s *Server) anchorHighlights(element store.Element, sanitizedHTML string) error {
+	children, err := s.store.ChildrenOf(element.ID)
+	if err != nil {
+		return err
+	}
+
+	var pending []store.Element
+	for _, child := range children {
+		if child.Origin == store.OriginImport && !child.HasRange {
+			pending = append(pending, child)
+		}
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+
+	article, err := ir.ParseArticle(sanitizedHTML)
+	if err != nil {
+		return err
+	}
+
+	now := time.Now()
+	for _, extract := range pending {
+		position, located := article.Locate(extract.Quote)
+		if !located {
+			continue
+		}
+
+		// Prefer the article's own copy of the passage: it carries the inline
+		// markup, and its whitespace matches the offsets stored beside it.
+		quote, err := article.Text(position)
+		if err != nil {
+			continue
+		}
+		markup, err := article.HTML(position)
+		if err != nil {
+			continue
+		}
+
+		if err := s.store.AnchorExtract(extract.ID, position, quote, markup, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// importHighlights creates extracts for annotations that reached the reader
+// outside a sync.
+//
+// Only used for providers that cannot supply annotations in a listing; wallabag
+// 2.6 and later import them during sync instead. Kept because the Source
+// interface does not require the cheap path, and a provider without it should
+// still get its highlights.
 func (s *Server) importHighlights(element store.Element, sanitizedHTML string, highlights []source.Highlight) error {
 	if len(highlights) == 0 {
 		return nil
@@ -257,9 +328,6 @@ func (s *Server) importHighlights(element store.Element, sanitizedHTML string, h
 		contentHTML := "<p>" + template.HTMLEscapeString(highlight.Quote) + "</p>"
 
 		if located {
-			// Prefer the article's own copy of the passage: it carries the
-			// inline markup, and its whitespace matches the offsets stored
-			// alongside it.
 			if text, err := article.Text(found); err == nil {
 				quote = text
 			}
@@ -272,7 +340,7 @@ func (s *Server) importHighlights(element store.Element, sanitizedHTML string, h
 			ParentID:    element.ID,
 			DocumentID:  element.DocumentID,
 			Kind:        store.KindTopic,
-			Title:       summarise(quote),
+			Title:       store.SummariseQuote(quote),
 			ContentHTML: contentHTML,
 			Quote:       quote,
 			Range:       found,

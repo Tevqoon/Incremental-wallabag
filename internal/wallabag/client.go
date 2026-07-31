@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -41,6 +42,10 @@ type Client struct {
 	// tokenState carries everything the mutex protects. Grouping it in one
 	// embedded struct keeps it obvious which fields the lock covers.
 	tokens tokenState
+
+	// version caches the server version string, guarded by tokens.mu alongside
+	// the credentials rather than taking a second lock for one field.
+	version string
 }
 
 // New validates the configuration and returns a ready client. It performs no
@@ -139,4 +144,62 @@ func errorBody(r io.Reader) string {
 		return "<unreadable body>"
 	}
 	return strings.TrimSpace(string(body))
+}
+
+// annotationFilterMinor is the wallabag 2.x minor release that added the
+// ?annotations=1 filter on entry listings.
+const annotationFilterMinor = 6
+
+// Version returns the wallabag server's version string, e.g. "2.6.14".
+//
+// The result is cached for the client's lifetime: it cannot change under a
+// running server, and the sync path would otherwise ask on every pass.
+func (c *Client) Version(ctx context.Context) (string, error) {
+	c.tokens.mu.Lock()
+	cached := c.version
+	c.tokens.mu.Unlock()
+	if cached != "" {
+		return cached, nil
+	}
+
+	// The endpoint answers with a bare JSON string rather than an object.
+	var version string
+	if err := c.get(ctx, "/api/version.json", nil, &version); err != nil {
+		return "", fmt.Errorf("wallabag: read server version: %w", err)
+	}
+
+	c.tokens.mu.Lock()
+	c.version = version
+	c.tokens.mu.Unlock()
+	return version, nil
+}
+
+// SupportsAnnotationFilter reports whether the server can filter a listing down
+// to annotated entries.
+//
+// A version that cannot be reached or parsed is treated as unsupported. That
+// direction matters: assuming support on an old server would silently return
+// the *whole* library from the annotated pass and import highlights for entries
+// that have none, whereas assuming no support only falls back to the slower
+// per-article path.
+func (c *Client) SupportsAnnotationFilter(ctx context.Context) bool {
+	version, err := c.Version(ctx)
+	if err != nil {
+		return false
+	}
+
+	parts := strings.SplitN(strings.Trim(version, `"`), ".", 3)
+	if len(parts) < 2 {
+		return false
+	}
+	major, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return false
+	}
+	minor, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return false
+	}
+
+	return major > 2 || (major == 2 && minor >= annotationFilterMinor)
 }

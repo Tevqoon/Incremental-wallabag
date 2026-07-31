@@ -446,7 +446,7 @@ func TestGradeReschedulesAndMovesOn(t *testing.T) {
 	}
 
 	request := httptest.NewRequest(http.MethodPost, "/elements/1/grade",
-		strings.NewReader("grade=next"))
+		strings.NewReader("grade=pause&block=1"))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.Header.Set("HX-Request", "true")
 	recorder := httptest.NewRecorder()
@@ -855,5 +855,187 @@ func TestLibraryListsAndSearches(t *testing.T) {
 	// are only equal by coincidence in small databases.
 	if !strings.Contains(all, `href="/read/`) {
 		t.Error("library entries do not link into the reader")
+	}
+}
+
+// TestReadPointSurvivesGrading is the mid-read pause: stopping records where
+// you stopped, and returning shows it rather than silently scrolling.
+func TestReadPointSurvivesGrading(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	response := post(t, server, "/elements/1/grade", url.Values{
+		"grade": {"pause"},
+		"block": {"2"},
+	})
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+
+	element, _ := db.ElementByID(1)
+	if element.ReadBlock != 2 {
+		t.Errorf("read point = %d, want 2", element.ReadBlock)
+	}
+	if element.Schedule.Reps != 1 {
+		t.Errorf("pausing did not reschedule: reps = %d", element.Schedule.Reps)
+	}
+
+	// Reopening marks the block, so the boundary between read and unread is
+	// visible rather than merely scrolled to.
+	body := get(t, server, "/read/1").Body.String()
+	if !strings.Contains(body, `class="read-point" data-b="2"`) {
+		t.Errorf("read point is not marked in the article:\n%s", body)
+	}
+	if !strings.Contains(body, `data-read-block="2"`) {
+		t.Error("the reader does not carry the resume position")
+	}
+}
+
+func TestSuspendAndUnsuspend(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if response := post(t, server, "/elements/1/grade", url.Values{
+		"grade": {"suspend"},
+		"block": {"1"},
+	}); response.Code != http.StatusSeeOther {
+		t.Fatalf("suspend: status = %d", response.Code)
+	}
+
+	element, _ := db.ElementByID(1)
+	if element.Schedule.State != "suspended" {
+		t.Errorf("state = %q, want suspended", element.Schedule.State)
+	}
+
+	queue, _ := db.Queue(time.Now(), 10)
+	if len(queue) != 0 {
+		t.Errorf("suspended article is still queued")
+	}
+
+	// The reader still opens it and offers to put it back.
+	body := get(t, server, "/read/1").Body.String()
+	if !strings.Contains(body, "Put back in the queue") {
+		t.Error("the reader does not offer to unsuspend")
+	}
+
+	if response := post(t, server, "/elements/1/unsuspend", nil); response.Code != http.StatusSeeOther {
+		t.Fatalf("unsuspend: status = %d", response.Code)
+	}
+
+	queue, _ = db.Queue(time.Now(), 10)
+	if len(queue) != 1 {
+		t.Errorf("unsuspending did not return the article to the queue")
+	}
+}
+
+// TestArchivedArticleIsNotQueuedButIsReadable is the whole point of syncing
+// wallabag's archive flag.
+func TestArchivedArticleIsNotQueuedButIsReadable(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
+		ExternalID: "2", Title: "Read long ago", IsArchived: true, UpdatedAt: time.Now(),
+	}}, time.Now()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	queue := get(t, server, "/").Body.String()
+	if strings.Contains(queue, "Read long ago") {
+		t.Error("an archived article is in the queue")
+	}
+
+	library := get(t, server, "/library").Body.String()
+	if !strings.Contains(library, "Read long ago") {
+		t.Error("the archived article vanished from the library too")
+	}
+	if !strings.Contains(library, "queue it") {
+		t.Error("the library offers no way to pull it back")
+	}
+
+	if response := get(t, server, "/read/2"); response.Code != http.StatusOK {
+		t.Errorf("archived article is not readable: status %d", response.Code)
+	}
+}
+
+// TestSyncImportedHighlightsAreAnchoredOnOpen closes the loop between the two
+// import paths: highlights arrive during sync without a position, and opening
+// the article gives them one so they render as marks.
+func TestSyncImportedHighlightsAreAnchoredOnOpen(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	// As a sync would leave them: present, but with no position.
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
+		ExternalID: "1", Title: "A test article", UpdatedAt: time.Now(),
+		Highlights: []source.Highlight{
+			{ExternalID: "500", Quote: "quick brown"},
+			{ExternalID: "501", Quote: "a passage that is not in this article"},
+		},
+	}}, time.Now()); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	before, _ := db.ChildrenOf(1)
+	if len(before) != 2 {
+		t.Fatalf("got %d extracts, want 2", len(before))
+	}
+	for _, extract := range before {
+		if extract.HasRange {
+			t.Fatal("test premise is wrong: extracts should start unanchored")
+		}
+	}
+
+	body := get(t, server, "/read/1").Body.String()
+
+	after, _ := db.ChildrenOf(1)
+	if len(after) != 2 {
+		t.Errorf("opening the article duplicated extracts: %d", len(after))
+	}
+
+	byRef := map[string]store.Element{}
+	for _, extract := range after {
+		byRef[extract.ExternalRef] = extract
+	}
+	if !byRef["500"].HasRange {
+		t.Error("a locatable highlight was not anchored when the article was opened")
+	}
+	if byRef["501"].HasRange {
+		t.Error("a highlight whose text is absent was given a position")
+	}
+	if !strings.Contains(body, `<mark class="extract"`) {
+		t.Error("the anchored highlight does not render as a mark")
+	}
+}
+
+func TestExtractsPage(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
+		ExternalID: "1", Title: "A test article", UpdatedAt: time.Now(),
+		Highlights: []source.Highlight{{ExternalID: "500", Quote: "An imported passage."}},
+	}}, time.Now()); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	post(t, server, "/elements/1/extract", url.Values{
+		"start_block": {"0"}, "start_offset": {"4"},
+		"end_block": {"0"}, "end_offset": {"15"}, "quote": {"quick brown"},
+	})
+
+	all := get(t, server, "/extracts").Body.String()
+	if !strings.Contains(all, "An imported passage.") || !strings.Contains(all, "quick brown") {
+		t.Errorf("extracts page is missing entries:\n%s", all)
+	}
+	// Whole articles are not extracts.
+	if strings.Contains(all, `href="/read/1"`) && !strings.Contains(all, "from") {
+		t.Error("the extracts page appears to list the article itself")
+	}
+
+	mine := get(t, server, "/extracts?origin=manual").Body.String()
+	if strings.Contains(mine, "An imported passage.") {
+		t.Error("the manual filter returned an imported extract")
+	}
+	if !strings.Contains(mine, "quick brown") {
+		t.Error("the manual filter dropped a manual extract")
+	}
+
+	if response := get(t, server, "/extracts?origin=bogus"); response.Code != http.StatusBadRequest {
+		t.Errorf("unknown origin filter: status = %d, want 400", response.Code)
 	}
 }

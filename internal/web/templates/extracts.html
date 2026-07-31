@@ -1,0 +1,50 @@
+{{define "content"}}
+<section class="queue">
+  <h1>Extracts</h1>
+  <p class="meta">
+    {{.Manual}} taken here · {{.Imported}} imported from wallabag
+  </p>
+
+  <form class="search" method="get" action="/extracts">
+    <input type="search" name="q" value="{{.Query}}" placeholder="Search extract text or article">
+    {{if .Origin}}<input type="hidden" name="origin" value="{{.Origin}}">{{end}}
+    {{if .WithClozes}}<input type="hidden" name="clozes" value="1">{{end}}
+    <button type="submit">Search</button>
+  </form>
+
+  <nav class="filters">
+    <a href="/extracts{{if .Query}}?q={{.Query}}{{end}}"
+       class="{{if and (not .Origin) (not .WithClozes)}}on{{end}}">All</a>
+    <a href="/extracts?origin=manual{{if .Query}}&q={{.Query}}{{end}}"
+       class="{{if eq .Origin "manual"}}on{{end}}">Mine</a>
+    <a href="/extracts?origin=import{{if .Query}}&q={{.Query}}{{end}}"
+       class="{{if eq .Origin "import"}}on{{end}}">Imported</a>
+    <a href="/extracts?clozes=1{{if .Query}}&q={{.Query}}{{end}}"
+       class="{{if .WithClozes}}on{{end}}">With clozes</a>
+  </nav>
+
+  {{if .Extracts}}
+    <ol class="items">
+      {{range .Extracts}}
+        <li class="item is-extract">
+          <a class="item-title" href="/read/{{.ID}}">{{.Quote}}</a>
+          <div class="item-meta">
+            {{if eq .Origin "import"}}<span class="badge">wallabag</span>{{end}}
+            {{if .ClozeCount}}
+              <span class="badge badge-item">{{.ClozeCount}} cloze{{if ne .ClozeCount 1}}s{{end}}</span>
+            {{end}}
+            {{if not .HasRange}}<span title="not located in the article text">unanchored</span>{{end}}
+            <span title="priority: lower is more important">p{{percent .Schedule.Priority}}</span>
+            <span class="source">from <a href="/read/{{.ParentID}}">{{.DocumentTitle}}</a></span>
+          </div>
+        </li>
+      {{end}}
+    </ol>
+  {{else}}
+    <div class="empty">
+      <p>No extracts match.</p>
+      <p class="meta">Select text while reading to make one.</p>
+    </div>
+  {{end}}
+</section>
+{{end}}

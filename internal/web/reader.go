@@ -90,7 +90,10 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 		// Marked as safe because it was produced by ir.Render from sanitised
 		// input, not because it came from the article. Every path into this
 		// field runs through the sanitiser first.
-		ArticleHTML:  template.HTML(article.Render(marks)),
+		ArticleHTML: template.HTML(article.Render(ir.RenderOptions{
+			Marks:     marks,
+			ReadPoint: element.ReadBlock,
+		})),
 		Extracts:     children,
 		Clozes:       clozes,
 		ClozePreview: preview,
@@ -194,7 +197,7 @@ func (s *Server) handleExtract(w http.ResponseWriter, r *http.Request) {
 		ParentID:    parent.ID,
 		DocumentID:  parent.DocumentID,
 		Kind:        store.KindTopic,
-		Title:       summarise(serverText),
+		Title:       store.SummariseQuote(serverText),
 		ContentHTML: extractHTML,
 		Quote:       serverText,
 		Range:       chosen.Range,
@@ -212,7 +215,10 @@ func (s *Server) handleExtract(w http.ResponseWriter, r *http.Request) {
 	// fragment rather than redirecting is what keeps the reader's scroll
 	// position, which matters when extracting from the middle of a long piece.
 	marks = append(marks, ir.Mark{Range: chosen.Range, ElementID: newID})
-	s.writeArticleFragment(w, parent.ID, article.Render(marks))
+	s.writeArticleFragment(w, parent.ID, article.Render(ir.RenderOptions{
+		Marks:     marks,
+		ReadPoint: parent.ReadBlock,
+	}))
 }
 
 // handleCloze marks a deletion on an extract, producing a card for export.
@@ -302,23 +308,6 @@ func (s *Server) clozeOffsets(r *http.Request, element store.Element) (int, int,
 func (s *Server) writeArticleFragment(w http.ResponseWriter, elementID int64, rendered string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(w, `<div id="article" data-element="%d">%s</div>`, elementID, rendered)
-}
-
-// summarise builds a short title for an extract from its opening words.
-func summarise(text string) string {
-	const limit = 80
-
-	normalised := ir.NormalizeSpace(text)
-	if len(normalised) <= limit {
-		return normalised
-	}
-
-	// Cut at a word boundary so the title does not end mid-word.
-	truncated := normalised[:limit]
-	if space := strings.LastIndex(truncated, " "); space > limit/2 {
-		truncated = truncated[:space]
-	}
-	return truncated + "…"
 }
 
 // isNotFound reports whether an error came from a missing row.

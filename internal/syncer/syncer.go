@@ -29,10 +29,12 @@ func New(db *store.Store, logger *slog.Logger, sources ...source.Source) *Syncer
 
 // Result summarises one source's sync.
 type Result struct {
-	Source  string
-	Fetched int
-	Created int
-	Updated int
+	Source     string
+	Fetched    int
+	Created    int
+	Updated    int
+	Suspended  int
+	Highlights int
 }
 
 // SyncAll syncs every configured source.
@@ -102,16 +104,20 @@ func (s *Syncer) Sync(ctx context.Context, provider source.Source) (Result, erro
 	}
 
 	result := Result{
-		Source:  name,
-		Fetched: len(documents),
-		Created: imported.Created,
-		Updated: imported.Updated,
+		Source:     name,
+		Fetched:    len(documents),
+		Created:    imported.Created,
+		Updated:    imported.Updated,
+		Suspended:  imported.Suspended,
+		Highlights: imported.Highlights,
 	}
 	s.logger.Info("sync finished",
 		"source", name,
 		"fetched", result.Fetched,
 		"created", result.Created,
-		"updated", result.Updated)
+		"updated", result.Updated,
+		"archived", result.Suspended,
+		"highlights", result.Highlights)
 	return result, nil
 }
 

@@ -289,3 +289,75 @@ button.danger:hover { border-color: var(--danger); color: var(--danger); }
   color: var(--fg);
 }
 .search input:focus { outline: none; border-color: var(--accent); }
+
+/* ---- Read point ------------------------------------------------------- */
+
+/* Where reading stopped. A rule in the margin rather than a background: it
+   marks the boundary between read and unread without colouring the text, which
+   would compete with extract highlights for the same signal. */
+#article .read-point {
+  position: relative;
+}
+#article .read-point::before {
+  content: "";
+  position: absolute;
+  left: -1rem;
+  top: 0.35em;
+  bottom: 0.35em;
+  width: 2px;
+  background: var(--accent);
+  border-radius: 1px;
+}
+#article .read-point::after {
+  content: "read to here";
+  position: absolute;
+  left: -1rem;
+  top: -1.2em;
+  font: 600 0.6rem/1 system-ui, sans-serif;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+@media (max-width: 44rem) {
+  /* No margin to put it in on a narrow screen. */
+  #article .read-point::before { left: -0.5rem; }
+  #article .read-point::after { display: none; }
+}
+
+/* ---- Filters and notices ---------------------------------------------- */
+
+.filters {
+  display: flex;
+  gap: 1rem;
+  margin: 0 0 1.25rem;
+  font: 0.78rem/1 system-ui, sans-serif;
+}
+.filters a { color: var(--muted); text-decoration: none; }
+.filters a:hover { color: var(--fg); }
+.filters a.on {
+  color: var(--accent);
+  font-weight: 600;
+  box-shadow: 0 2px 0 var(--accent);
+}
+
+.notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 1.5rem 0;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--accent);
+  border-radius: 3px;
+  font: 0.85rem/1.4 system-ui, sans-serif;
+  color: var(--muted);
+}
+.notice p { margin: 0; flex: 1; min-width: 12rem; }
+
+button.tiny {
+  font-size: 0.65rem;
+  padding: 0.15rem 0.4rem;
+}

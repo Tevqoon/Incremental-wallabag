@@ -4,9 +4,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"html"
+	"strings"
 	"time"
 
 	"github.com/Tevqoon/increader/internal/ir"
+	"github.com/Tevqoon/increader/internal/source"
 )
 
 // Element kinds.
@@ -19,6 +22,25 @@ const (
 const (
 	OriginManual = "manual"
 	OriginImport = "import"
+)
+
+// Default priorities. Lower is more important, following SuperMemo's
+// convention that priority is a position in the queue rather than a rank.
+const (
+	// defaultPriority is what a newly synced article gets.
+	defaultPriority = 0.5
+
+	// importedPriority is what a highlight imported from the provider gets.
+	//
+	// Deliberately below an unread article. A real library yields far more
+	// annotations than unread articles — 459 against 36 in the case this was
+	// built for — so leaving them equal buries the reading list under a
+	// backlog of passages from things already read, which is the same failure
+	// the archive flag was added to fix, just inverted. Ranking them lower
+	// puts the reading list first and lets the backlog follow behind it; the
+	// priority slider overrides this per element whenever a passage deserves
+	// to jump the queue.
+	importedPriority = 0.6
 )
 
 // Element is one node of the incremental-reading tree: an article, an extract
@@ -138,14 +160,24 @@ func (n nullableElement) apply(element *Element) {
 // items live in the same table, articles and extracts interleave by priority
 // with no merging step — which is exactly SuperMemo's behaviour and the reason
 // the schema unifies them.
+//
+// The final tie-break is a multiplicative hash of the id rather than the id
+// itself. Within one priority band — an article and the extracts taken from it
+// share a priority — ordering by id would sort purely by insertion order, which
+// groups every article ahead of every extract because articles are inserted
+// first. The hash scatters them into each other while staying deterministic, so
+// the queue does not reshuffle itself between page loads.
+//
+// Priority still dominates, which is what keeps a large imported backlog from
+// swamping the reading list; see importedPriority.
 func (s *Store) Queue(day time.Time, limit int) ([]QueueItem, error) {
 	rows, err := s.db.Query(`
 		SELECT `+elementColumns+`, d.title, d.url
 		FROM elements e
 		JOIN documents d ON d.id = e.document_id
-		WHERE e.state NOT IN ('done', 'dismissed')
+		WHERE e.state NOT IN ('done', 'dismissed', 'suspended')
 		  AND (e.due_on IS NULL OR e.due_on <= ?)
-		ORDER BY e.priority ASC, e.due_on ASC, e.id ASC
+		ORDER BY e.priority ASC, e.due_on ASC, (e.id * 2654435761) % 1000003 ASC
 		LIMIT ?`,
 		day.Format(dateFormat), limit,
 	)
@@ -386,25 +418,182 @@ func (s *Store) ClozesOf(elementID int64) ([]ir.Cloze, error) {
 	return clozes, rows.Err()
 }
 
-// insertRootTopic creates the queue entry for a newly imported document.
+// insertRootTopic creates the queue entry for a newly imported document and
+// returns its id.
 //
 // Every document gets exactly one root topic: the thing you actually read.
-// Extracts taken from it become child elements later. It is due today, so a
-// freshly synced article is immediately available rather than waiting a cycle.
-func insertRootTopic(tx *sql.Tx, documentID int64, title string, now time.Time) error {
-	_, err := tx.Exec(`
+// Extracts taken from it become child elements later. An unread article is due
+// today, so it is immediately available rather than waiting a cycle; an already
+// archived one starts suspended, present in the library but out of the queue.
+func insertRootTopic(tx *sql.Tx, documentID int64, title string, archived bool, now time.Time) (int64, error) {
+	state, dueOn := string(ir.StateNew), any(now.Format(dateFormat))
+	if archived {
+		state, dueOn = string(ir.StateSuspended), nil
+	}
+
+	outcome, err := tx.Exec(`
 		INSERT INTO elements
 		    (document_id, parent_id, kind, title, priority, state,
 		     due_on, interval_days, afactor, reps, read_block, origin,
 		     created_at, updated_at)
-		VALUES (?, NULL, 'topic', ?, 0.5, 'new', ?, 0, 2.0, 0, 0, 'manual', ?, ?)`,
-		documentID, title, now.Format(dateFormat),
+		VALUES (?, NULL, 'topic', ?, ?, ?, ?, 0, 2.0, 0, 0, 'manual', ?, ?)`,
+		documentID, title, defaultPriority, state, dueOn,
 		formatTime(now), formatTime(now),
 	)
 	if err != nil {
-		return fmt.Errorf("store: create root topic for document %d: %w", documentID, err)
+		return 0, fmt.Errorf("store: create root topic for document %d: %w", documentID, err)
+	}
+
+	id, err := outcome.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("store: read id of new root topic: %w", err)
+	}
+	return id, nil
+}
+
+// rootTopicID finds a document's root topic.
+func rootTopicID(tx *sql.Tx, documentID int64) (int64, error) {
+	var id int64
+	err := tx.QueryRow(
+		`SELECT id FROM elements WHERE document_id = ? AND parent_id IS NULL`,
+		documentID,
+	).Scan(&id)
+	if err != nil {
+		return 0, fmt.Errorf("store: find root topic of document %d: %w", documentID, err)
+	}
+	return id, nil
+}
+
+// suspendIfActive suspends an element only if it is still in circulation.
+//
+// The guard is what stops a sync from resurrecting material the reader already
+// finished or abandoned, and from re-suspending something they deliberately
+// pulled back into the queue.
+func suspendIfActive(tx *sql.Tx, id int64, now time.Time) error {
+	_, err := tx.Exec(`
+		UPDATE elements
+		SET state = ?, due_on = NULL, updated_at = ?
+		WHERE id = ? AND state IN (?, ?)`,
+		string(ir.StateSuspended), formatTime(now), id,
+		string(ir.StateNew), string(ir.StateReading),
+	)
+	if err != nil {
+		return fmt.Errorf("store: suspend element %d: %w", id, err)
 	}
 	return nil
+}
+
+// insertHighlights turns a provider's annotations into extracts, skipping any
+// already imported.
+//
+// The extracts are created unanchored: locating a quote needs the article body,
+// and the listing that carries annotations deliberately omits it. That costs
+// nothing while the parent stays archived, and AnchorExtract fills the position
+// in later if the article is ever opened.
+func insertHighlights(tx *sql.Tx, documentID, parentID int64, highlights []source.Highlight, now time.Time) (int, error) {
+	imported := 0
+
+	for _, highlight := range highlights {
+		if strings.TrimSpace(highlight.Quote) == "" || highlight.ExternalID == "" {
+			continue
+		}
+
+		// The partial unique index on (document_id, external_ref) is what makes
+		// this idempotent; asking first avoids burning rowids on every re-sync.
+		var exists int
+		err := tx.QueryRow(`
+			SELECT COUNT(*) FROM elements
+			WHERE document_id = ? AND external_ref = ?`,
+			documentID, highlight.ExternalID,
+		).Scan(&exists)
+		if err != nil {
+			return imported, fmt.Errorf("store: check highlight %s: %w", highlight.ExternalID, err)
+		}
+		if exists > 0 {
+			continue
+		}
+
+		_, err = tx.Exec(`
+			INSERT INTO elements
+			    (document_id, parent_id, kind, title, content_html, quote,
+			     priority, state, due_on, interval_days, afactor, reps,
+			     read_block, origin, external_ref, created_at, updated_at)
+			VALUES (?, ?, 'topic', ?, ?, ?, ?, 'new', ?, 0, 2.0, 0, 0, 'import', ?, ?, ?)`,
+			documentID, parentID,
+			SummariseQuote(highlight.Quote),
+			"<p>"+html.EscapeString(highlight.Quote)+"</p>",
+			highlight.Quote,
+			importedPriority,
+			now.Format(dateFormat),
+			highlight.ExternalID,
+			formatTime(now), formatTime(now),
+		)
+		if err != nil {
+			return imported, fmt.Errorf("store: import highlight %s: %w", highlight.ExternalID, err)
+		}
+		imported++
+	}
+
+	return imported, nil
+}
+
+// AnchorExtract records where an extract sits in its parent, for one that was
+// imported before the parent's text was available.
+func (s *Store) AnchorExtract(id int64, position ir.Range, quote, contentHTML string, now time.Time) error {
+	_, err := s.db.Exec(`
+		UPDATE elements SET
+		    start_block = ?, start_offset = ?, end_block = ?, end_offset = ?,
+		    quote = ?, content_html = ?, updated_at = ?
+		WHERE id = ?`,
+		position.StartBlock, position.StartOffset, position.EndBlock, position.EndOffset,
+		quote, contentHTML, formatTime(now), id,
+	)
+	if err != nil {
+		return fmt.Errorf("store: anchor extract %d: %w", id, err)
+	}
+	return nil
+}
+
+// Suspend takes an element out of circulation without discarding it.
+//
+// Distinct from Done and Dismiss, which are terminal: a suspended element keeps
+// its interval and repetition count and resumes where it left off.
+func (s *Store) Suspend(id int64, now time.Time) error {
+	_, err := s.db.Exec(
+		`UPDATE elements SET state = ?, due_on = NULL, updated_at = ? WHERE id = ?`,
+		string(ir.StateSuspended), formatTime(now), id,
+	)
+	if err != nil {
+		return fmt.Errorf("store: suspend element %d: %w", id, err)
+	}
+	return nil
+}
+
+// Unsuspend returns an element to the queue, due today.
+func (s *Store) Unsuspend(id int64, today time.Time, now time.Time) error {
+	_, err := s.db.Exec(
+		`UPDATE elements SET state = ?, due_on = ?, updated_at = ? WHERE id = ?`,
+		string(ir.StateReading), today.Format(dateFormat), formatTime(now), id,
+	)
+	if err != nil {
+		return fmt.Errorf("store: unsuspend element %d: %w", id, err)
+	}
+	return nil
+}
+
+// SummariseQuote builds a short title from a passage's opening words.
+func SummariseQuote(text string) string {
+	const limit = 80
+
+	normalised := ir.NormalizeSpace(text)
+	if len(normalised) <= limit {
+		return normalised
+	}
+	truncated := normalised[:limit]
+	if space := strings.LastIndex(truncated, " "); space > limit/2 {
+		truncated = truncated[:space]
+	}
+	return truncated + "…"
 }
 
 // CountElements returns how many elements exist in a given state.
@@ -429,12 +618,98 @@ func (s *Store) CountDue(day time.Time) (int, error) {
 	var count int
 	err := s.db.QueryRow(`
 		SELECT COUNT(*) FROM elements
-		WHERE state NOT IN ('done', 'dismissed')
+		WHERE state NOT IN ('done', 'dismissed', 'suspended')
 		  AND (due_on IS NULL OR due_on <= ?)`,
 		day.Format(dateFormat),
 	).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("store: count due elements: %w", err)
+	}
+	return count, nil
+}
+
+// ExtractFilter selects which extracts the browse page lists.
+type ExtractFilter struct {
+	// Origin restricts to OriginManual or OriginImport; empty means both.
+	Origin string
+
+	// WithClozes lists only extracts that have become items.
+	WithClozes bool
+
+	Query string
+	Limit int
+}
+
+// ExtractRow is one row of the extracts browse page.
+type ExtractRow struct {
+	Element
+	DocumentTitle string
+	DocumentURL   string
+	ClozeCount    int
+}
+
+// Extracts lists extracts independently of what is due.
+//
+// The queue answers "what should I read now" and deliberately interleaves
+// articles with extracts; this answers "what have I harvested", which is a
+// different question and needs its own ordering — newest first, because the
+// thing you just pulled out is the thing you most likely want.
+func (s *Store) Extracts(filter ExtractFilter) ([]ExtractRow, error) {
+	if filter.Limit <= 0 {
+		filter.Limit = 200
+	}
+	pattern := "%" + filter.Query + "%"
+
+	rows, err := s.db.Query(`
+		SELECT `+elementColumns+`, d.title, d.url,
+		       (SELECT COUNT(*) FROM cloze_ranges c WHERE c.element_id = e.id)
+		FROM elements e
+		JOIN documents d ON d.id = e.document_id
+		WHERE e.parent_id IS NOT NULL
+		  AND e.state NOT IN ('dismissed')
+		  AND (? = '' OR e.origin = ?)
+		  AND (? = 0 OR e.kind = 'item')
+		  AND (? = '' OR e.quote LIKE ? OR d.title LIKE ?)
+		ORDER BY e.id DESC
+		LIMIT ?`,
+		filter.Origin, filter.Origin,
+		filter.WithClozes,
+		filter.Query, pattern, pattern,
+		filter.Limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: list extracts: %w", err)
+	}
+	defer rows.Close()
+
+	var extracts []ExtractRow
+	for rows.Next() {
+		var (
+			row      ExtractRow
+			nullable nullableElement
+		)
+		targets := append(scanTargets(&row.Element, &nullable),
+			&row.DocumentTitle, &row.DocumentURL, &row.ClozeCount)
+
+		if err := rows.Scan(targets...); err != nil {
+			return nil, fmt.Errorf("store: scan extract row: %w", err)
+		}
+		nullable.apply(&row.Element)
+		extracts = append(extracts, row)
+	}
+	return extracts, rows.Err()
+}
+
+// CountExtracts returns how many extracts exist, by origin.
+func (s *Store) CountExtracts(origin string) (int, error) {
+	var count int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM elements
+		WHERE parent_id IS NOT NULL AND (? = '' OR origin = ?)`,
+		origin, origin,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("store: count extracts: %w", err)
 	}
 	return count, nil
 }

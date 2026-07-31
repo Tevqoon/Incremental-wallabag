@@ -64,14 +64,39 @@
     </section>
   {{end}}
 
+  {{if eq (printf "%s" .Element.Schedule.State) "suspended"}}
+    <div class="notice">
+      <p>
+        {{if .Document.IsArchived}}
+          Archived in wallabag, so it is not in the reading queue.
+        {{else}}
+          Suspended, so it is not in the reading queue.
+        {{end}}
+      </p>
+      <button class="primary" hx-post="/elements/{{.Element.ID}}/unsuspend">
+        Put back in the queue
+      </button>
+    </div>
+  {{end}}
+
   <footer class="grades">
     <div class="grade-buttons">
-      <button hx-post="/elements/{{.Element.ID}}/grade" hx-vals='{"grade":"next"}'
-              title="Read a slice; come back on schedule">Next</button>
-      <button hx-post="/elements/{{.Element.ID}}/grade" hx-vals='{"grade":"sooner"}'
+      <!-- hx-vals is a js: expression so the read point is the block visible at
+           the moment of the click, not whatever the throttled scroll tracker
+           last managed to send. -->
+      <button class="primary"
+              hx-post="/elements/{{.Element.ID}}/grade"
+              hx-vals='js:{grade:"pause", block: topBlock()}'
+              title="Stop here, keep my place, come back on schedule">Pause</button>
+      <button hx-post="/elements/{{.Element.ID}}/grade"
+              hx-vals='js:{grade:"sooner", block: topBlock()}'
               title="More interesting than expected; bring it back sooner">Sooner</button>
-      <button hx-post="/elements/{{.Element.ID}}/grade" hx-vals='{"grade":"later"}'
+      <button hx-post="/elements/{{.Element.ID}}/grade"
+              hx-vals='js:{grade:"later", block: topBlock()}'
               title="Not now; push it further out each time">Later</button>
+      <button hx-post="/elements/{{.Element.ID}}/grade"
+              hx-vals='js:{grade:"suspend", block: topBlock()}'
+              title="Park indefinitely; keeps its interval and resumes where it left off">Suspend</button>
       <button hx-post="/elements/{{.Element.ID}}/grade" hx-vals='{"grade":"done"}'
               title="Finished with this">Done</button>
       <button class="danger" hx-post="/elements/{{.Element.ID}}/grade" hx-vals='{"grade":"dismiss"}'

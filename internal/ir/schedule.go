@@ -17,6 +17,12 @@ const (
 	StateDone State = "done"
 	// StateDismissed is material abandoned unread.
 	StateDismissed State = "dismissed"
+	// StateSuspended is material parked indefinitely.
+	//
+	// Unlike Done and Dismissed it is not terminal: the interval, A-Factor and
+	// repetition count are all preserved, so unsuspending resumes rather than
+	// restarts. It is also what an already-archived article gets on import.
+	StateSuspended State = "suspended"
 )
 
 // Grade is what the reader decides to do with a topic.
@@ -29,8 +35,11 @@ const (
 type Grade int
 
 const (
-	// GradeNext: read a slice, extracted what mattered, continue as scheduled.
-	GradeNext Grade = iota
+	// GradePause: read a slice, extracted what mattered, stop here for now.
+	// The read point is kept and the interval grows normally. This is the
+	// everyday action — incremental reading is mostly the act of putting
+	// something down on purpose.
+	GradePause Grade = iota
 	// GradeLater: not compelling right now; push it out and let it drift further each time.
 	GradeLater
 	// GradeSooner: more interesting than expected; bring it back and let it drift more slowly.
@@ -39,6 +48,9 @@ const (
 	GradeDone
 	// GradeDismiss: abandoned; not worth finishing.
 	GradeDismiss
+	// GradeSuspend: parked indefinitely, resumable. Keeps the interval and
+	// repetition count, unlike the two terminal grades above.
+	GradeSuspend
 )
 
 // Scheduling constants.
@@ -105,6 +117,13 @@ func Next(schedule Schedule, grade Grade, today time.Time) Schedule {
 		next.DueOn = time.Time{}
 		return next
 
+	case GradeSuspend:
+		// Interval, A-Factor and repetition count are left untouched: this is
+		// a pause, and resuming should carry on rather than start over.
+		next.State = StateSuspended
+		next.DueOn = time.Time{}
+		return next
+
 	case GradeLater:
 		next.AFactor = clamp(next.AFactor*aFactorStep, minAFactor, maxAFactor)
 		next.IntervalDays = grow(schedule.IntervalDays, next.AFactor)
@@ -115,7 +134,7 @@ func Next(schedule Schedule, grade Grade, today time.Time) Schedule {
 		// Sooner is a request to see this again, so growth would contradict it.
 		next.IntervalDays = math.Max(minInterval, schedule.IntervalDays/2)
 
-	default: // GradeNext
+	default: // GradePause
 		next.IntervalDays = grow(schedule.IntervalDays, next.AFactor)
 	}
 
@@ -156,7 +175,7 @@ func Day(t time.Time) time.Time {
 
 // Due reports whether an element should appear in the queue on the given day.
 func (s Schedule) Due(today time.Time) bool {
-	if s.State == StateDone || s.State == StateDismissed {
+	if s.State == StateDone || s.State == StateDismissed || s.State == StateSuspended {
 		return false
 	}
 	if s.DueOn.IsZero() {

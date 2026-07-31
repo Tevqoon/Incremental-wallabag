@@ -19,6 +19,21 @@ type Mark struct {
 // Len returns the number of addressable blocks in the article.
 func (a *Article) Len() int { return len(a.blocks) }
 
+// NoReadPoint means an article has not been read into yet.
+const NoReadPoint = -1
+
+// RenderOptions controls the reader view.
+type RenderOptions struct {
+	// Marks are passages already extracted, shown highlighted.
+	Marks []Mark
+
+	// ReadPoint is the block where reading stopped, or NoReadPoint. The block
+	// is tagged so the reader can see where they left off — SuperMemo shows the
+	// read point on return rather than only scrolling to it, and being able to
+	// see the boundary between read and unread is most of its value.
+	ReadPoint int
+}
+
 // Render produces the reader view: every block as a top-level element carrying
 // its index in a data-b attribute, with existing extracts wrapped in <mark>.
 //
@@ -26,12 +41,18 @@ func (a *Article) Len() int { return len(a.blocks) }
 // selection is reported as the enclosing block's data-b plus a character offset
 // into that element's textContent; server-side, those two numbers index into
 // exactly the same enumeration. Nothing else needs to agree between the two.
-func (a *Article) Render(marks []Mark) string {
-	windows := a.windowsByBlock(marks)
+func (a *Article) Render(options RenderOptions) string {
+	windows := a.windowsByBlock(options.Marks)
 
 	var out strings.Builder
 	for _, block := range a.blocks {
 		tag, class := renderTag(block.node)
+
+		// The read point marks the *start* of what is still unread, so it sits
+		// on the block reading stopped at rather than the one before it.
+		if block.Index == options.ReadPoint && options.ReadPoint > 0 {
+			class = strings.TrimSpace(class + " read-point")
+		}
 
 		out.WriteString("<" + tag)
 		if class != "" {

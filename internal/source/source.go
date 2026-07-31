@@ -76,6 +76,14 @@ type Document struct {
 	// seed the reading queue with passages the reader has already marked.
 	Highlights []Highlight
 
+	// IsArchived is the provider's own "already read" flag. Archived material
+	// stays in the library but does not belong in a reading queue, so it is
+	// what decides whether a newly imported document is queued at all.
+	IsArchived bool
+
+	// IsStarred is the provider's "favourite" flag, kept for display.
+	IsStarred bool
+
 	// PublishedAt is the original publication time, zero when unknown.
 	PublishedAt time.Time
 

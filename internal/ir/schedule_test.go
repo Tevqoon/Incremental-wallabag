@@ -15,7 +15,7 @@ func TestIntervalsGrowByAFactor(t *testing.T) {
 
 	want := []float64{1, 2, 4, 8, 16, 32}
 	for repetition, wantInterval := range want {
-		schedule = Next(schedule, GradeNext, today)
+		schedule = Next(schedule, GradePause, today)
 
 		if !closeEnough(schedule.IntervalDays, wantInterval) {
 			t.Errorf("repetition %d: interval = %.2f, want %.2f",
@@ -31,7 +31,7 @@ func TestIntervalsGrowByAFactor(t *testing.T) {
 }
 
 func TestFirstRepetitionIsOneDay(t *testing.T) {
-	schedule := Next(Schedule{Priority: 1.0}, GradeNext, today)
+	schedule := Next(Schedule{Priority: 1.0}, GradePause, today)
 
 	if !closeEnough(schedule.IntervalDays, 1) {
 		t.Errorf("interval = %.2f, want 1", schedule.IntervalDays)
@@ -62,7 +62,7 @@ func TestLaterPushesOutAndCompounds(t *testing.T) {
 	}
 
 	// And an ordinary Next afterwards inherits the raised A-Factor.
-	third := Next(second, GradeNext, today)
+	third := Next(second, GradePause, today)
 	if !closeEnough(third.AFactor, second.AFactor) {
 		t.Errorf("Next changed the A-Factor: %.3f then %.3f", second.AFactor, third.AFactor)
 	}
@@ -128,7 +128,7 @@ func TestPriorityCapsTheInterval(t *testing.T) {
 			schedule := Schedule{Priority: test.priority}
 			// Far more repetitions than needed to reach the ceiling.
 			for i := 0; i < 40; i++ {
-				schedule = Next(schedule, GradeNext, today)
+				schedule = Next(schedule, GradePause, today)
 			}
 			if schedule.IntervalDays > test.wantAtMost {
 				t.Errorf("interval settled at %.1f, want at most %.1f",
@@ -149,8 +149,8 @@ func TestPriorityOrdersIntervals(t *testing.T) {
 	low := Schedule{Priority: 0.9}
 
 	for repetition := 1; repetition <= 15; repetition++ {
-		high = Next(high, GradeNext, today)
-		low = Next(low, GradeNext, today)
+		high = Next(high, GradePause, today)
+		low = Next(low, GradePause, today)
 
 		if high.IntervalDays > low.IntervalDays {
 			t.Fatalf("repetition %d: high-priority interval %.1f exceeds low-priority %.1f",
@@ -251,7 +251,7 @@ func TestDayUsesLocalLocation(t *testing.T) {
 func TestZeroValueScheduleGetsDefaults(t *testing.T) {
 	// An element created before a field existed, or read from a row with
 	// defaults, must not produce a zero A-Factor and freeze in place.
-	got := Next(Schedule{}, GradeNext, today)
+	got := Next(Schedule{}, GradePause, today)
 
 	if got.AFactor < minAFactor {
 		t.Errorf("A-Factor = %.3f, want the default of %.1f", got.AFactor, defaultAFactor)
@@ -375,4 +375,54 @@ func TestNextOrdinal(t *testing.T) {
 
 func closeEnough(got, want float64) bool {
 	return math.Abs(got-want) < 0.001
+}
+
+// TestSuspendIsReversible is what separates suspension from Done and Dismiss:
+// it parks material without discarding the progress made on it, so resuming
+// carries on rather than starting over.
+func TestSuspendIsReversible(t *testing.T) {
+	schedule := Schedule{
+		State: StateReading, IntervalDays: 8, AFactor: 2.4, Reps: 3, Priority: 0.3,
+	}
+
+	got := Next(schedule, GradeSuspend, today)
+
+	if got.State != StateSuspended {
+		t.Errorf("state = %q, want %q", got.State, StateSuspended)
+	}
+	if got.Due(today) {
+		t.Error("a suspended element is still reported as due")
+	}
+	if !got.DueOn.IsZero() {
+		t.Errorf("suspended element kept a due date: %v", got.DueOn)
+	}
+
+	// Everything needed to resume must survive.
+	if got.IntervalDays != schedule.IntervalDays {
+		t.Errorf("interval = %.1f, want %.1f preserved", got.IntervalDays, schedule.IntervalDays)
+	}
+	if got.Reps != schedule.Reps {
+		t.Errorf("reps = %d, want %d preserved", got.Reps, schedule.Reps)
+	}
+	if !closeEnough(got.AFactor, schedule.AFactor) {
+		t.Errorf("A-Factor = %.2f, want %.2f preserved", got.AFactor, schedule.AFactor)
+	}
+
+	// Unlike Done, which also clears the due date, this is not terminal: the
+	// next ordinary grade picks up from the preserved interval.
+	resumed := Next(got, GradePause, today)
+	if resumed.State != StateReading {
+		t.Errorf("resumed state = %q, want %q", resumed.State, StateReading)
+	}
+	if resumed.IntervalDays <= schedule.IntervalDays {
+		t.Errorf("resumed interval %.1f did not grow from %.1f",
+			resumed.IntervalDays, schedule.IntervalDays)
+	}
+}
+
+func TestSuspendedIsNotDue(t *testing.T) {
+	suspended := Schedule{State: StateSuspended, DueOn: today.AddDate(0, 0, -5)}
+	if suspended.Due(today) {
+		t.Error("a suspended element with a past due date is reported as due")
+	}
 }
