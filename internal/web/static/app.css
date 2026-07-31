@@ -186,6 +186,12 @@ mark.extract {
   box-shadow: 0 2px 12px rgb(0 0 0 / 0.18);
 }
 
+/* Required, and easy to miss: `hidden` is only `display: none` in the user
+   agent stylesheet, so the author-level `display: flex` above wins and the
+   element stays visible however many times the script sets `.hidden = true`.
+   Any rule that gives an element a display value has to restore this. */
+.toolbar[hidden] { display: none; }
+
 .toolbar button {
   border: 0;
   background: var(--bg);

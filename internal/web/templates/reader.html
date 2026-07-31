@@ -29,11 +29,16 @@
     </p>
   </header>
 
-  <!-- The selection toolbar is positioned next to whatever text is selected. -->
+  <!-- The selection toolbar is positioned next to whatever text is selected.
+
+       The hx-vals expressions must be object *literals*. htmx wraps a js:
+       value in braces unless it already begins with one, so "js:fn()" becomes
+       "{fn()}" — a syntax error that htmx swallows, sending no request at all.
+       Spreading the call into a literal is what makes it valid. -->
   <div id="selection-toolbar" class="toolbar" hidden>
     <button type="button"
             hx-post="/elements/{{.Element.ID}}/extract"
-            hx-vals="js:selectionPayload()"
+            hx-vals="js:{...selectionPayload()}"
             hx-target="#article"
             hx-swap="outerHTML"
             hx-on::after-request="clearSelection()">
@@ -42,7 +47,7 @@
     {{if not .Element.IsRoot}}
       <button type="button"
               hx-post="/elements/{{.Element.ID}}/cloze"
-              hx-vals="js:clozePayload()"
+              hx-vals="js:{...clozePayload()}"
               hx-on::after-request="clearSelection()">
         Cloze
       </button>

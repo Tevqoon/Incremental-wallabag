@@ -91,29 +91,57 @@
     const bar = toolbar();
     if (!bar) return;
 
-    const box = range.getBoundingClientRect();
+    // Unhide before measuring: offsetHeight is 0 while the element is hidden,
+    // which would place the toolbar on top of the text instead of above it.
     bar.hidden = false;
-    bar.style.top = `${box.top + window.scrollY - bar.offsetHeight - 8}px`;
-    bar.style.left = `${box.left + window.scrollX}px`;
+
+    const box = range.getBoundingClientRect();
+    const top = box.top + window.scrollY - bar.offsetHeight - 8;
+
+    // Below the selection when there is no room above it, rather than off the
+    // top of the page.
+    bar.style.top = `${top < window.scrollY ? box.bottom + window.scrollY + 8 : top}px`;
+
+    // Keep it on screen when the selection starts near the right edge.
+    const left = Math.min(box.left + window.scrollX,
+                          document.documentElement.clientWidth - bar.offsetWidth - 8);
+    bar.style.left = `${Math.max(8, left)}px`;
+  }
+
+  function hideToolbar() {
+    const bar = toolbar();
+    if (bar) bar.hidden = true;
+    captured = null;
   }
 
   document.addEventListener("selectionchange", () => {
     const payload = readSelection();
-    const bar = toolbar();
-    if (!bar) return;
+    if (!toolbar()) return;
 
     if (!payload) {
-      // Do not hide while a toolbar button is being clicked: the click itself
-      // collapses the selection, and hiding here would cancel it.
-      if (!bar.contains(document.activeElement)) {
-        bar.hidden = true;
-        captured = null;
-      }
+      hideToolbar();
       return;
     }
 
     captured = payload;
     showToolbar(window.getSelection().getRangeAt(0));
+  });
+
+  // Pressing the mouse anywhere on the toolbar must not disturb the selection.
+  //
+  // Without this the browser collapses the selection on mousedown, before the
+  // click that htmx acts on — so by the time hx-vals asks for the payload there
+  // is nothing left to send. Guarding on document.activeElement instead does
+  // not work: Safari does not focus a button when it is clicked, so the guard
+  // reads <body> and clears the very selection it exists to protect.
+  //
+  // preventDefault here stops the collapse from happening at all, which is
+  // both simpler and portable.
+  document.addEventListener("mousedown", (event) => {
+    const bar = toolbar();
+    if (bar && !bar.hidden && bar.contains(event.target)) {
+      event.preventDefault();
+    }
   });
 
   // ---- Reading position -------------------------------------------------
