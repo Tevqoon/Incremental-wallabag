@@ -104,6 +104,18 @@ func (s *Source) RemoveTag(ctx context.Context, externalID string, label string)
 	return s.client.send(ctx, "DELETE", path, nil, nil)
 }
 
+// DeleteHighlight removes one annotation, identified by its own id — not the
+// entry it sits on. Verified against the live API: DELETE returns 200 with the
+// deleted annotation's body, and it does not require the entry id at all.
+func (s *Source) DeleteHighlight(ctx context.Context, highlightExternalID string) error {
+	id, err := strconv.Atoi(highlightExternalID)
+	if err != nil {
+		return fmt.Errorf("wallabag: %q is not a valid annotation id: %w", highlightExternalID, err)
+	}
+	path := fmt.Sprintf("/api/annotations/%d.json", id)
+	return s.client.send(ctx, "DELETE", path, nil, nil)
+}
+
 // tagID resolves a label to wallabag's id for it, or 0 when there is none.
 func (s *Source) tagID(ctx context.Context, label string) (int, error) {
 	s.tags.mu.Lock()

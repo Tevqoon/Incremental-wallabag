@@ -105,6 +105,16 @@ func post(t *testing.T, server *Server, path string, form url.Values) *httptest.
 	return recorder
 }
 
+// del issues a DELETE request. path may carry a query string directly, which is
+// how the templates pass swap_only — htmx sends DELETE parameters as a query
+// string by default, so that is also the realistic shape of the request.
+func del(t *testing.T, server *Server, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodDelete, path, nil))
+	return recorder
+}
+
 func TestQueueListsTheArticle(t *testing.T) {
 	server, _, _ := newTestServer(t, true)
 
@@ -1336,5 +1346,122 @@ func TestNewExtractIsNotDueToday(t *testing.T) {
 		if item.ID == children[0].ID {
 			t.Error("a freshly made extract is back in today's queue")
 		}
+	}
+}
+
+// TestDeleteManualExtract covers the "accidental entry" case directly: a
+// stray selection turned into an extract, with nothing upstream to clean up.
+func TestDeleteManualExtract(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	post(t, server, "/elements/1/extract", url.Values{
+		"start_block": {"0"}, "start_offset": {"4"},
+		"end_block": {"0"}, "end_offset": {"15"}, "quote": {"quick brown"},
+	})
+	children, _ := db.ChildrenOf(1)
+	if len(children) != 1 {
+		t.Fatalf("got %d extracts, want 1", len(children))
+	}
+	extractID := children[0].ID
+
+	if response := del(t, server, "/elements/"+itoa(extractID)); response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+
+	remaining, _ := db.ChildrenOf(1)
+	if len(remaining) != 0 {
+		t.Errorf("got %d extracts after delete, want 0", len(remaining))
+	}
+
+	// No provider identity, so nothing was queued to send anywhere.
+	writes, _ := db.PendingWrites("wallabag", 10)
+	if len(writes) != 0 {
+		t.Errorf("a manual delete queued %d writes, want 0", len(writes))
+	}
+}
+
+// TestDeleteImportedExtractQueuesUpstreamRemoval is the point of pairing the
+// delete with an outbox write: without it, the highlight would survive at
+// wallabag and the next sync would recreate the very extract just deleted.
+func TestDeleteImportedExtractQueuesUpstreamRemoval(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
+		ExternalID: "1", Title: "A test article", UpdatedAt: time.Now(),
+		Highlights: []source.Highlight{{ExternalID: "500", Quote: "An imported passage."}},
+	}}, 0, time.Now()); err != nil {
+		t.Fatalf("seed highlight: %v", err)
+	}
+
+	children, _ := db.ChildrenOf(1)
+	if len(children) != 1 || children[0].Origin != store.OriginImport {
+		t.Fatalf("test premise is wrong: %+v", children)
+	}
+	extractID := children[0].ID
+
+	if response := del(t, server, "/elements/"+itoa(extractID)); response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+
+	remaining, _ := db.ChildrenOf(1)
+	if len(remaining) != 0 {
+		t.Errorf("got %d extracts after delete, want 0", len(remaining))
+	}
+
+	writes, err := db.PendingWrites("wallabag", 10)
+	if err != nil {
+		t.Fatalf("PendingWrites: %v", err)
+	}
+	if len(writes) != 1 {
+		t.Fatalf("got %d queued writes, want 1", len(writes))
+	}
+	if writes[0].Operation != store.OpHighlightDelete || writes[0].ExternalID != "500" {
+		t.Errorf("queued %+v, want a highlight_delete for annotation 500", writes[0])
+	}
+}
+
+func TestDeleteExtractRejectsWholeArticle(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if response := del(t, server, "/elements/1"); response.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", response.Code)
+	}
+
+	// Untouched.
+	if _, err := db.ElementByID(1); err != nil {
+		t.Errorf("the article was removed despite the rejection: %v", err)
+	}
+}
+
+// TestDeleteExtractSwapOnlyReturnsEmptyBody is the extracts-list path: htmx
+// swaps the row's own <li> for whatever the response body contains, so it must
+// be empty rather than a redirect, or the row would not disappear cleanly.
+func TestDeleteExtractSwapOnlyReturnsEmptyBody(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	post(t, server, "/elements/1/extract", url.Values{
+		"start_block": {"0"}, "start_offset": {"4"},
+		"end_block": {"0"}, "end_offset": {"15"}, "quote": {"quick brown"},
+	})
+	children, _ := db.ChildrenOf(1)
+	extractID := children[0].ID
+
+	response := del(t, server, "/elements/"+itoa(extractID)+"?swap_only=1")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.Code)
+	}
+	if response.Header().Get("HX-Redirect") != "" {
+		t.Error("swap_only still redirected; the row would navigate away instead of vanishing")
+	}
+	if response.Body.Len() != 0 {
+		t.Errorf("swap_only response carried a body: %q", response.Body.String())
+	}
+}
+
+func TestDeleteExtractMissing(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	if response := del(t, server, "/elements/999"); response.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", response.Code)
 	}
 }

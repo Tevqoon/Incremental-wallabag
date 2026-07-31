@@ -36,6 +36,17 @@
             {{if not .HasRange}}<span title="not located in the article text">unanchored</span>{{end}}
             <span title="priority: lower is more important">p{{percent .Schedule.Priority}}</span>
             <span class="source">from <a href="/read/{{.ParentID}}">{{.DocumentTitle}}</a></span>
+            <!-- Removes just this row in place: hx-target/hx-swap point at the
+                 <li> itself, and swap_only=1 tells the handler to answer with
+                 an empty 200 rather than redirect, so scanning a long list of
+                 imported highlights for stray ones does not lose your place. -->
+            <button class="link-danger"
+                    hx-delete="/elements/{{.ID}}?swap_only=1"
+                    hx-target="closest li"
+                    hx-swap="outerHTML swap:200ms"
+                    hx-confirm="Delete this extract?{{if eq .Origin "import"}} It will also be removed from wallabag.{{end}}">
+              delete
+            </button>
           </div>
         </li>
       {{end}}

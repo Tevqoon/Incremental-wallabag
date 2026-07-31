@@ -16,10 +16,11 @@ import (
 // writingSource is a provider that records what was published to it and can be
 // told to fail.
 type writingSource struct {
-	archived map[string]bool
-	tags     map[string][]string
-	failWith error
-	calls    int
+	archived          map[string]bool
+	tags              map[string][]string
+	deletedHighlights []string
+	failWith          error
+	calls             int
 }
 
 func newWritingSource() *writingSource {
@@ -59,6 +60,15 @@ func (w *writingSource) AddTags(_ context.Context, id string, labels []string) e
 func (w *writingSource) RemoveTag(context.Context, string, string) error {
 	w.calls++
 	return w.failWith
+}
+
+func (w *writingSource) DeleteHighlight(_ context.Context, id string) error {
+	w.calls++
+	if w.failWith != nil {
+		return w.failWith
+	}
+	w.deletedHighlights = append(w.deletedHighlights, id)
+	return nil
 }
 
 // readOnlySource cannot write, which must be handled rather than assumed away.

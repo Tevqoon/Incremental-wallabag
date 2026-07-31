@@ -8,10 +8,11 @@ import (
 
 // Operations increader can push back to a provider.
 const (
-	OpArchive   = "archive"
-	OpStar      = "star"
-	OpTagAdd    = "tag_add"
-	OpTagRemove = "tag_remove"
+	OpArchive         = "archive"
+	OpStar            = "star"
+	OpTagAdd          = "tag_add"
+	OpTagRemove       = "tag_remove"
+	OpHighlightDelete = "highlight_delete"
 )
 
 // maxWriteAttempts caps retries so a write that can never succeed stops

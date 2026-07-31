@@ -9,6 +9,12 @@
       {{else}}
         <span class="badge">extract</span>
         <a href="/read/{{.Element.ParentID}}">↑ parent</a>
+        <button class="link-danger"
+                hx-delete="/elements/{{.Element.ID}}"
+                hx-confirm="Delete this extract? {{if eq .Element.Origin "import"}}It will also be removed from wallabag.{{end}}"
+                title="Permanently delete this extract, for an accidental selection or an unwanted highlight">
+          delete
+        </button>
       {{end}}
       {{if .Document.URL}}
         <a href="{{.Document.URL}}" rel="noopener noreferrer" target="_blank">source ↗</a>

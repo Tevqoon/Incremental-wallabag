@@ -637,6 +637,51 @@ func (s *Store) Unsuspend(id int64, today time.Time, now time.Time) error {
 	return nil
 }
 
+// DeleteExtract permanently removes an extract or item, and everything under
+// it — its own extracts, clozes, and export ledger rows — via the schema's
+// ON DELETE CASCADE. Refuses a root element: deleting a whole article is a
+// different, much larger decision than the "accidental selection" this exists
+// for, and belongs to a different action (Dismiss) if ever wanted at all.
+//
+// If the extract came from an imported wallabag highlight, this also queues its
+// removal upstream, in the same transaction as the local delete. Without that
+// pairing the highlight would survive at the provider and the next sync would
+// recreate the very extract just deleted — silently undoing the one thing the
+// reader asked for.
+func (s *Store) DeleteExtract(id int64) error {
+	return s.inTransaction(func(tx *sql.Tx) error {
+		var (
+			parentID                       sql.NullInt64
+			origin, externalRef, docSource string
+		)
+		err := tx.QueryRow(`
+			SELECT e.parent_id, e.origin, COALESCE(e.external_ref, ''), d.source
+			FROM elements e JOIN documents d ON d.id = e.document_id
+			WHERE e.id = ?`, id,
+		).Scan(&parentID, &origin, &externalRef, &docSource)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("store: element %d: %w", id, ErrNotFound)
+		}
+		if err != nil {
+			return fmt.Errorf("store: look up element %d: %w", id, err)
+		}
+		if !parentID.Valid {
+			return fmt.Errorf("store: element %d is a whole article, not an extract", id)
+		}
+
+		if origin == OriginImport && externalRef != "" {
+			if err := enqueueWrite(tx, docSource, externalRef, OpHighlightDelete, ""); err != nil {
+				return err
+			}
+		}
+
+		if _, err := tx.Exec(`DELETE FROM elements WHERE id = ?`, id); err != nil {
+			return fmt.Errorf("store: delete element %d: %w", id, err)
+		}
+		return nil
+	})
+}
+
 // SummariseQuote builds a short title from a passage's opening words.
 func SummariseQuote(text string) string {
 	const limit = 80

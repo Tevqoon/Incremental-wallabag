@@ -277,6 +277,8 @@ func applyWrite(ctx context.Context, writer source.Writer, write store.PendingWr
 		return writer.AddTags(ctx, write.ExternalID, []string{write.Payload})
 	case store.OpTagRemove:
 		return writer.RemoveTag(ctx, write.ExternalID, write.Payload)
+	case store.OpHighlightDelete:
+		return writer.DeleteHighlight(ctx, write.ExternalID)
 	default:
 		// Unknown operations are dropped rather than retried: the row was
 		// written by a version of increader that understood it, and no future

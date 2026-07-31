@@ -96,11 +96,19 @@ where nearly all of them are.
 In the reader, **select any text** to raise a toolbar:
 
 - **Extract** turns the passage into its own queue element. It appears
-  highlighted in the parent so you can see what has been harvested, and is due
-  immediately so you can refine it in the same session. Links inside an extract
-  survive.
+  highlighted in the parent so you can see what has been harvested, and comes
+  back on its own schedule (`extract_delay_days`, below) rather than
+  immediately — the value of an extract is re-reading it once the article has
+  faded, not twice in the same sitting. Links inside an extract survive.
 - **Cloze** (on an extract) marks a deletion, promoting the extract to an item
   and previewing it as Anki will receive it: `an {{c1::extract}}, and let the …`
+
+On an extract's own page, a **delete** link removes it permanently — for an
+accidental selection, or a wallabag highlight that never should have been
+made. If the extract came from an imported highlight, deleting it also queues
+the highlight's removal in wallabag, so the next sync does not bring it right
+back. The extracts browse page has the same action per row, for cleaning up a
+backlog of imports without opening each one.
 
 Grading a topic records an *intention*, not a recall judgement — while reading
 there is nothing to recall, you are deciding what deserves attention next:

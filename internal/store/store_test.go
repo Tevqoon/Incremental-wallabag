@@ -1002,3 +1002,131 @@ func TestImportedHighlightsSpreadAcrossTheWindow(t *testing.T) {
 		t.Errorf("%d due today, want just the 40 articles", due)
 	}
 }
+
+// TestDeleteExtractCascades: an extract's own children, clozes and export
+// ledger rows must all go with it — none of it should orphan on delete.
+func TestDeleteExtractCascades(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "1", Title: "An article", UpdatedAt: now},
+	}, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	extractID, err := db.CreateExtract(NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "A passage worth keeping.",
+		ContentHTML: "<p>A passage worth keeping.</p>",
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+	if _, err := db.AddCloze(extractID, 2, 9, ""); err != nil {
+		t.Fatalf("AddCloze: %v", err)
+	}
+
+	if err := db.DeleteExtract(extractID); err != nil {
+		t.Fatalf("DeleteExtract: %v", err)
+	}
+
+	if _, err := db.ElementByID(extractID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("ElementByID after delete: %v, want ErrNotFound", err)
+	}
+	clozes, err := db.ClozesOf(extractID)
+	if err != nil {
+		t.Fatalf("ClozesOf: %v", err)
+	}
+	if len(clozes) != 0 {
+		t.Errorf("got %d clozes surviving the deleted extract, want 0", len(clozes))
+	}
+}
+
+// TestDeleteExtractQueuesHighlightRemoval is the pairing that keeps a deletion
+// from silently undoing itself: without the queued upstream removal, the next
+// sync would re-import the very highlight just deleted.
+func TestDeleteExtractQueuesHighlightRemoval(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
+		ExternalID: "1", Title: "An article", UpdatedAt: now,
+		Highlights: []source.Highlight{{ExternalID: "97418", Quote: "A passage."}},
+	}}, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	extracts, _ := db.ChildrenOf(1)
+	if len(extracts) != 1 {
+		t.Fatalf("got %d extracts, want 1", len(extracts))
+	}
+
+	if err := db.DeleteExtract(extracts[0].ID); err != nil {
+		t.Fatalf("DeleteExtract: %v", err)
+	}
+
+	writes, err := db.PendingWrites("wallabag", 10)
+	if err != nil {
+		t.Fatalf("PendingWrites: %v", err)
+	}
+	if len(writes) != 1 {
+		t.Fatalf("got %d queued writes, want 1", len(writes))
+	}
+	if writes[0].Operation != OpHighlightDelete || writes[0].ExternalID != "97418" {
+		t.Errorf("queued %+v, want a highlight_delete for annotation 97418", writes[0])
+	}
+}
+
+// TestDeleteExtractOnManualOriginQueuesNothing: a hand-made extract has no
+// upstream counterpart, so nothing should be queued for it.
+func TestDeleteExtractOnManualOriginQueuesNothing(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "1", Title: "An article", UpdatedAt: now},
+	}, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+	extractID, err := db.CreateExtract(NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "Mine.", ContentHTML: "<p>Mine.</p>",
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+
+	if err := db.DeleteExtract(extractID); err != nil {
+		t.Fatalf("DeleteExtract: %v", err)
+	}
+
+	writes, _ := db.PendingWrites("wallabag", 10)
+	if len(writes) != 0 {
+		t.Errorf("got %d queued writes for a manual extract, want 0", len(writes))
+	}
+}
+
+func TestDeleteExtractRejectsRootTopic(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "1", Title: "An article", UpdatedAt: now},
+	}, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	if err := db.DeleteExtract(1); err == nil {
+		t.Fatal("expected an error deleting a root topic, got nil")
+	}
+
+	if _, err := db.ElementByID(1); err != nil {
+		t.Errorf("the root topic was removed despite the rejection: %v", err)
+	}
+}
+
+func TestDeleteExtractMissing(t *testing.T) {
+	db := testStore(t)
+	if err := db.DeleteExtract(999); !errors.Is(err, ErrNotFound) {
+		t.Errorf("DeleteExtract(999) = %v, want ErrNotFound", err)
+	}
+}

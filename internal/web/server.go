@@ -123,6 +123,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /elements/{id}/star", s.handleStar)
 	mux.HandleFunc("POST /elements/{id}/tags", s.handleAddTag)
 	mux.HandleFunc("POST /elements/{id}/tags/remove", s.handleRemoveTag)
+	mux.HandleFunc("DELETE /elements/{id}", s.handleDeleteExtract)
 
 	return mux
 }

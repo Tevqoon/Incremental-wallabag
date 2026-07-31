@@ -136,6 +136,57 @@ func (s *Server) handleGrade(w http.ResponseWriter, r *http.Request) {
 	s.redirect(w, r, "/next")
 }
 
+// handleDeleteExtract permanently removes an extract or item.
+//
+// The case this exists for is exactly "accidental entry": a stray selection
+// turned into an extract, or a wallabag highlight that never should have been
+// made. That is why it is a hard delete rather than a state change like the
+// grades — Dismiss keeps the row around for the record, this does not.
+//
+// DELETE rather than POST is the correct verb here, and it is also the one
+// htmx sends parameters for as a query string by default (methodsThatUseUrlParams
+// defaults to get and delete) — which is why swap_only, appended directly to
+// the URL in the templates, reads back with the ordinary r.FormValue.
+func (s *Server) handleDeleteExtract(w http.ResponseWriter, r *http.Request) {
+	id, err := elementID(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	element, err := s.store.ElementByID(id)
+	if err != nil {
+		s.notFoundOrFail(w, err)
+		return
+	}
+	if element.IsRoot() {
+		http.Error(w, "whole articles cannot be deleted this way", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.store.DeleteExtract(id); err != nil {
+		s.fail(w, err)
+		return
+	}
+
+	// If the extract came from an imported wallabag highlight, DeleteExtract
+	// queued its removal upstream in the same transaction. That queued write
+	// wants to reach wallabag promptly, same as any other write-back, rather
+	// than sit until the next scheduled sync.
+	s.publishSoon()
+
+	// The extracts browse page deletes a row in place — swap_only tells the
+	// handler to answer with an empty 200 so htmx's outerHTML swap on the
+	// containing <li> removes it, with no navigation and no lost scroll
+	// position. The reader has no "in place" to swap to, since the page it was
+	// looking at no longer exists, so it moves up to the parent instead.
+	if r.FormValue("swap_only") == "1" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	s.redirect(w, r, "/read/"+strconv.FormatInt(element.ParentID, 10))
+}
+
 // archiveUpstream records an article's read state locally and queues it for the
 // provider.
 //

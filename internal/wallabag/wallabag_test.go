@@ -296,3 +296,45 @@ func TestToDocumentFallsBackToGivenURL(t *testing.T) {
 		t.Errorf("Title = %q, want the URL as a fallback", document.Title)
 	}
 }
+
+// TestDeleteHighlight covers the annotation-delete path added for extract
+// deletion: the endpoint addresses an annotation by its own id, not the entry
+// it sits on, and the fake server here asserts exactly that — a request for
+// the wrong resource would otherwise pass unnoticed.
+func TestDeleteHighlight(t *testing.T) {
+	var requestedPath string
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /oauth/v2/token", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(tokenResponse{AccessToken: "tok", ExpiresIn: 3600})
+	})
+	// net/http's pattern syntax cannot express a wildcard segment followed by a
+	// literal suffix ("{id}.json" is rejected at registration), so the fixed
+	// path for the one id under test is matched directly instead.
+	mux.HandleFunc("DELETE /api/annotations/97418.json", func(w http.ResponseWriter, r *http.Request) {
+		requestedPath = r.URL.Path
+		json.NewEncoder(w).Encode(map[string]any{"id": 97418})
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := testClient(t, server.URL)
+	adapter := NewSource(client)
+
+	if err := adapter.DeleteHighlight(context.Background(), "97418"); err != nil {
+		t.Fatalf("DeleteHighlight: %v", err)
+	}
+	if requestedPath != "/api/annotations/97418.json" {
+		t.Errorf("requested %q, want the annotation's own path", requestedPath)
+	}
+}
+
+func TestDeleteHighlightRejectsNonNumericID(t *testing.T) {
+	client := testClient(t, "https://example.invalid")
+	adapter := NewSource(client)
+
+	if err := adapter.DeleteHighlight(context.Background(), "not-a-number"); err == nil {
+		t.Fatal("expected an error for a non-numeric annotation id")
+	}
+}

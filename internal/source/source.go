@@ -82,6 +82,12 @@ type Writer interface {
 	SetStarred(ctx context.Context, externalID string, starred bool) error
 	AddTags(ctx context.Context, externalID string, labels []string) error
 	RemoveTag(ctx context.Context, externalID string, label string) error
+
+	// DeleteHighlight removes one annotation at the provider, identified by its
+	// own external id — a Highlight.ExternalID, not a document's. Deleting an
+	// extract that came from an imported highlight must remove the highlight
+	// upstream too, or the next sync recreates the very extract just deleted.
+	DeleteHighlight(ctx context.Context, highlightExternalID string) error
 }
 
 // Document is one importable piece of content, normalised across providers.

@@ -492,3 +492,21 @@ button.star:hover, button.star.on { color: var(--accent); }
   color: var(--muted);
   opacity: 0.7;
 }
+
+/* ---- Inline delete link ------------------------------------------------ */
+
+/* A quiet text-link rather than a boxed button: this action shows up next to
+   ordinary metadata (the extract badge, an extracts-list row) where a bordered
+   button would visually outweigh what it sits beside, and it is confirmed via
+   hx-confirm before anything happens regardless. */
+button.link-danger {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: 0.72rem/1 system-ui, sans-serif;
+  color: var(--muted);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+button.link-danger:hover { color: var(--danger); }
