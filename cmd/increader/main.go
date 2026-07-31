@@ -196,7 +196,8 @@ func serve(settings config.Config, logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	go syncer.New(db, logger, sources...).Run(ctx, settings.SyncInterval.Duration)
+	sync := syncer.New(db, logger, sources...)
+	go sync.Run(ctx, settings.SyncInterval.Duration)
 
 	// The reader looks documents up by their source name when it needs to fetch
 	// an article body on first open.
@@ -210,6 +211,7 @@ func serve(settings config.Config, logger *slog.Logger) error {
 		Sources:    byName,
 		DailyLimit: settings.DailyLimit,
 		Logger:     logger,
+		Publish:    sync.Publish,
 	})
 	if err != nil {
 		return err

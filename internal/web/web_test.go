@@ -1039,3 +1039,194 @@ func TestExtractsPage(t *testing.T) {
 		t.Errorf("unknown origin filter: status = %d, want 400", response.Code)
 	}
 }
+
+// TestDoneArchivesUpstream is what the reader asked for: finishing an article
+// here finishes it in wallabag, so the two views stop drifting.
+func TestDoneArchivesUpstream(t *testing.T) {
+	for _, grade := range []string{"done", "dismiss"} {
+		t.Run(grade, func(t *testing.T) {
+			server, db, _ := newTestServer(t, true)
+
+			if response := post(t, server, "/elements/1/grade", url.Values{
+				"grade": {grade},
+			}); response.Code != http.StatusSeeOther {
+				t.Fatalf("status = %d", response.Code)
+			}
+
+			document, _ := db.DocumentByID(1)
+			if !document.IsArchived {
+				t.Error("the article was not archived locally")
+			}
+
+			writes, err := db.PendingWrites("wallabag", 10)
+			if err != nil {
+				t.Fatalf("PendingWrites: %v", err)
+			}
+			if len(writes) != 1 || writes[0].Operation != store.OpArchive {
+				t.Fatalf("queued %+v, want one archive write", writes)
+			}
+			if !store.PayloadBool(writes[0].Payload) {
+				t.Error("the queued write does not say archived")
+			}
+		})
+	}
+}
+
+// TestPauseDoesNotArchive keeps write-back to the two grades that mean "I am
+// finished". Pausing an article must not remove it from wallabag's unread list.
+func TestPauseDoesNotArchive(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	post(t, server, "/elements/1/grade", url.Values{"grade": {"pause"}, "block": {"1"}})
+
+	document, _ := db.DocumentByID(1)
+	if document.IsArchived {
+		t.Error("pausing archived the article")
+	}
+	writes, _ := db.PendingWrites("wallabag", 10)
+	if len(writes) != 0 {
+		t.Errorf("pausing queued %d writes, want none", len(writes))
+	}
+}
+
+// TestExtractsDoNotWriteBack: an extract has no identity in wallabag, so
+// finishing one must not touch the article it came from.
+func TestExtractsDoNotWriteBack(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	post(t, server, "/elements/1/extract", url.Values{
+		"start_block": {"0"}, "start_offset": {"4"},
+		"end_block": {"0"}, "end_offset": {"15"}, "quote": {"quick brown"},
+	})
+	children, _ := db.ChildrenOf(1)
+
+	post(t, server, "/elements/"+itoa(children[0].ID)+"/grade", url.Values{"grade": {"done"}})
+
+	document, _ := db.DocumentByID(1)
+	if document.IsArchived {
+		t.Error("finishing an extract archived its whole article")
+	}
+	writes, _ := db.PendingWrites("wallabag", 10)
+	if len(writes) != 0 {
+		t.Errorf("finishing an extract queued %d writes", len(writes))
+	}
+}
+
+func TestUnsuspendUnarchivesUpstream(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
+		ExternalID: "2", Title: "Read long ago", IsArchived: true, UpdatedAt: time.Now(),
+	}}, time.Now()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if response := post(t, server, "/elements/2/unsuspend", nil); response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d", response.Code)
+	}
+
+	document, _ := db.DocumentByID(2)
+	if document.IsArchived {
+		t.Error("re-queuing did not unarchive the article locally")
+	}
+
+	writes, _ := db.PendingWrites("wallabag", 10)
+	if len(writes) != 1 || store.PayloadBool(writes[0].Payload) {
+		t.Errorf("queued %+v, want one unarchive write", writes)
+	}
+}
+
+func TestStarToggle(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if response := post(t, server, "/elements/1/star", url.Values{
+		"starred": {"1"},
+	}); response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d", response.Code)
+	}
+
+	document, _ := db.DocumentByID(1)
+	if !document.IsStarred {
+		t.Error("starring did not take locally")
+	}
+	writes, _ := db.PendingWrites("wallabag", 10)
+	if len(writes) != 1 || writes[0].Operation != store.OpStar {
+		t.Fatalf("queued %+v, want one star write", writes)
+	}
+
+	body := get(t, server, "/read/1").Body.String()
+	if !strings.Contains(body, "★") {
+		t.Error("the reader does not show the article as starred")
+	}
+}
+
+func TestTagEditing(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if response := post(t, server, "/elements/1/tags", url.Values{
+		"label": {"philosophy"},
+	}); response.Code != http.StatusSeeOther {
+		t.Fatalf("add: status = %d", response.Code)
+	}
+
+	tags, _ := db.TagsOf(1)
+	if len(tags) != 1 || tags[0] != "philosophy" {
+		t.Fatalf("tags = %v, want [philosophy]", tags)
+	}
+	if !strings.Contains(get(t, server, "/read/1").Body.String(), "philosophy") {
+		t.Error("the reader does not show the tag")
+	}
+
+	if response := post(t, server, "/elements/1/tags/remove", url.Values{
+		"label": {"philosophy"},
+	}); response.Code != http.StatusSeeOther {
+		t.Fatalf("remove: status = %d", response.Code)
+	}
+	tags, _ = db.TagsOf(1)
+	if len(tags) != 0 {
+		t.Errorf("tags = %v after removal, want none", tags)
+	}
+
+	writes, _ := db.PendingWrites("wallabag", 10)
+	if len(writes) != 2 {
+		t.Errorf("queued %d writes, want an add and a remove", len(writes))
+	}
+
+	// A comma would silently become two tags in wallabag.
+	if response := post(t, server, "/elements/1/tags", url.Values{
+		"label": {"one,two"},
+	}); response.Code != http.StatusBadRequest {
+		t.Errorf("a comma-containing tag was accepted: status %d", response.Code)
+	}
+	if response := post(t, server, "/elements/1/tags", url.Values{
+		"label": {"   "},
+	}); response.Code != http.StatusBadRequest {
+		t.Errorf("a blank tag was accepted: status %d", response.Code)
+	}
+}
+
+func TestLibraryFilterTabs(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "2", Title: "Starred piece", IsStarred: true, UpdatedAt: time.Now()},
+		{ExternalID: "3", Title: "Archived piece", IsArchived: true, UpdatedAt: time.Now(),
+			Tags: []string{"philosophy"}},
+	}, time.Now()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	starred := get(t, server, "/library?state=starred").Body.String()
+	if !strings.Contains(starred, "Starred piece") || strings.Contains(starred, "Archived piece") {
+		t.Error("the starred filter returned the wrong set")
+	}
+
+	tagged := get(t, server, "/library?tag=philosophy").Body.String()
+	if !strings.Contains(tagged, "Archived piece") || strings.Contains(tagged, "Starred piece") {
+		t.Error("the tag filter returned the wrong set")
+	}
+
+	if response := get(t, server, "/library?state=bogus"); response.Code != http.StatusBadRequest {
+		t.Errorf("unknown state filter: status = %d, want 400", response.Code)
+	}
+}

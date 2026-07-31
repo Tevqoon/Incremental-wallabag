@@ -17,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Tevqoon/increader/internal/source"
 )
 
 // Config holds the credentials for one wallabag account.
@@ -99,6 +101,27 @@ func (c *Client) get(ctx context.Context, path string, query url.Values, out any
 }
 
 func (c *Client) getOnce(ctx context.Context, path string, query url.Values, out any) error {
+	return c.doOnce(ctx, http.MethodGet, path, query, nil, out)
+}
+
+// send performs an authenticated request with a form-encoded body, retrying
+// once after re-authenticating in the same way get does.
+//
+// wallabag's write endpoints read their parameters with $request->request->get,
+// which is the form body — not JSON, and not the query string. Sending JSON is
+// accepted by the router and then silently ignored, which would look like a
+// write that succeeded and did nothing.
+func (c *Client) send(ctx context.Context, method, path string, form url.Values, out any) error {
+	err := c.doOnce(ctx, method, path, nil, form, out)
+	if errors.Is(err, errUnauthorized) {
+		c.forgetTokens()
+		err = c.doOnce(ctx, method, path, nil, form, out)
+	}
+	return err
+}
+
+// doOnce performs a single authenticated request.
+func (c *Client) doOnce(ctx context.Context, method, path string, query, form url.Values, out any) error {
 	token, err := c.accessToken(ctx)
 	if err != nil {
 		return err
@@ -109,26 +132,41 @@ func (c *Client) getOnce(ctx context.Context, path string, query url.Values, out
 		endpoint += "?" + query.Encode()
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	var body io.Reader
+	if form != nil {
+		body = strings.NewReader(form.Encode())
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, body)
 	if err != nil {
 		return fmt.Errorf("wallabag: build request for %s: %w", path, err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
+	if form != nil {
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("wallabag: GET %s: %w", path, err)
+		return fmt.Errorf("wallabag: %s %s: %w", method, path, err)
 	}
 	defer resp.Body.Close()
 
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized:
 		return errUnauthorized
+	case resp.StatusCode == http.StatusNotFound:
+		return fmt.Errorf("wallabag: %s %s: %w", method, path, source.ErrGone)
 	case resp.StatusCode != http.StatusOK:
-		return fmt.Errorf("wallabag: GET %s: %s: %s", path, resp.Status, errorBody(resp.Body))
+		return fmt.Errorf("wallabag: %s %s: %s: %s", method, path, resp.Status, errorBody(resp.Body))
 	}
 
+	if out == nil {
+		// Drain so the connection can be reused rather than dropped.
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+		return nil
+	}
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 		return fmt.Errorf("wallabag: decode response from %s: %w", path, err)
 	}

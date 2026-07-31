@@ -9,8 +9,16 @@ package source
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+// ErrGone reports that a document no longer exists at its provider.
+//
+// Declared here rather than in a provider package so the syncer can act on it —
+// dropping a queued write that can never succeed — without importing any
+// specific provider. Providers wrap it with %w.
+var ErrGone = errors.New("source: document no longer exists")
 
 // Source is a provider of readable documents.
 //
@@ -55,6 +63,27 @@ type Enricher interface {
 	FullDocument(ctx context.Context, externalID string) (Document, error)
 }
 
+// Writer is an optional extension for providers increader can change, not only
+// read. It is the counterpart to Enricher, discovered the same way.
+//
+// Kept separate from Source because writing is a genuinely different
+// capability: a KOReader export directory can be read but not written back to,
+// and it should not have to grow stub methods that always fail. Callers ask
+// with a type assertion and skip the write when the answer is no.
+//
+// Every method is expressed in provider-neutral terms. RemoveTag in particular
+// takes a label rather than an identifier, even though wallabag's endpoint
+// needs a numeric tag id — resolving one to the other is the adapter's problem,
+// not the caller's.
+type Writer interface {
+	Source
+
+	SetArchived(ctx context.Context, externalID string, archived bool) error
+	SetStarred(ctx context.Context, externalID string, starred bool) error
+	AddTags(ctx context.Context, externalID string, labels []string) error
+	RemoveTag(ctx context.Context, externalID string, label string) error
+}
+
 // Document is one importable piece of content, normalised across providers.
 type Document struct {
 	// ExternalID is the provider's own identifier. Combined with the source
@@ -83,6 +112,12 @@ type Document struct {
 
 	// IsStarred is the provider's "favourite" flag, kept for display.
 	IsStarred bool
+
+	// Tags are the provider's labels for this document.
+	Tags []string
+
+	// ReadingTime is the provider's estimate in minutes, zero when unknown.
+	ReadingTime int
 
 	// PublishedAt is the original publication time, zero when unknown.
 	PublishedAt time.Time

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -43,10 +44,16 @@ func TestMigrationsAreIdempotent(t *testing.T) {
 	if err := second.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatalf("read user_version: %v", err)
 	}
-	// Bumped by every migration file; the point of the assertion is that
-	// re-opening does not re-apply them, not the specific number.
-	if version != 2 {
-		t.Errorf("user_version = %d, want 2", version)
+
+	// Derived from the embedded files rather than hard-coded, so adding a
+	// migration does not require editing this test. What is being asserted is
+	// that every migration ran exactly once, not any particular number.
+	files, err := migrationFiles.ReadDir("migrations")
+	if err != nil {
+		t.Fatalf("read migrations: %v", err)
+	}
+	if version != len(files) {
+		t.Errorf("user_version = %d, want %d (one per migration file)", version, len(files))
 	}
 }
 
@@ -572,6 +579,283 @@ func TestQueueInterleavesArticlesAndExtracts(t *testing.T) {
 	for i := range queue {
 		if queue[i].ID != again[i].ID {
 			t.Fatalf("queue order changed between reads at position %d", i)
+		}
+	}
+}
+
+// TestWriteIsQueuedWithTheLocalChange is the guarantee the outbox exists for:
+// the local state and the intent to publish it commit together, so they cannot
+// disagree.
+func TestWriteIsQueuedWithTheLocalChange(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "77", Title: "An article", UpdatedAt: now},
+	}, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	if err := db.SetArchived(1, "wallabag", "77", true, now); err != nil {
+		t.Fatalf("SetArchived: %v", err)
+	}
+
+	document, _ := db.DocumentByID(1)
+	if !document.IsArchived {
+		t.Error("the local column was not updated")
+	}
+
+	writes, err := db.PendingWrites("wallabag", 10)
+	if err != nil {
+		t.Fatalf("PendingWrites: %v", err)
+	}
+	if len(writes) != 1 {
+		t.Fatalf("got %d queued writes, want 1", len(writes))
+	}
+	if writes[0].Operation != OpArchive || writes[0].ExternalID != "77" {
+		t.Errorf("queued %+v, want an archive write for entry 77", writes[0])
+	}
+	if !PayloadBool(writes[0].Payload) {
+		t.Error("payload does not say archived")
+	}
+}
+
+// TestArchivingLocallyDoesNotRetriggerTheSyncTransition is the interaction that
+// would otherwise demote a finished article: writing the archive flag locally
+// means the next sync sees no change, so M6's transition does not fire.
+func TestArchivingLocallyDoesNotRetriggerTheSyncTransition(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	document := source.Document{ExternalID: "77", Title: "An article", UpdatedAt: now}
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	// Mark it done, as the reader would.
+	if err := db.SaveSchedule(1, ir.Schedule{State: ir.StateDone}, now); err != nil {
+		t.Fatalf("SaveSchedule: %v", err)
+	}
+	if err := db.SetArchived(1, "wallabag", "77", true, now); err != nil {
+		t.Fatalf("SetArchived: %v", err)
+	}
+
+	// wallabag now reports it archived, because increader archived it.
+	document.IsArchived = true
+	document.UpdatedAt = now.Add(time.Hour)
+	result, err := db.UpsertDocuments("wallabag", []source.Document{document}, now)
+	if err != nil {
+		t.Fatalf("re-sync: %v", err)
+	}
+	if result.Suspended != 0 {
+		t.Errorf("the sync treated increader's own write as a new transition")
+	}
+
+	element, _ := db.ElementByID(1)
+	if element.Schedule.State != ir.StateDone {
+		t.Errorf("state = %q, want %q — a finished article was demoted",
+			element.Schedule.State, ir.StateDone)
+	}
+}
+
+// TestQueuedWritesSupersede keeps the outbox from replaying states the reader
+// never asked to be in: archiving, unarchiving and archiving again is one final
+// state, not three requests.
+func TestQueuedWritesSupersede(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "77", UpdatedAt: now},
+	}, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	for _, archived := range []bool{true, false, true} {
+		if err := db.SetArchived(1, "wallabag", "77", archived, now); err != nil {
+			t.Fatalf("SetArchived(%v): %v", archived, err)
+		}
+	}
+
+	writes, _ := db.PendingWrites("wallabag", 10)
+	if len(writes) != 1 {
+		t.Fatalf("got %d queued writes, want 1 superseding the rest", len(writes))
+	}
+	if !PayloadBool(writes[0].Payload) {
+		t.Error("the surviving write is not the final state")
+	}
+
+	// A different operation on the same entry is independent.
+	if err := db.SetStarred(1, "wallabag", "77", true, now); err != nil {
+		t.Fatalf("SetStarred: %v", err)
+	}
+	writes, _ = db.PendingWrites("wallabag", 10)
+	if len(writes) != 2 {
+		t.Errorf("starring superseded the archive write; got %d", len(writes))
+	}
+}
+
+// TestTagWritesDoNotSupersedeDifferentTags guards the other direction: two tag
+// additions are two distinct facts, unlike two archive flags.
+func TestTagWritesDoNotSupersedeDifferentTags(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "77", UpdatedAt: now},
+	}, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	for _, label := range []string{"philosophy", "to-reread"} {
+		if err := db.AttachTag(1, "wallabag", "77", label); err != nil {
+			t.Fatalf("AttachTag(%q): %v", label, err)
+		}
+	}
+
+	writes, _ := db.PendingWrites("wallabag", 10)
+	if len(writes) != 2 {
+		t.Errorf("got %d queued tag writes, want 2", len(writes))
+	}
+
+	tags, err := db.TagsOf(1)
+	if err != nil {
+		t.Fatalf("TagsOf: %v", err)
+	}
+	if len(tags) != 2 {
+		t.Errorf("got %v locally, want both tags", tags)
+	}
+
+	// Adding the same tag twice queues one write, not two.
+	if err := db.AttachTag(1, "wallabag", "77", "philosophy"); err != nil {
+		t.Fatalf("AttachTag repeat: %v", err)
+	}
+	writes, _ = db.PendingWrites("wallabag", 10)
+	if len(writes) != 2 {
+		t.Errorf("re-adding a tag queued a duplicate write; got %d", len(writes))
+	}
+}
+
+func TestFailedWritesRetryThenStop(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "77", UpdatedAt: now},
+	}, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+	if err := db.SetArchived(1, "wallabag", "77", true, now); err != nil {
+		t.Fatalf("SetArchived: %v", err)
+	}
+
+	writes, _ := db.PendingWrites("wallabag", 10)
+	id := writes[0].ID
+
+	for attempt := 1; attempt <= maxWriteAttempts; attempt++ {
+		if err := db.FailWrite(id, errors.New("wallabag unreachable")); err != nil {
+			t.Fatalf("FailWrite: %v", err)
+		}
+	}
+
+	// Exhausted, so it stops being retried...
+	writes, _ = db.PendingWrites("wallabag", 10)
+	if len(writes) != 0 {
+		t.Errorf("an exhausted write is still being retried")
+	}
+
+	// ...but is not silently discarded.
+	queued, abandoned, err := db.CountPendingWrites("wallabag")
+	if err != nil {
+		t.Fatalf("CountPendingWrites: %v", err)
+	}
+	if queued != 0 || abandoned != 1 {
+		t.Errorf("got %d queued / %d abandoned, want 0 / 1", queued, abandoned)
+	}
+}
+
+func TestTagsSyncFromProvider(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	document := source.Document{
+		ExternalID: "77", Title: "Tagged", UpdatedAt: now,
+		Tags: []string{"philosophy", "long-read"}, ReadingTime: 21,
+	}
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	tags, _ := db.TagsOf(1)
+	if len(tags) != 2 {
+		t.Fatalf("got %v, want both tags", tags)
+	}
+
+	stored, _ := db.DocumentByID(1)
+	if stored.ReadingTime != 21 {
+		t.Errorf("reading time = %d, want 21", stored.ReadingTime)
+	}
+
+	// A tag removed upstream must disappear here. The listing is authoritative,
+	// so merging rather than replacing would strand it forever.
+	document.Tags = []string{"philosophy"}
+	document.UpdatedAt = now.Add(time.Hour)
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, now); err != nil {
+		t.Fatalf("re-sync: %v", err)
+	}
+
+	tags, _ = db.TagsOf(1)
+	if len(tags) != 1 || tags[0] != "philosophy" {
+		t.Errorf("got %v, want just philosophy after the upstream removal", tags)
+	}
+}
+
+func TestLibraryFilters(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "1", Title: "Unread one", UpdatedAt: now, Tags: []string{"philosophy"}},
+		{ExternalID: "2", Title: "Starred one", UpdatedAt: now, IsStarred: true},
+		{ExternalID: "3", Title: "Archived one", UpdatedAt: now, IsArchived: true},
+		{ExternalID: "4", Title: "Annotated one", UpdatedAt: now, IsArchived: true,
+			Highlights: []source.Highlight{{ExternalID: "9", Quote: "A passage."}}},
+	}, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	tests := []struct {
+		filter LibraryFilter
+		want   int
+	}{
+		{LibraryFilter{}, 4},
+		{LibraryFilter{State: "unread"}, 2},
+		{LibraryFilter{State: "starred"}, 1},
+		{LibraryFilter{State: "archived"}, 2},
+		{LibraryFilter{State: "annotated"}, 1},
+		{LibraryFilter{Tag: "philosophy"}, 1},
+		{LibraryFilter{Query: "Starred"}, 1},
+		{LibraryFilter{State: "archived", Query: "Annotated"}, 1},
+	}
+	for _, test := range tests {
+		got, err := db.SearchDocuments(test.filter)
+		if err != nil {
+			t.Fatalf("SearchDocuments(%+v): %v", test.filter, err)
+		}
+		if len(got) != test.want {
+			t.Errorf("filter %+v returned %d, want %d", test.filter, len(got), test.want)
+		}
+	}
+
+	counts, err := db.CountByState("wallabag")
+	if err != nil {
+		t.Fatalf("CountByState: %v", err)
+	}
+	for key, want := range map[string]int{
+		"all": 4, "unread": 2, "starred": 1, "archived": 2, "annotated": 1,
+	} {
+		if counts[key] != want {
+			t.Errorf("count %q = %d, want %d", key, counts[key], want)
 		}
 	}
 }

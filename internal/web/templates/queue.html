@@ -23,6 +23,7 @@
             <span title="priority: lower is more important">p{{percent .Schedule.Priority}}</span>
             <span title="current interval">{{days .Schedule.IntervalDays}}</span>
             <span title="repetitions">×{{.Schedule.Reps}}</span>
+            {{if and .IsRoot .ReadingTime}}<span title="estimated reading time">{{.ReadingTime}} min</span>{{end}}
             {{if not .IsRoot}}
               <span class="source">from {{.DocumentTitle}}</span>
             {{end}}

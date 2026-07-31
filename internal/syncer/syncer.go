@@ -7,6 +7,7 @@ package syncer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -15,16 +16,43 @@ import (
 	"github.com/Tevqoon/increader/internal/store"
 )
 
+// writeBatch caps how many queued writes one sync publishes, so a large backlog
+// is worked through over several passes instead of stalling a single one.
+const writeBatch = 200
+
 // Syncer imports from a fixed set of sources.
 type Syncer struct {
 	store   *store.Store
 	sources []source.Source
 	logger  *slog.Logger
+
+	// nudge carries requests to publish the outbox early. Buffered with room
+	// for one so a burst of edits collapses into a single drain rather than
+	// queueing a drain per keystroke, and non-blocking sends mean a handler
+	// never waits on it.
+	nudge chan struct{}
 }
 
 // New builds a syncer over the given sources.
 func New(db *store.Store, logger *slog.Logger, sources ...source.Source) *Syncer {
-	return &Syncer{store: db, sources: sources, logger: logger}
+	return &Syncer{
+		store:   db,
+		sources: sources,
+		logger:  logger,
+		nudge:   make(chan struct{}, 1),
+	}
+}
+
+// Publish asks the running sync loop to drain queued writes now.
+//
+// Safe to call from a request handler: it never blocks, and dropping the signal
+// when one is already pending is correct — the pending drain will pick up
+// whatever was just queued.
+func (s *Syncer) Publish() {
+	select {
+	case s.nudge <- struct{}{}:
+	default:
+	}
 }
 
 // Result summarises one source's sync.
@@ -35,6 +63,7 @@ type Result struct {
 	Updated    int
 	Suspended  int
 	Highlights int
+	Published  int
 }
 
 // SyncAll syncs every configured source.
@@ -73,6 +102,8 @@ func (s *Syncer) Sync(ctx context.Context, provider source.Source) (Result, erro
 
 	s.logger.Info("sync starting", "source", name, "since", watermarkForLog(state.Watermark))
 
+	published := s.drainWrites(ctx, provider)
+
 	documents, err := provider.Fetch(ctx, state.Watermark)
 	if err != nil {
 		// Record the failure so it is visible without reading logs, but keep
@@ -110,6 +141,7 @@ func (s *Syncer) Sync(ctx context.Context, provider source.Source) (Result, erro
 		Updated:    imported.Updated,
 		Suspended:  imported.Suspended,
 		Highlights: imported.Highlights,
+		Published:  published,
 	}
 	s.logger.Info("sync finished",
 		"source", name,
@@ -117,7 +149,8 @@ func (s *Syncer) Sync(ctx context.Context, provider source.Source) (Result, erro
 		"created", result.Created,
 		"updated", result.Updated,
 		"archived", result.Suspended,
-		"highlights", result.Highlights)
+		"highlights", result.Highlights,
+		"published", result.Published)
 	return result, nil
 }
 
@@ -143,6 +176,17 @@ func (s *Syncer) Run(ctx context.Context, interval time.Duration) {
 			if _, err := s.SyncAll(ctx); err != nil {
 				s.logger.Error("scheduled sync failed", "error", err)
 			}
+
+		case <-s.nudge:
+			// A change was made that needs sending upstream. Publish only —
+			// a full fetch here would make every star and tag edit pull the
+			// whole library.
+			for _, provider := range s.sources {
+				if published := s.drainWrites(ctx, provider); published > 0 {
+					s.logger.Info("published queued changes",
+						"source", provider.Name(), "count", published)
+				}
+			}
 		}
 	}
 }
@@ -152,4 +196,78 @@ func watermarkForLog(watermark time.Time) string {
 		return "beginning"
 	}
 	return watermark.Format(time.RFC3339)
+}
+
+// drainWrites publishes queued changes to a provider before fetching from it.
+//
+// Before, rather than after, so that a state increader has already decided —
+// an article marked Done — is upstream by the time the listing comes back. The
+// other order would fetch the stale value and then immediately overwrite it
+// locally, undoing the reader's action until the following sync.
+//
+// A provider that cannot write has nothing queued and nothing to do.
+func (s *Syncer) drainWrites(ctx context.Context, provider source.Source) int {
+	writer, ok := provider.(source.Writer)
+	if !ok {
+		return 0
+	}
+
+	writes, err := s.store.PendingWrites(provider.Name(), writeBatch)
+	if err != nil {
+		s.logger.Error("could not read pending writes", "source", provider.Name(), "error", err)
+		return 0
+	}
+
+	published := 0
+	for _, write := range writes {
+		err := applyWrite(ctx, writer, write)
+
+		switch {
+		case err == nil:
+			if err := s.store.CompleteWrite(write.ID); err != nil {
+				s.logger.Error("could not clear a published write", "id", write.ID, "error", err)
+			}
+			published++
+
+		case errors.Is(err, source.ErrGone):
+			// The entry is gone upstream, so this can never succeed. Dropping
+			// it beats retrying until the attempt cap and leaving a permanent
+			// error sitting in the queue.
+			s.logger.Warn("dropping a write for an entry that no longer exists",
+				"source", write.Source, "entry", write.ExternalID, "operation", write.Operation)
+			if err := s.store.CompleteWrite(write.ID); err != nil {
+				s.logger.Error("could not drop a write", "id", write.ID, "error", err)
+			}
+
+		default:
+			s.logger.Warn("write failed, will retry",
+				"source", write.Source, "entry", write.ExternalID,
+				"operation", write.Operation, "attempts", write.Attempts+1, "error", err)
+			if err := s.store.FailWrite(write.ID, err); err != nil {
+				s.logger.Error("could not record a write failure", "id", write.ID, "error", err)
+			}
+			// Keep going: one unreachable entry should not block the rest.
+		}
+	}
+
+	return published
+}
+
+// applyWrite dispatches one queued change to the provider.
+func applyWrite(ctx context.Context, writer source.Writer, write store.PendingWrite) error {
+	switch write.Operation {
+	case store.OpArchive:
+		return writer.SetArchived(ctx, write.ExternalID, store.PayloadBool(write.Payload))
+	case store.OpStar:
+		return writer.SetStarred(ctx, write.ExternalID, store.PayloadBool(write.Payload))
+	case store.OpTagAdd:
+		return writer.AddTags(ctx, write.ExternalID, []string{write.Payload})
+	case store.OpTagRemove:
+		return writer.RemoveTag(ctx, write.ExternalID, write.Payload)
+	default:
+		// Unknown operations are dropped rather than retried: the row was
+		// written by a version of increader that understood it, and no future
+		// attempt by this one will do better.
+		return nil
+	}
 }

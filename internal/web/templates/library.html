@@ -5,8 +5,29 @@
   <form class="search" method="get" action="/library">
     <input type="search" name="q" value="{{.Query}}"
            placeholder="Search title, author or URL" autofocus>
+    {{if .State}}<input type="hidden" name="state" value="{{.State}}">{{end}}
+    {{if .Tag}}<input type="hidden" name="tag" value="{{.Tag}}">{{end}}
     <button type="submit">Search</button>
   </form>
+
+  <nav class="filters">
+    <a href="/library" class="{{if and (not .State) (not .Tag)}}on{{end}}">All {{index .Counts "all"}}</a>
+    <a href="/library?state=unread" class="{{if eq .State "unread"}}on{{end}}">Unread {{index .Counts "unread"}}</a>
+    <a href="/library?state=starred" class="{{if eq .State "starred"}}on{{end}}">Starred {{index .Counts "starred"}}</a>
+    <a href="/library?state=archived" class="{{if eq .State "archived"}}on{{end}}">Archive {{index .Counts "archived"}}</a>
+    <a href="/library?state=annotated" class="{{if eq .State "annotated"}}on{{end}}">Annotated {{index .Counts "annotated"}}</a>
+  </nav>
+
+  {{if .Tags}}
+    <nav class="filters tag-filters">
+      {{range .Tags}}
+        {{if .Documents}}
+          <a href="/library?tag={{.Label}}" class="{{if eq $.Tag .Label}}on{{end}}">{{.Label}} {{.Documents}}</a>
+        {{end}}
+      {{end}}
+      {{if $.Tag}}<a href="/library">clear tag</a>{{end}}
+    </nav>
+  {{end}}
 
   {{if .Entries}}
     <ol class="items">
@@ -16,11 +37,13 @@
           <div class="item-meta">
             <span class="badge">{{.State}}</span>
             {{if .IsArchived}}<span class="badge">archived</span>{{end}}
-            {{if .IsStarred}}<span class="badge badge-item">starred</span>{{end}}
+            {{if .IsStarred}}<span class="badge badge-item">★</span>{{end}}
             {{if eq .State "suspended"}}
               <button class="tiny" hx-post="/elements/{{.RootElementID}}/unsuspend">queue it</button>
             {{end}}
             {{if .Author}}<span>{{.Author}}</span>{{end}}
+            {{if .ReadingTime}}<span>{{.ReadingTime}} min</span>{{end}}
+            {{range .Tags}}<a class="tag" href="/library?tag={{.}}">{{.}}</a>{{end}}
             {{if .ExtractCount}}
               <span>{{.ExtractCount}} extract{{if ne .ExtractCount 1}}s{{end}}</span>
             {{end}}

@@ -86,6 +86,7 @@ type QueueItem struct {
 	Element
 	DocumentTitle string
 	DocumentURL   string
+	ReadingTime   int
 }
 
 // elementColumns is shared by every read so the scan order cannot drift apart
@@ -172,7 +173,7 @@ func (n nullableElement) apply(element *Element) {
 // swamping the reading list; see importedPriority.
 func (s *Store) Queue(day time.Time, limit int) ([]QueueItem, error) {
 	rows, err := s.db.Query(`
-		SELECT `+elementColumns+`, d.title, d.url
+		SELECT `+elementColumns+`, d.title, d.url, d.reading_time
 		FROM elements e
 		JOIN documents d ON d.id = e.document_id
 		WHERE e.state NOT IN ('done', 'dismissed', 'suspended')
@@ -193,7 +194,7 @@ func (s *Store) Queue(day time.Time, limit int) ([]QueueItem, error) {
 			nullable nullableElement
 		)
 		targets := append(scanTargets(&item.Element, &nullable),
-			&item.DocumentTitle, &item.DocumentURL)
+			&item.DocumentTitle, &item.DocumentURL, &item.ReadingTime)
 
 		if err := rows.Scan(targets...); err != nil {
 			return nil, fmt.Errorf("store: scan queue row: %w", err)

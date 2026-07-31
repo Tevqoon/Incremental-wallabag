@@ -109,7 +109,42 @@ func (s *Server) handleGrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Finishing with an article here means finishing with it in wallabag too.
+	// Without this the two views drift: it disappears from increader's queue
+	// but sits in wallabag's Unread list forever, and the next reader to look
+	// there sees a backlog that is not real.
+	//
+	// Only whole articles: an extract has no identity upstream.
+	if element.IsRoot() && (grade == ir.GradeDone || grade == ir.GradeDismiss) {
+		if err := s.archiveUpstream(element, true); err != nil {
+			s.fail(w, err)
+			return
+		}
+	}
+
 	s.redirect(w, r, "/next")
+}
+
+// archiveUpstream records an article's read state locally and queues it for the
+// provider.
+//
+// Local and queued together, in one transaction inside the store, so the two
+// cannot disagree — and so the next sync sees no change and the archive
+// transition does not fire on increader's own write.
+func (s *Server) archiveUpstream(element store.Element, archived bool) error {
+	document, err := s.store.DocumentByID(element.DocumentID)
+	if err != nil {
+		return err
+	}
+	if document.IsArchived == archived {
+		return nil
+	}
+	if err := s.store.SetArchived(document.ID, document.Source, document.ExternalID,
+		archived, time.Now()); err != nil {
+		return err
+	}
+	s.publishSoon()
+	return nil
 }
 
 // handleUnsuspend returns a suspended element to the queue.
@@ -129,7 +164,124 @@ func (s *Server) handleUnsuspend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Putting an article back into the reading queue means it is unread again.
+	// The symmetric counterpart to archiving on Done — without it the article
+	// stays archived upstream, and the next full sync would see the archive
+	// transition and suspend it right back out of the queue.
+	element, err := s.store.ElementByID(id)
+	if err != nil {
+		s.notFoundOrFail(w, err)
+		return
+	}
+	if element.IsRoot() {
+		if err := s.archiveUpstream(element, false); err != nil {
+			s.fail(w, err)
+			return
+		}
+	}
+
 	s.redirect(w, r, "/read/"+strconv.FormatInt(id, 10))
+}
+
+// handleStar toggles wallabag's favourite flag on an article.
+func (s *Server) handleStar(w http.ResponseWriter, r *http.Request) {
+	id, err := elementID(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	element, err := s.store.ElementByID(id)
+	if err != nil {
+		s.notFoundOrFail(w, err)
+		return
+	}
+	document, err := s.store.DocumentByID(element.DocumentID)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+
+	starred := r.FormValue("starred") == "1"
+	if err := s.store.SetStarred(document.ID, document.Source, document.ExternalID,
+		starred, time.Now()); err != nil {
+		s.fail(w, err)
+		return
+	}
+	s.publishSoon()
+
+	s.redirect(w, r, "/read/"+strconv.FormatInt(id, 10))
+}
+
+// handleAddTag attaches a label to an article and queues it upstream.
+func (s *Server) handleAddTag(w http.ResponseWriter, r *http.Request) {
+	id, document, ok := s.tagTarget(w, r)
+	if !ok {
+		return
+	}
+
+	label := strings.TrimSpace(r.FormValue("label"))
+	if label == "" {
+		http.Error(w, "a tag needs a label", http.StatusBadRequest)
+		return
+	}
+	// wallabag treats a comma as a separator, so one containing a comma would
+	// silently become two tags that the reader never asked for.
+	if strings.Contains(label, ",") {
+		http.Error(w, "a tag cannot contain a comma", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.store.AttachTag(document.ID, document.Source, document.ExternalID, label); err != nil {
+		s.fail(w, err)
+		return
+	}
+	s.publishSoon()
+	s.redirect(w, r, "/read/"+strconv.FormatInt(id, 10))
+}
+
+// handleRemoveTag detaches a label from an article and queues the removal.
+func (s *Server) handleRemoveTag(w http.ResponseWriter, r *http.Request) {
+	id, document, ok := s.tagTarget(w, r)
+	if !ok {
+		return
+	}
+
+	label := strings.TrimSpace(r.FormValue("label"))
+	if label == "" {
+		http.Error(w, "a tag needs a label", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.store.DetachTag(document.ID, document.Source, document.ExternalID, label); err != nil {
+		s.fail(w, err)
+		return
+	}
+	s.publishSoon()
+	s.redirect(w, r, "/read/"+strconv.FormatInt(id, 10))
+}
+
+// tagTarget resolves the element in the request to the document its tags
+// belong to. Tags live on articles, so an extract tags its parent's article.
+func (s *Server) tagTarget(w http.ResponseWriter, r *http.Request) (int64, store.Document, bool) {
+	id, err := elementID(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return 0, store.Document{}, false
+	}
+
+	element, err := s.store.ElementByID(id)
+	if err != nil {
+		s.notFoundOrFail(w, err)
+		return 0, store.Document{}, false
+	}
+
+	document, err := s.store.DocumentByID(element.DocumentID)
+	if err != nil {
+		s.fail(w, err)
+		return 0, store.Document{}, false
+	}
+	return id, document, true
 }
 
 // handlePriority changes how urgently an element competes for attention.
@@ -230,7 +382,11 @@ func (s *Server) notFoundOrFail(w http.ResponseWriter, err error) {
 type libraryData struct {
 	Title   string
 	Query   string
+	State   string
+	Tag     string
 	Entries []store.LibraryEntry
+	Counts  map[string]int
+	Tags    []store.Tag
 }
 
 // handleLibrary lists and searches every synced document.
@@ -239,9 +395,31 @@ type libraryData struct {
 // article I remember". Both are needed, and conflating them would make the
 // queue's ordering meaningless.
 func (s *Server) handleLibrary(w http.ResponseWriter, r *http.Request) {
-	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	query := r.URL.Query()
 
-	entries, err := s.store.SearchDocuments(query, 200)
+	filter := store.LibraryFilter{
+		Query: strings.TrimSpace(query.Get("q")),
+		State: query.Get("state"),
+		Tag:   query.Get("tag"),
+	}
+	switch filter.State {
+	case "", "unread", "starred", "archived", "annotated":
+	default:
+		http.Error(w, "unknown state filter", http.StatusBadRequest)
+		return
+	}
+
+	entries, err := s.store.SearchDocuments(filter)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	counts, err := s.store.CountByState("wallabag")
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	tags, err := s.store.AllTags()
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -249,8 +427,12 @@ func (s *Server) handleLibrary(w http.ResponseWriter, r *http.Request) {
 
 	s.render(w, "library.html", libraryData{
 		Title:   "Library",
-		Query:   query,
+		Query:   filter.Query,
+		State:   filter.State,
+		Tag:     filter.Tag,
 		Entries: entries,
+		Counts:  counts,
+		Tags:    tags,
 	})
 }
 

@@ -361,3 +361,62 @@ button.tiny {
   font-size: 0.65rem;
   padding: 0.15rem 0.4rem;
 }
+
+/* ---- Tags and star ---------------------------------------------------- */
+
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0 0 1.75rem;
+}
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font: 0.7rem/1 system-ui, sans-serif;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  color: var(--muted);
+  text-decoration: none;
+}
+a.tag:hover { border-color: var(--accent); color: var(--accent); }
+
+.tag button {
+  border: 0;
+  background: none;
+  padding: 0;
+  font-size: 0.85rem;
+  line-height: 1;
+  color: var(--muted);
+  cursor: pointer;
+}
+.tag button:hover { color: var(--danger); }
+
+.tag-add input {
+  font: 0.7rem/1 system-ui, sans-serif;
+  padding: 0.3rem 0.5rem;
+  width: 7rem;
+  border: 1px dashed var(--rule);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg);
+}
+.tag-add input:focus { outline: none; border-color: var(--accent); border-style: solid; }
+
+/* The star sits in the metadata line, so it must not look like a button. */
+button.star {
+  border: 0;
+  background: none;
+  padding: 0;
+  font-size: 0.95rem;
+  line-height: 1;
+  color: var(--muted);
+  cursor: pointer;
+}
+button.star:hover, button.star.on { color: var(--accent); }
+
+.tag-filters { font-size: 0.72rem; flex-wrap: wrap; }

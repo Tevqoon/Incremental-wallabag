@@ -14,6 +14,15 @@
         <a href="{{.Document.URL}}" rel="noopener noreferrer" target="_blank">source ↗</a>
       {{end}}
       {{if .Document.Author}}<span>{{.Document.Author}}</span>{{end}}
+      {{if .Document.ReadingTime}}<span title="estimated reading time">{{.Document.ReadingTime}} min</span>{{end}}
+      {{if .Element.IsRoot}}
+        <button class="star {{if .Document.IsStarred}}on{{end}}"
+                hx-post="/elements/{{.Element.ID}}/star"
+                hx-vals='{"starred":"{{if .Document.IsStarred}}0{{else}}1{{end}}"}'
+                title="{{if .Document.IsStarred}}Remove from favourites{{else}}Add to favourites{{end}} in wallabag">
+          {{if .Document.IsStarred}}★{{else}}☆{{end}}
+        </button>
+      {{end}}
       <span title="repetitions">×{{.Element.Schedule.Reps}}</span>
       <span title="current interval">{{days .Element.Schedule.IntervalDays}}</span>
       <span>{{.Remaining}} due</span>
@@ -39,6 +48,24 @@
       </button>
     {{end}}
   </div>
+
+  {{if .Element.IsRoot}}
+    <div class="tags">
+      {{range .Tags}}
+        <span class="tag">{{.}}
+          <button hx-post="/elements/{{$.Element.ID}}/tags/remove"
+                  hx-vals='{"label":"{{.}}"}'
+                  title="Remove this tag, here and in wallabag">×</button>
+        </span>
+      {{end}}
+      <form class="tag-add" hx-post="/elements/{{.Element.ID}}/tags">
+        <input name="label" list="known-tags" placeholder="add tag" autocomplete="off">
+        <datalist id="known-tags">
+          {{range .AllTags}}<option value="{{.Label}}">{{end}}
+        </datalist>
+      </form>
+    </div>
+  {{end}}
 
   <div id="article" data-element="{{.Element.ID}}">{{.ArticleHTML}}</div>
 

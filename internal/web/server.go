@@ -43,6 +43,10 @@ type Server struct {
 	logger     *slog.Logger
 	policy     *bluemonday.Policy
 	pages      map[string]*template.Template
+
+	// publish asks the syncer to drain the outbox now. Optional: without it
+	// queued writes still go out on the next sync, just later.
+	publish func()
 }
 
 // Options configures a Server.
@@ -51,6 +55,11 @@ type Options struct {
 	Sources    map[string]source.Source
 	DailyLimit int
 	Logger     *slog.Logger
+
+	// Publish is called after a change that needs sending to a provider, so it
+	// leaves promptly instead of waiting for the sync interval. It must not
+	// block: reading should never wait on the network.
+	Publish func()
 }
 
 // New builds a Server and parses its templates.
@@ -66,6 +75,7 @@ func New(options Options) (*Server, error) {
 		logger:     options.Logger,
 		policy:     newPolicy(),
 		pages:      make(map[string]*template.Template),
+		publish:    options.Publish,
 	}
 
 	for _, name := range pageNames {
@@ -103,6 +113,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /elements/{id}/priority", s.handlePriority)
 	mux.HandleFunc("POST /elements/{id}/progress", s.handleProgress)
 	mux.HandleFunc("POST /elements/{id}/unsuspend", s.handleUnsuspend)
+	mux.HandleFunc("POST /elements/{id}/star", s.handleStar)
+	mux.HandleFunc("POST /elements/{id}/tags", s.handleAddTag)
+	mux.HandleFunc("POST /elements/{id}/tags/remove", s.handleRemoveTag)
 
 	return mux
 }
@@ -118,6 +131,17 @@ func (s *Server) Handler() http.Handler {
 // makes the process's local zone the single answer to the question.
 func (s *Server) today() time.Time {
 	return ir.Day(time.Now())
+}
+
+// publishSoon nudges the syncer to drain the outbox.
+//
+// Best-effort by design: the write is already committed and durable, so failing
+// to nudge only delays it to the next sync. That is exactly why the outbox
+// exists rather than the handler calling the API itself.
+func (s *Server) publishSoon() {
+	if s.publish != nil {
+		s.publish()
+	}
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

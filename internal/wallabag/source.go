@@ -14,6 +14,9 @@ import (
 // client stays a plain, reusable wallabag library.
 type Source struct {
 	client *Client
+
+	// tags caches label → wallabag tag id, needed only for removals.
+	tags tagCache
 }
 
 // Compile-time proof that *Source satisfies source.Source.
@@ -159,6 +162,11 @@ func toDocument(entry Entry) source.Document {
 		})
 	}
 
+	tags := make([]string, 0, len(entry.Tags))
+	for _, tag := range entry.Tags {
+		tags = append(tags, tag.Label)
+	}
+
 	return source.Document{
 		ExternalID:  strconv.Itoa(entry.ID),
 		URL:         link,
@@ -170,6 +178,8 @@ func toDocument(entry Entry) source.Document {
 		// The API reports these as ints rather than bools.
 		IsArchived:  entry.IsArchived != 0,
 		IsStarred:   entry.IsStarred != 0,
+		Tags:        tags,
+		ReadingTime: entry.ReadingTime,
 		PublishedAt: entry.PublishedAt.Time,
 		UpdatedAt:   entry.UpdatedAt.Time,
 	}

@@ -23,6 +23,8 @@ type readerData struct {
 	Clozes       []ir.Cloze
 	ClozePreview string
 	Remaining    int
+	Tags         []string
+	AllTags      []store.Tag
 }
 
 // handleRead shows one element: an article to read, or an extract to refine.
@@ -78,6 +80,17 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tags, err := s.store.TagsOf(document.ID)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	allTags, err := s.store.AllTags()
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+
 	title := element.Title
 	if title == "" {
 		title = document.Title
@@ -98,6 +111,8 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 		Clozes:       clozes,
 		ClozePreview: preview,
 		Remaining:    due,
+		Tags:         tags,
+		AllTags:      allTags,
 	})
 }
 
