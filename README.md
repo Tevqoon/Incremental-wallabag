@@ -54,8 +54,15 @@ replaced from the environment at load time. Adjust `timezone` — it decides whe
 mkdir -p data && sudo chown 65532:65532 data && docker compose up -d --build
 ```
 
-The `chown` matters: the image runs as uid 65532 (distroless's `nonroot`), and
-without it the first write to the volume fails.
+Two things about that line:
+
+- The `chown` matters: the image runs as uid 65532 (distroless's `nonroot`), and
+  without it the first write to the volume fails.
+- **`--build` matters too.** Plain `docker compose up` only builds when the image
+  is absent, so once `increader:latest` exists it will happily keep starting the
+  old one. Every page footer and the startup log show the commit the binary was
+  built from, so if something looks out of date, check there first:
+  `docker compose exec increader /increader version`.
 
 Compose publishes to `127.0.0.1:8080` on the host only. There is no login,
 because the intended deployment reaches it over Tailscale and the tailnet is the

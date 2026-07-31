@@ -1,0 +1,23 @@
+# Keep the build context small, and keep secrets out of the builder layer.
+#
+# .git is deliberately NOT excluded: the Go toolchain reads it to stamp the
+# commit into the binary, which is what makes the running build identifiable
+# from the log line and the page footer. Without it every image reports an
+# unknown revision, and "is this the version I just built" becomes guesswork
+# again — the exact problem the stamp exists to prevent.
+
+# Secrets. Never in the image, and not in an intermediate layer either.
+.env
+config.local.yaml
+
+# Local runtime state; the container has its own volume.
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Build output.
+/increader
+/dist/
+
+.DS_Store

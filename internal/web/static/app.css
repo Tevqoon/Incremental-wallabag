@@ -420,3 +420,15 @@ button.star {
 button.star:hover, button.star.on { color: var(--accent); }
 
 .tag-filters { font-size: 0.72rem; flex-wrap: wrap; }
+
+/* The running build. Quiet, but present on every page: a container left
+   running on a stale image is otherwise invisible until it misbehaves. */
+.build {
+  max-width: var(--measure);
+  margin: 3rem auto 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--rule);
+  font: 0.68rem/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--muted);
+  opacity: 0.7;
+}

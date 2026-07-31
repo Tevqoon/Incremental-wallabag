@@ -29,6 +29,7 @@ import (
 	"github.com/Tevqoon/increader/internal/source"
 	"github.com/Tevqoon/increader/internal/store"
 	"github.com/Tevqoon/increader/internal/syncer"
+	"github.com/Tevqoon/increader/internal/version"
 	"github.com/Tevqoon/increader/internal/wallabag"
 	"github.com/Tevqoon/increader/internal/web"
 )
@@ -43,7 +44,9 @@ func main() {
 }
 
 // commands are the subcommands increader accepts.
-var commands = map[string]bool{"serve": true, "sync": true, "healthcheck": true}
+var commands = map[string]bool{
+	"serve": true, "sync": true, "healthcheck": true, "version": true,
+}
 
 // splitCommand separates a leading subcommand from the flags.
 //
@@ -80,6 +83,13 @@ func run() error {
 		command = "serve"
 	}
 
+	// Answered before the config is read, so it works on a broken or missing
+	// one — which is exactly when you most want to know what is running.
+	if command == "version" {
+		fmt.Println(version.Current().Short())
+		return nil
+	}
+
 	settings, err := config.Load(*configPath)
 	if err != nil {
 		return err
@@ -102,7 +112,7 @@ func run() error {
 	case "serve":
 		return serve(settings, logger)
 	default:
-		return fmt.Errorf("unknown command %q (want serve, sync or healthcheck)", command)
+		return fmt.Errorf("unknown command %q (want serve, sync, healthcheck or version)", command)
 	}
 }
 
@@ -234,7 +244,10 @@ func serve(settings config.Config, logger *slog.Logger) error {
 		}
 	}()
 
-	logger.Info("listening", "address", settings.Bind, "timezone", settings.Location.String())
+	logger.Info("listening",
+		"address", settings.Bind,
+		"timezone", settings.Location.String(),
+		"build", version.Current().Short())
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("http server: %w", err)
 	}

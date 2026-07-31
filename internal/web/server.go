@@ -23,6 +23,7 @@ import (
 	"github.com/Tevqoon/increader/internal/ir"
 	"github.com/Tevqoon/increader/internal/source"
 	"github.com/Tevqoon/increader/internal/store"
+	"github.com/Tevqoon/increader/internal/version"
 )
 
 //go:embed templates/*.html static/*
@@ -149,7 +150,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "database unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	fmt.Fprintln(w, "ok")
+	fmt.Fprintf(w, "ok %s\n", version.Current().Short())
 }
 
 // render writes a full page.
@@ -418,6 +419,10 @@ func (s *Server) parseArticle(ctx context.Context, element store.Element) (*ir.A
 var templateFuncs = template.FuncMap{
 	// percent renders a 0..1 priority as a whole number for display.
 	"percent": func(value float64) int { return int(value*100 + 0.5) },
+
+	// build is a function rather than per-page data so every template can
+	// show it without each handler having to remember to pass it.
+	"build": func() string { return version.Current().Short() },
 
 	"date": func(t time.Time) string {
 		if t.IsZero() {

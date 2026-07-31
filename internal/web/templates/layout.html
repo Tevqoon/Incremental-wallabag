@@ -22,5 +22,9 @@
   <main>
     {{template "content" .}}
   </main>
+
+  <footer class="build" title="the running build, so a stale container is visible">
+    {{build}}
+  </footer>
 </body>
 </html>{{end}}

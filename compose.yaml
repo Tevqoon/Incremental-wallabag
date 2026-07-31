@@ -1,3 +1,11 @@
+# Rebuild with:  docker compose up -d --build
+#
+# The --build matters. Plain `docker compose up` only builds when the image is
+# missing, so once increader:latest exists it keeps starting the old one — the
+# app looks subtly out of date with nothing to say why. Every page footer and
+# the startup log print the commit they were built from, so a stale container
+# is visible rather than merely suspected.
+
 services:
   increader:
     build: .
