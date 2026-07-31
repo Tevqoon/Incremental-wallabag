@@ -18,6 +18,11 @@ It **schedules reading** — which is the part Anki cannot do. It **authors** cl
 items but does not review them: those are exported to Anki, which already does
 item spaced repetition well and is where a review habit usually already lives.
 
+It **writes back to wallabag**: finishing an article archives it, re-queuing one
+unarchives it, and stars and tags edited here are pushed upstream. Every such
+change is recorded in an outbox in the same transaction as the local change, so
+a wallabag outage delays a write rather than losing it.
+
 Wallabag is one source behind a `Source` interface, and Anki/org-roam are targets
 behind a `Target` interface, so adding KOReader or Zotero later is an addition
 rather than a rewrite.
@@ -99,7 +104,7 @@ there is nothing to recall, you are deciding what deserves attention next:
 | **Sooner** | More interesting than expected. Halves the interval and slows future growth. |
 | **Later** | Not now. Pushes it out, and *compounds* — repeatedly postponing something makes it recede faster and faster, so uninteresting material drains out of the queue without ever being explicitly abandoned. |
 | **Suspend** | Park it indefinitely. Keeps the interval, A-Factor and read point, so unsuspending resumes rather than restarts. |
-| **Done** / **Dismiss** | Finished with it / abandoning it unread. |
+| **Done** / **Dismiss** | Finished with it / abandoning it unread. Both **archive the article in wallabag**, so it leaves your Unread list there too. |
 
 Pausing marks the **read point** — the boundary between what you have read and
 what you have not — and reopening the article scrolls there and shows it.
@@ -110,6 +115,10 @@ out of sight.
 
 Highlights you already made in wallabag's own reader are imported as extracts
 during sync, and located in the article text the first time you open it.
+
+Tags and the star toggle sit above the article and write straight through to
+wallabag. The Library's filter tabs carry the same counts as wallabag's own
+sidebar — Unread, Starred, Archive, Annotated — plus per-tag filters.
 
 ## Development
 
@@ -141,6 +150,11 @@ shift every offset in the block. Offsets are always computed against the
 **sanitised** HTML, since sanitising changes the document's shape; both sides
 parse the same sanitised output, so the coordinates agree.
 
+**Per-row queries follow the iteration, never run inside it.** The connection
+pool is capped at one, because SQLite tolerates a single writer. A query issued
+while iterating another query's rows waits for a connection that the loop itself
+is holding — a deadlock rather than an error, so it hangs instead of failing.
+
 **"Today" is decided in exactly one place.** Due dates are stored as bare dates,
 so writing and comparing them must use the same zone. `main` pins `time.Local`
 to the configured timezone at startup and everything reads that. The container
@@ -149,9 +163,9 @@ and every date would otherwise silently be UTC.
 
 ## Status
 
-Working: wallabag sync including archive state, the reading queue, extracts and
-clozes, scheduling with read points and suspension, annotation import, library
-and extract browsing.
+Working: two-way wallabag sync (archive state, tags, stars, reading time), the
+reading queue, extracts and clozes, scheduling with read points and suspension,
+annotation import, library and extract browsing.
 
 `increader sync -full` ignores the watermark and re-reads everything. Needed
 after a release that starts storing a field it did not before, since incremental
