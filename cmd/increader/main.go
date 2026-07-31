@@ -172,7 +172,9 @@ func runSync(settings config.Config, logger *slog.Logger, full bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 
-	results, err := syncer.New(db, logger, sources...).SyncAll(ctx)
+	results, err := syncer.New(db, logger, sources...).
+		WithExtractDelay(settings.ExtractDelayDays).
+		SyncAll(ctx)
 	for _, result := range results {
 		fmt.Printf("%s: %d fetched, %d new, %d updated, %d archived, %d highlights\n",
 			result.Source, result.Fetched, result.Created, result.Updated,
@@ -206,7 +208,7 @@ func serve(settings config.Config, logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	sync := syncer.New(db, logger, sources...)
+	sync := syncer.New(db, logger, sources...).WithExtractDelay(settings.ExtractDelayDays)
 	go sync.Run(ctx, settings.SyncInterval.Duration)
 
 	// The reader looks documents up by their source name when it needs to fetch
@@ -217,11 +219,12 @@ func serve(settings config.Config, logger *slog.Logger) error {
 	}
 
 	reader, err := web.New(web.Options{
-		Store:      db,
-		Sources:    byName,
-		DailyLimit: settings.DailyLimit,
-		Logger:     logger,
-		Publish:    sync.Publish,
+		Store:        db,
+		Sources:      byName,
+		DailyLimit:   settings.DailyLimit,
+		ExtractDelay: settings.ExtractDelayDays,
+		Logger:       logger,
+		Publish:      sync.Publish,
 	})
 	if err != nil {
 		return err

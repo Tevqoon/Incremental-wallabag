@@ -100,6 +100,17 @@ func (s *Server) handleGrade(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Burying changes where an element sits within today rather than which day
+	// it is due, so it bypasses the scheduler entirely.
+	if grade == ir.GradeBury {
+		if err := s.store.Bury(id, s.today()); err != nil {
+			s.fail(w, err)
+			return
+		}
+		s.redirect(w, r, "/next")
+		return
+	}
+
 	// The whole scheduling decision is one pure function call. Everything
 	// stateful — reading the row, writing it back — stays here.
 	updated := ir.Next(element.Schedule, grade, s.today())
@@ -336,12 +347,14 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 // parseGrade maps a form value onto a grade.
 func parseGrade(value string) (ir.Grade, bool) {
 	switch value {
-	case "pause":
-		return ir.GradePause, true
-	case "later":
-		return ir.GradeLater, true
+	case "next":
+		return ir.GradeNext, true
+	case "defer":
+		return ir.GradeDefer, true
 	case "sooner":
 		return ir.GradeSooner, true
+	case "bury":
+		return ir.GradeBury, true
 	case "done":
 		return ir.GradeDone, true
 	case "dismiss":

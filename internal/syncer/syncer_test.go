@@ -84,7 +84,7 @@ func seed(t *testing.T, db *store.Store) {
 	t.Helper()
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "77", Title: "An article", UpdatedAt: time.Now()},
-	}, time.Now()); err != nil {
+	}, 0, time.Now()); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 }

@@ -8,6 +8,10 @@
 *.db-wal
 *.db-shm
 
+# Browser-test harness, installed on demand rather than vendored — it has no
+# business in the dependency set of a single-static-binary application.
+node_modules/
+
 # Secrets and local config
 .env
 config.local.yaml

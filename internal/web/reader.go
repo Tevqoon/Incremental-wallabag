@@ -25,6 +25,10 @@ type readerData struct {
 	Remaining    int
 	Tags         []string
 	AllTags      []store.Tag
+
+	// Intervals labels each grade button with what it would actually do,
+	// keyed by the form value the button posts.
+	Intervals map[string]string
 }
 
 // handleRead shows one element: an article to read, or an extract to refine.
@@ -91,6 +95,16 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Each button is labelled with the interval its grade would produce. The
+	// previews come from the scheduler itself rather than a parallel
+	// calculation, so a button cannot advertise something that would not happen.
+	previews := ir.Previews(element.Schedule, s.today())
+	intervals := map[string]string{
+		"next":   previews[ir.GradeNext].Interval,
+		"sooner": previews[ir.GradeSooner].Interval,
+		"defer":  previews[ir.GradeDefer].Interval,
+	}
+
 	title := element.Title
 	if title == "" {
 		title = document.Title
@@ -113,6 +127,7 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 		Remaining:    due,
 		Tags:         tags,
 		AllTags:      allTags,
+		Intervals:    intervals,
 	})
 }
 
@@ -219,7 +234,8 @@ func (s *Server) handleExtract(w http.ResponseWriter, r *http.Request) {
 		HasRange:    true,
 		// An extract inherits its parent's priority: the reason a passage was
 		// worth pulling out is that its article was worth reading.
-		Priority: parent.Schedule.Priority,
+		Priority:  parent.Schedule.Priority,
+		DelayDays: s.extractDelay,
 	}, time.Now())
 	if err != nil {
 		s.fail(w, err)

@@ -22,6 +22,13 @@ sync_interval: 30m
 # Maximum elements the queue offers in a day.
 daily_limit: 60
 
+# How long before a new extract first comes back — whether made here or
+# imported from a wallabag highlight. Putting one straight back in front of you
+# defeats the point; the value of an extract is re-reading it once the article
+# has faded. Imports are spread across this window rather than all landing on
+# the same day.
+extract_delay_days: 10
+
 sources:
   wallabag:
     # The official hosted instance. Use your own base URL if self-hosting.

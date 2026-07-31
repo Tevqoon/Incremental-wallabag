@@ -237,12 +237,31 @@ mark.extract {
   position: sticky;
   bottom: 0;
   margin-top: 3rem;
-  padding: 0.9rem 0;
+  padding: 0.9rem 0 0.6rem;
   background: var(--bg);
   border-top: 1px solid var(--rule);
 }
 
-.grade-buttons { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+/* Three groups, because there are three decisions: finished with it, not now,
+   or come back in N days. The gaps carry that structure; without them the
+   buttons read as one undifferentiated row of verbs. */
+.grade-groups {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.5rem;
+  align-items: flex-end;
+}
+
+.grade-group { display: flex; flex-direction: column; gap: 0.3rem; }
+
+.grade-label {
+  font: 600 0.6rem/1 system-ui, sans-serif;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--muted);
+}
+
+.grade-buttons { display: flex; gap: 0.4rem; }
 
 button, .button {
   font: 600 0.8rem/1 system-ui, sans-serif;
@@ -257,24 +276,59 @@ button, .button {
 }
 button:hover, .button:hover { border-color: var(--accent); color: var(--accent); }
 
+/* The interval each grade would produce, under its label — the thing Anki got
+   right. A grade whose effect you cannot see is one you have to memorise. */
+.grade-buttons button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.28rem;
+  min-width: 4.6rem;
+  padding: 0.5rem 0.75rem;
+}
+.grade-buttons button small {
+  font-size: 0.65rem;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
+}
+
 .primary { background: var(--accent); border-color: var(--accent); color: var(--bg); }
 .primary:hover { opacity: 0.9; color: var(--bg); }
 
 button.danger:hover { border-color: var(--danger); color: var(--danger); }
 
+/* Rare and awkward to undo, so deliberately not adjacent to the everyday
+   buttons: sitting next to Done is how Dismiss gets pressed by accident. */
+.grade-secondary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 1px dashed var(--rule);
+}
+.grade-secondary button {
+  font-size: 0.7rem;
+  padding: 0.4rem 0.7rem;
+  color: var(--muted);
+}
+
 .priority {
   display: flex;
   align-items: center;
-  gap: 0.6rem;
-  margin-top: 0.9rem;
-  font: 0.75rem/1 system-ui, sans-serif;
+  gap: 0.5rem;
+  margin-left: auto;
+  font: 0.7rem/1 system-ui, sans-serif;
   color: var(--muted);
 }
-.priority input { flex: 1; max-width: 12rem; }
-.priority .hint { font-style: italic; }
+.priority input { width: 7rem; }
 
-@media (max-width: 30rem) {
-  .priority .hint { display: none; }
+@media (max-width: 34rem) {
+  .grade-groups { gap: 1rem; }
+  .grade-buttons button { min-width: 3.9rem; padding: 0.45rem 0.5rem; }
+  .priority { margin-left: 0; width: 100%; }
 }
 
 /* ---- Library search --------------------------------------------------- */

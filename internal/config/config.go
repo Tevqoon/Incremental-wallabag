@@ -36,6 +36,10 @@ type Config struct {
 	// DailyLimit caps how many elements the queue offers per day.
 	DailyLimit int `yaml:"daily_limit"`
 
+	// ExtractDelayDays is how long before a newly made or newly imported
+	// extract first becomes due. Zero means today.
+	ExtractDelayDays int `yaml:"extract_delay_days"`
+
 	Sources Sources `yaml:"sources"`
 
 	// Location is the resolved Timezone, filled in by Load.
@@ -105,11 +109,12 @@ func Load(path string) (Config, error) {
 	})
 
 	config := Config{
-		Bind:         "0.0.0.0:8080",
-		Database:     "./increader.db",
-		Timezone:     "Local",
-		SyncInterval: Duration{30 * time.Minute},
-		DailyLimit:   60,
+		Bind:             "0.0.0.0:8080",
+		Database:         "./increader.db",
+		Timezone:         "Local",
+		SyncInterval:     Duration{30 * time.Minute},
+		DailyLimit:       60,
+		ExtractDelayDays: 10,
 	}
 	if err := yaml.Unmarshal([]byte(expanded), &config); err != nil {
 		return Config{}, fmt.Errorf("config: parse %s: %w", path, err)
@@ -123,6 +128,10 @@ func Load(path string) (Config, error) {
 
 	if config.DailyLimit <= 0 {
 		return Config{}, fmt.Errorf("config: daily_limit must be positive, got %d", config.DailyLimit)
+	}
+	if config.ExtractDelayDays < 0 {
+		return Config{}, fmt.Errorf("config: extract_delay_days cannot be negative, got %d",
+			config.ExtractDelayDays)
 	}
 	if config.Database == "" {
 		return Config{}, fmt.Errorf("config: database path is required")

@@ -88,5 +88,27 @@ const stuck = await page.isVisible('#selection-toolbar');
 console.log('6. toolbar hidden after extracting:', !stuck);
 if (stuck) fail('the toolbar stayed on screen after use');
 
+// 7. The grading bar. Each button must carry the interval its grade produces,
+//    and clicking one must actually navigate to the next element — the whole
+//    bar is hx-post driven, so it fails the same silent way Extract did.
+const labels = await page.locator('.grade-buttons button').allInnerTexts();
+console.log('7. grade buttons:', JSON.stringify(labels));
+if (labels.length < 4) fail('the grading bar is missing buttons');
+if (!labels.some(l => /\d+(d|mo|y)/.test(l))) fail('no button shows an interval');
+
+for (const group of ['Finished', 'Skip', 'Schedule']) {
+  if (!(await page.locator('.grade-label', { hasText: group }).count())) {
+    fail('no ' + group + ' group in the grading bar');
+  }
+}
+
+const graded = [];
+page.on('response', r => { if (r.url().includes('/grade')) graded.push(r.status()); });
+await page.click('.grade-buttons button:has-text("Later")');
+await page.waitForTimeout(1200);
+console.log('8. bury: request status', graded, '-> now at', page.url());
+if (graded.length === 0) fail('clicking a grade button sent no request');
+if (!page.url().includes('/read/')) fail('grading did not move on to the next element');
+
 await browser.close();
 if (!process.exitCode) console.log('\nALL CHECKS PASSED');

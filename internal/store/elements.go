@@ -72,6 +72,11 @@ type Element struct {
 	Origin      string
 	ExternalRef string
 
+	// BuriedOn is the date this element was skipped, as YYYY-MM-DD. Kept as a
+	// string because it is only ever compared to today for equality, never
+	// ordered or arithmetic'd.
+	BuriedOn string
+
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
@@ -97,7 +102,7 @@ const elementColumns = `
 	e.start_block, e.start_offset, e.end_block, e.end_offset,
 	e.priority, e.state, e.due_on, e.interval_days, e.afactor, e.reps,
 	e.read_block, e.origin, COALESCE(e.external_ref, ''),
-	e.created_at, e.updated_at`
+	e.buried_on, e.created_at, e.updated_at`
 
 // nullableElement holds the columns that can be NULL, which cannot be scanned
 // straight into the Element fields they populate.
@@ -107,6 +112,7 @@ type nullableElement struct {
 	endBlock    sql.NullInt64
 	endOffset   sql.NullInt64
 	dueOn       sql.NullString
+	buriedOn    sql.NullString
 	createdAt   sql.NullString
 	updatedAt   sql.NullString
 }
@@ -127,7 +133,7 @@ func scanTargets(element *Element, nullable *nullableElement) []any {
 		&element.Schedule.Priority, &element.Schedule.State, &nullable.dueOn,
 		&element.Schedule.IntervalDays, &element.Schedule.AFactor, &element.Schedule.Reps,
 		&element.ReadBlock, &element.Origin, &element.ExternalRef,
-		&nullable.createdAt, &nullable.updatedAt,
+		&nullable.buriedOn, &nullable.createdAt, &nullable.updatedAt,
 	}
 }
 
@@ -151,6 +157,9 @@ func (n nullableElement) apply(element *Element) {
 		}
 	}
 
+	if n.buriedOn.Valid {
+		element.BuriedOn = n.buriedOn.String
+	}
 	element.CreatedAt = parseTime(n.createdAt)
 	element.UpdatedAt = parseTime(n.updatedAt)
 }
@@ -171,6 +180,10 @@ func (n nullableElement) apply(element *Element) {
 //
 // Priority still dominates, which is what keeps a large imported backlog from
 // swamping the reading list; see importedPriority.
+//
+// Anything buried today sorts behind everything else still due, so working
+// through the rest of the queue brings it back around rather than losing it for
+// the day.
 func (s *Store) Queue(day time.Time, limit int) ([]QueueItem, error) {
 	rows, err := s.db.Query(`
 		SELECT `+elementColumns+`, d.title, d.url, d.reading_time
@@ -178,9 +191,10 @@ func (s *Store) Queue(day time.Time, limit int) ([]QueueItem, error) {
 		JOIN documents d ON d.id = e.document_id
 		WHERE e.state NOT IN ('done', 'dismissed', 'suspended')
 		  AND (e.due_on IS NULL OR e.due_on <= ?)
-		ORDER BY e.priority ASC, e.due_on ASC, (e.id * 2654435761) % 1000003 ASC
+		ORDER BY (CASE WHEN e.buried_on = ? THEN 1 ELSE 0 END) ASC,
+		         e.priority ASC, e.due_on ASC, (e.id * 2654435761) % 1000003 ASC
 		LIMIT ?`,
-		day.Format(dateFormat), limit,
+		day.Format(dateFormat), day.Format(dateFormat), limit,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("store: read queue: %w", err)
@@ -266,12 +280,18 @@ type NewExtract struct {
 	Priority    float64
 	Origin      string
 	ExternalRef string
+
+	// DelayDays is how long before the extract first becomes due. Zero means
+	// today, which is what a caller with no opinion gets.
+	DelayDays int
 }
 
 // CreateExtract inserts a child element and returns its id.
 //
-// A new extract is due immediately: having just decided a passage matters, the
-// reader should see it again in this session rather than tomorrow.
+// A new extract comes back after DelayDays rather than immediately. Putting it
+// straight back in front of the reader is the opposite of the point: the value
+// of an extract is re-reading it once the article has faded, not twice in the
+// same sitting.
 func (s *Store) CreateExtract(extract NewExtract, now time.Time) (int64, error) {
 	if extract.Kind == "" {
 		extract.Kind = KindTopic
@@ -304,7 +324,7 @@ func (s *Store) CreateExtract(extract NewExtract, now time.Time) (int64, error) 
 		extract.DocumentID, extract.ParentID, extract.Kind, extract.Title,
 		extract.ContentHTML, extract.Quote,
 		startBlock, startOffset, endBlock, endOffset,
-		extract.Priority, now.Format(dateFormat),
+		extract.Priority, now.AddDate(0, 0, extract.DelayDays).Format(dateFormat),
 		extract.Origin, externalRef,
 		formatTime(now), formatTime(now),
 	)
@@ -348,6 +368,22 @@ func (s *Store) SetPriority(id int64, priority float64, now time.Time) error {
 	)
 	if err != nil {
 		return fmt.Errorf("store: set priority of element %d: %w", id, err)
+	}
+	return nil
+}
+
+// Bury moves an element to the end of today's queue.
+//
+// Distinct from every other grade in leaving the schedule alone: it changes
+// position within a day, not which day. Recording the date rather than a flag
+// means it expires by itself — tomorrow the value no longer matches today.
+func (s *Store) Bury(id int64, today time.Time) error {
+	_, err := s.db.Exec(
+		`UPDATE elements SET buried_on = ? WHERE id = ?`,
+		today.Format(dateFormat), id,
+	)
+	if err != nil {
+		return fmt.Errorf("store: bury element %d: %w", id, err)
 	}
 	return nil
 }
@@ -491,7 +527,7 @@ func suspendIfActive(tx *sql.Tx, id int64, now time.Time) error {
 // and the listing that carries annotations deliberately omits it. That costs
 // nothing while the parent stays archived, and AnchorExtract fills the position
 // in later if the article is ever opened.
-func insertHighlights(tx *sql.Tx, documentID, parentID int64, highlights []source.Highlight, now time.Time) (int, error) {
+func insertHighlights(tx *sql.Tx, documentID, parentID int64, highlights []source.Highlight, delayDays int, now time.Time) (int, error) {
 	imported := 0
 
 	for _, highlight := range highlights {
@@ -525,7 +561,11 @@ func insertHighlights(tx *sql.Tx, documentID, parentID int64, highlights []sourc
 			"<p>"+html.EscapeString(highlight.Quote)+"</p>",
 			highlight.Quote,
 			importedPriority,
-			now.Format(dateFormat),
+			// Spread across the window rather than all landing on the same
+			// day: a library's import is hundreds of highlights at once, and
+			// stacking them on one date moves the pile instead of clearing it.
+			// The multiplier matches the queue's tie-break so the two agree.
+			now.AddDate(0, 0, spreadOffset(documentID, delayDays)).Format(dateFormat),
 			highlight.ExternalID,
 			formatTime(now), formatTime(now),
 		)
@@ -536,6 +576,21 @@ func insertHighlights(tx *sql.Tx, documentID, parentID int64, highlights []sourc
 	}
 
 	return imported, nil
+}
+
+// spreadOffset scatters a batch of imports deterministically across a window.
+//
+// The result runs 1..window rather than 0..window-1: a highlight scheduled
+// "ten days out" should not have a one-in-ten chance of being due the same day
+// it was imported, which is the immediacy the delay exists to remove.
+//
+// The multiplier is the one the queue's tie-break uses, so the two orderings
+// agree instead of one scrambling what the other arranged.
+func spreadOffset(seed int64, window int) int {
+	if window <= 0 {
+		return 0
+	}
+	return int(((seed*2654435761)%int64(window)+int64(window))%int64(window)) + 1
 }
 
 // AnchorExtract records where an extract sits in its parent, for one that was

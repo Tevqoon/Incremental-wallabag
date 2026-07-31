@@ -112,39 +112,76 @@
   {{end}}
 
   <footer class="grades">
-    <div class="grade-buttons">
-      <!-- hx-vals is a js: expression so the read point is the block visible at
-           the moment of the click, not whatever the throttled scroll tracker
-           last managed to send. -->
-      <button class="primary"
-              hx-post="/elements/{{.Element.ID}}/grade"
-              hx-vals='js:{grade:"pause", block: topBlock()}'
-              title="Stop here, keep my place, come back on schedule">Pause</button>
-      <button hx-post="/elements/{{.Element.ID}}/grade"
-              hx-vals='js:{grade:"sooner", block: topBlock()}'
-              title="More interesting than expected; bring it back sooner">Sooner</button>
-      <button hx-post="/elements/{{.Element.ID}}/grade"
-              hx-vals='js:{grade:"later", block: topBlock()}'
-              title="Not now; push it further out each time">Later</button>
+    <!-- Grouped by the three decisions actually being made while reading:
+         I am finished with this, not this one right now, or come back to it
+         in N days. Each button carries the interval it would produce, taken
+         from the scheduler itself. -->
+    <div class="grade-groups">
+      <div class="grade-group">
+        <span class="grade-label">Finished</span>
+        <div class="grade-buttons">
+          <button class="primary"
+                  hx-post="/elements/{{.Element.ID}}/grade"
+                  hx-vals='js:{grade:"done", block: topBlock()}'
+                  title="Finished with this. Archives it in wallabag too.">
+            Done<small>{{if .Element.IsRoot}}archive{{else}}finish{{end}}</small>
+          </button>
+        </div>
+      </div>
+
+      <div class="grade-group">
+        <span class="grade-label">Skip</span>
+        <div class="grade-buttons">
+          <button hx-post="/elements/{{.Element.ID}}/grade"
+                  hx-vals='js:{grade:"bury", block: topBlock()}'
+                  title="Not now, but before I stop reading today. Goes to the end of today's queue.">
+            Later<small>today</small>
+          </button>
+        </div>
+      </div>
+
+      <div class="grade-group">
+        <span class="grade-label">Schedule</span>
+        <div class="grade-buttons">
+          <button hx-post="/elements/{{.Element.ID}}/grade"
+                  hx-vals='js:{grade:"sooner", block: topBlock()}'
+                  title="More interesting than expected; bring it back sooner">
+            Sooner<small>{{index .Intervals "sooner"}}</small>
+          </button>
+          <button class="primary"
+                  hx-post="/elements/{{.Element.ID}}/grade"
+                  hx-vals='js:{grade:"next", block: topBlock()}'
+                  title="Read a slice; come back on schedule">
+            Next<small>{{index .Intervals "next"}}</small>
+          </button>
+          <button hx-post="/elements/{{.Element.ID}}/grade"
+                  hx-vals='js:{grade:"defer", block: topBlock()}'
+                  title="Not compelling; push it out, and further each time">
+            Defer<small>{{index .Intervals "defer"}}</small>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="grade-secondary">
+      <!-- Set apart because they are rare and hard to undo; next to Done is
+           how they get pressed by accident. -->
       <button hx-post="/elements/{{.Element.ID}}/grade"
               hx-vals='js:{grade:"suspend", block: topBlock()}'
               title="Park indefinitely; keeps its interval and resumes where it left off">Suspend</button>
-      <button hx-post="/elements/{{.Element.ID}}/grade" hx-vals='{"grade":"done"}'
-              title="Finished with this">Done</button>
       <button class="danger" hx-post="/elements/{{.Element.ID}}/grade" hx-vals='{"grade":"dismiss"}'
-              title="Abandon unread">Dismiss</button>
-    </div>
+              title="Abandon unread. Archives it in wallabag too.">Dismiss</button>
 
-    <label class="priority">
-      Priority
-      <input type="range" min="0" max="100" step="5"
-             value="{{percent .Element.Schedule.Priority}}"
-             hx-post="/elements/{{.Element.ID}}/priority"
-             hx-trigger="change"
-             hx-vals="js:{priority: event.target.value / 100}">
-      <output>{{percent .Element.Schedule.Priority}}</output>
-      <span class="hint">lower is more important</span>
-    </label>
+      <label class="priority">
+        Priority
+        <input type="range" min="0" max="100" step="5"
+               value="{{percent .Element.Schedule.Priority}}"
+               hx-post="/elements/{{.Element.ID}}/priority"
+               hx-trigger="change"
+               hx-vals="js:{priority: event.target.value / 100}">
+        <output>{{percent .Element.Schedule.Priority}}</output>
+      </label>
+    </div>
   </footer>
 </article>
 {{end}}

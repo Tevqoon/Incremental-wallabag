@@ -43,6 +43,17 @@ const articleBody = `<p>The quick brown fox.</p>` +
 // newTestServer builds a server over a fresh database holding one article.
 func newTestServer(t *testing.T, withContent bool) (*Server, *store.Store, *fakeSource) {
 	t.Helper()
+	return newTestServerWithDelay(t, 0, withContent)
+}
+
+// newTestServerWithDelay builds a server whose new extracts are scheduled
+// delayDays ahead. Most tests want 0 so an extract is immediately assertable.
+func newTestServerWithDelay(t *testing.T, delayDays int, withContent ...bool) (*Server, *store.Store, *fakeSource) {
+	t.Helper()
+	hasContent := true
+	if len(withContent) > 0 {
+		hasContent = withContent[0]
+	}
 
 	db, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
@@ -57,19 +68,20 @@ func newTestServer(t *testing.T, withContent bool) (*Server, *store.Store, *fake
 		Author:     "Someone",
 		UpdatedAt:  time.Now(),
 	}
-	if withContent {
+	if hasContent {
 		document.ContentHTML = articleBody
 	}
-	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, time.Now()); err != nil {
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, time.Now()); err != nil {
 		t.Fatalf("seed document: %v", err)
 	}
 
 	provider := &fakeSource{body: articleBody}
 	server, err := New(Options{
-		Store:      db,
-		Sources:    map[string]source.Source{"wallabag": provider},
-		DailyLimit: 60,
-		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Store:        db,
+		Sources:      map[string]source.Source{"wallabag": provider},
+		DailyLimit:   60,
+		ExtractDelay: delayDays,
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -446,7 +458,7 @@ func TestGradeReschedulesAndMovesOn(t *testing.T) {
 	}
 
 	request := httptest.NewRequest(http.MethodPost, "/elements/1/grade",
-		strings.NewReader("grade=pause&block=1"))
+		strings.NewReader("grade=next&block=1"))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.Header.Set("HX-Request", "true")
 	recorder := httptest.NewRecorder()
@@ -550,7 +562,7 @@ func TestNextRedirectsToMostImportant(t *testing.T) {
 		ExternalID: "2",
 		Title:      "More important",
 		UpdatedAt:  time.Now(),
-	}}, time.Now()); err != nil {
+	}}, 0, time.Now()); err != nil {
 		t.Fatalf("seed second document: %v", err)
 	}
 	if err := db.SetPriority(2, 0.1, time.Now()); err != nil {
@@ -669,7 +681,7 @@ func newEnrichedServer(t *testing.T, highlights []source.Highlight) (*Server, *s
 		ExternalID: "1",
 		Title:      "A test article",
 		UpdatedAt:  time.Now(),
-	}}, time.Now()); err != nil {
+	}}, 0, time.Now()); err != nil {
 		t.Fatalf("seed document: %v", err)
 	}
 
@@ -825,7 +837,7 @@ func TestLibraryListsAndSearches(t *testing.T) {
 		{ExternalID: "2", Title: "On the difficulty of reading", Author: "A. Writer",
 			UpdatedAt: time.Now()},
 		{ExternalID: "3", Title: "Something unrelated", UpdatedAt: time.Now()},
-	}, time.Now()); err != nil {
+	}, 0, time.Now()); err != nil {
 		t.Fatalf("seed documents: %v", err)
 	}
 
@@ -864,7 +876,7 @@ func TestReadPointSurvivesGrading(t *testing.T) {
 	server, db, _ := newTestServer(t, true)
 
 	response := post(t, server, "/elements/1/grade", url.Values{
-		"grade": {"pause"},
+		"grade": {"next"},
 		"block": {"2"},
 	})
 	if response.Code != http.StatusSeeOther {
@@ -933,7 +945,7 @@ func TestArchivedArticleIsNotQueuedButIsReadable(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
 		ExternalID: "2", Title: "Read long ago", IsArchived: true, UpdatedAt: time.Now(),
-	}}, time.Now()); err != nil {
+	}}, 0, time.Now()); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -968,7 +980,7 @@ func TestSyncImportedHighlightsAreAnchoredOnOpen(t *testing.T) {
 			{ExternalID: "500", Quote: "quick brown"},
 			{ExternalID: "501", Quote: "a passage that is not in this article"},
 		},
-	}}, time.Now()); err != nil {
+	}}, 0, time.Now()); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
 
@@ -1010,7 +1022,7 @@ func TestExtractsPage(t *testing.T) {
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
 		ExternalID: "1", Title: "A test article", UpdatedAt: time.Now(),
 		Highlights: []source.Highlight{{ExternalID: "500", Quote: "An imported passage."}},
-	}}, time.Now()); err != nil {
+	}}, 0, time.Now()); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
 	post(t, server, "/elements/1/extract", url.Values{
@@ -1077,7 +1089,7 @@ func TestDoneArchivesUpstream(t *testing.T) {
 func TestPauseDoesNotArchive(t *testing.T) {
 	server, db, _ := newTestServer(t, true)
 
-	post(t, server, "/elements/1/grade", url.Values{"grade": {"pause"}, "block": {"1"}})
+	post(t, server, "/elements/1/grade", url.Values{"grade": {"next"}, "block": {"1"}})
 
 	document, _ := db.DocumentByID(1)
 	if document.IsArchived {
@@ -1117,7 +1129,7 @@ func TestUnsuspendUnarchivesUpstream(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
 		ExternalID: "2", Title: "Read long ago", IsArchived: true, UpdatedAt: time.Now(),
-	}}, time.Now()); err != nil {
+	}}, 0, time.Now()); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -1212,7 +1224,7 @@ func TestLibraryFilterTabs(t *testing.T) {
 		{ExternalID: "2", Title: "Starred piece", IsStarred: true, UpdatedAt: time.Now()},
 		{ExternalID: "3", Title: "Archived piece", IsArchived: true, UpdatedAt: time.Now(),
 			Tags: []string{"philosophy"}},
-	}, time.Now()); err != nil {
+	}, 0, time.Now()); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -1228,5 +1240,101 @@ func TestLibraryFilterTabs(t *testing.T) {
 
 	if response := get(t, server, "/library?state=bogus"); response.Code != http.StatusBadRequest {
 		t.Errorf("unknown state filter: status = %d, want 400", response.Code)
+	}
+}
+
+// TestBuryKeepsItTodayButLast covers the skip case end to end.
+func TestBuryKeepsItTodayButLast(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "2", Title: "Second", UpdatedAt: time.Now()},
+		{ExternalID: "3", Title: "Third", UpdatedAt: time.Now()},
+	}, 0, time.Now()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	before, _ := db.Queue(time.Now(), 10)
+	first := before[0].ID
+
+	if response := post(t, server, "/elements/"+itoa(first)+"/grade", url.Values{
+		"grade": {"bury"},
+		"block": {"1"},
+	}); response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+
+	after, _ := db.Queue(time.Now(), 10)
+	if len(after) != len(before) {
+		t.Errorf("burying removed the element from today: %d then %d", len(before), len(after))
+	}
+	if after[len(after)-1].ID != first {
+		t.Error("the buried element is not last in today's queue")
+	}
+
+	// Its schedule is untouched — burying is about position, not timing.
+	element, _ := db.ElementByID(first)
+	if element.Schedule.Reps != 0 {
+		t.Errorf("burying counted as a repetition: reps = %d", element.Schedule.Reps)
+	}
+}
+
+// TestGradeButtonsShowTheirIntervals is the point of the whole redesign: a
+// grade you cannot see the effect of is one you have to memorise.
+func TestGradeButtonsShowTheirIntervals(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	// Give it some history so the three intervals differ from each other.
+	if err := db.SaveSchedule(1, ir.Schedule{
+		State: ir.StateReading, IntervalDays: 8, AFactor: 2.0, Reps: 3, Priority: 0.9,
+	}, time.Now()); err != nil {
+		t.Fatalf("SaveSchedule: %v", err)
+	}
+
+	body := get(t, server, "/read/1").Body.String()
+
+	element, _ := db.ElementByID(1)
+	for _, grade := range []ir.Grade{ir.GradeNext, ir.GradeSooner, ir.GradeDefer} {
+		want := ir.FormatInterval(ir.Next(element.Schedule, grade, time.Now()).IntervalDays)
+		if !strings.Contains(body, ">"+want+"<") {
+			t.Errorf("the page does not show the interval %q for grade %d", want, grade)
+		}
+	}
+
+	// The three groups are labelled, so the cases are visible rather than implied.
+	for _, label := range []string{"Finished", "Skip", "Schedule"} {
+		if !strings.Contains(body, label) {
+			t.Errorf("the grading bar has no %q group", label)
+		}
+	}
+	// Dismiss must not sit among the everyday buttons.
+	if strings.Contains(body, `grade-buttons">`+"\n"+`          <button class="danger"`) {
+		t.Error("Dismiss is in the main button row")
+	}
+}
+
+func TestNewExtractIsNotDueToday(t *testing.T) {
+	server, db, _ := newTestServerWithDelay(t, 10)
+
+	post(t, server, "/elements/1/extract", url.Values{
+		"start_block": {"0"}, "start_offset": {"4"},
+		"end_block": {"0"}, "end_offset": {"15"}, "quote": {"quick brown"},
+	})
+
+	children, _ := db.ChildrenOf(1)
+	if len(children) != 1 {
+		t.Fatalf("got %d extracts, want 1", len(children))
+	}
+
+	want := ir.Day(time.Now().AddDate(0, 0, 10))
+	if !ir.Day(children[0].Schedule.DueOn).Equal(want) {
+		t.Errorf("new extract due %v, want %v", children[0].Schedule.DueOn, want)
+	}
+
+	queue, _ := db.Queue(time.Now(), 10)
+	for _, item := range queue {
+		if item.ID == children[0].ID {
+			t.Error("a freshly made extract is back in today's queue")
+		}
 	}
 }

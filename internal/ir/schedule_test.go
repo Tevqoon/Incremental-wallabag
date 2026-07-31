@@ -15,7 +15,7 @@ func TestIntervalsGrowByAFactor(t *testing.T) {
 
 	want := []float64{1, 2, 4, 8, 16, 32}
 	for repetition, wantInterval := range want {
-		schedule = Next(schedule, GradePause, today)
+		schedule = Next(schedule, GradeNext, today)
 
 		if !closeEnough(schedule.IntervalDays, wantInterval) {
 			t.Errorf("repetition %d: interval = %.2f, want %.2f",
@@ -31,7 +31,7 @@ func TestIntervalsGrowByAFactor(t *testing.T) {
 }
 
 func TestFirstRepetitionIsOneDay(t *testing.T) {
-	schedule := Next(Schedule{Priority: 1.0}, GradePause, today)
+	schedule := Next(Schedule{Priority: 1.0}, GradeNext, today)
 
 	if !closeEnough(schedule.IntervalDays, 1) {
 		t.Errorf("interval = %.2f, want 1", schedule.IntervalDays)
@@ -48,7 +48,7 @@ func TestLaterPushesOutAndCompounds(t *testing.T) {
 	// being explicitly abandoned.
 	schedule := Schedule{IntervalDays: 4, AFactor: 2.0, Priority: 1.0}
 
-	first := Next(schedule, GradeLater, today)
+	first := Next(schedule, GradeDefer, today)
 	if !closeEnough(first.AFactor, 2.4) {
 		t.Errorf("A-Factor after one Later = %.3f, want 2.4", first.AFactor)
 	}
@@ -56,13 +56,13 @@ func TestLaterPushesOutAndCompounds(t *testing.T) {
 		t.Errorf("interval after one Later = %.3f, want 9.6", first.IntervalDays)
 	}
 
-	second := Next(first, GradeLater, today)
+	second := Next(first, GradeDefer, today)
 	if second.AFactor <= first.AFactor {
 		t.Errorf("A-Factor did not compound: %.3f then %.3f", first.AFactor, second.AFactor)
 	}
 
 	// And an ordinary Next afterwards inherits the raised A-Factor.
-	third := Next(second, GradePause, today)
+	third := Next(second, GradeNext, today)
 	if !closeEnough(third.AFactor, second.AFactor) {
 		t.Errorf("Next changed the A-Factor: %.3f then %.3f", second.AFactor, third.AFactor)
 	}
@@ -90,7 +90,7 @@ func TestAFactorIsClamped(t *testing.T) {
 	// Repeated Later must not run away to a decade.
 	schedule := Schedule{IntervalDays: 1, AFactor: maxAFactor, Priority: 1.0}
 	for i := 0; i < 20; i++ {
-		schedule = Next(schedule, GradeLater, today)
+		schedule = Next(schedule, GradeDefer, today)
 	}
 	if schedule.AFactor > maxAFactor {
 		t.Errorf("A-Factor = %.3f, want at most %.3f", schedule.AFactor, maxAFactor)
@@ -128,7 +128,7 @@ func TestPriorityCapsTheInterval(t *testing.T) {
 			schedule := Schedule{Priority: test.priority}
 			// Far more repetitions than needed to reach the ceiling.
 			for i := 0; i < 40; i++ {
-				schedule = Next(schedule, GradePause, today)
+				schedule = Next(schedule, GradeNext, today)
 			}
 			if schedule.IntervalDays > test.wantAtMost {
 				t.Errorf("interval settled at %.1f, want at most %.1f",
@@ -149,8 +149,8 @@ func TestPriorityOrdersIntervals(t *testing.T) {
 	low := Schedule{Priority: 0.9}
 
 	for repetition := 1; repetition <= 15; repetition++ {
-		high = Next(high, GradePause, today)
-		low = Next(low, GradePause, today)
+		high = Next(high, GradeNext, today)
+		low = Next(low, GradeNext, today)
 
 		if high.IntervalDays > low.IntervalDays {
 			t.Fatalf("repetition %d: high-priority interval %.1f exceeds low-priority %.1f",
@@ -251,7 +251,7 @@ func TestDayUsesLocalLocation(t *testing.T) {
 func TestZeroValueScheduleGetsDefaults(t *testing.T) {
 	// An element created before a field existed, or read from a row with
 	// defaults, must not produce a zero A-Factor and freeze in place.
-	got := Next(Schedule{}, GradePause, today)
+	got := Next(Schedule{}, GradeNext, today)
 
 	if got.AFactor < minAFactor {
 		t.Errorf("A-Factor = %.3f, want the default of %.1f", got.AFactor, defaultAFactor)
@@ -410,7 +410,7 @@ func TestSuspendIsReversible(t *testing.T) {
 
 	// Unlike Done, which also clears the due date, this is not terminal: the
 	// next ordinary grade picks up from the preserved interval.
-	resumed := Next(got, GradePause, today)
+	resumed := Next(got, GradeNext, today)
 	if resumed.State != StateReading {
 		t.Errorf("resumed state = %q, want %q", resumed.State, StateReading)
 	}
@@ -424,5 +424,97 @@ func TestSuspendedIsNotDue(t *testing.T) {
 	suspended := Schedule{State: StateSuspended, DueOn: today.AddDate(0, 0, -5)}
 	if suspended.Due(today) {
 		t.Error("a suspended element with a past due date is reported as due")
+	}
+}
+
+func TestFormatInterval(t *testing.T) {
+	tests := []struct {
+		days float64
+		want string
+	}{
+		{0, "today"},
+		{0.4, "today"},
+		{1, "1d"},
+		{1.4, "1d"},
+		{2.6, "3d"},
+		{29, "29d"},
+		{30, "1mo"},
+		{45, "1.5mo"},
+		{182, "6mo"},
+		{364, "12mo"},
+		{365, "1y"},
+		{548, "1.5y"},
+		// The reason this exists at all: nobody reasons about "412d".
+		{412, "1.1y"},
+	}
+
+	for _, test := range tests {
+		if got := FormatInterval(test.days); got != test.want {
+			t.Errorf("FormatInterval(%.1f) = %q, want %q", test.days, got, test.want)
+		}
+	}
+}
+
+// TestPreviewsMatchWhatNextDoes is the property that makes the button labels
+// trustworthy: the preview is produced by the scheduler, so a button cannot
+// advertise an interval the scheduler would not actually apply.
+func TestPreviewsMatchWhatNextDoes(t *testing.T) {
+	schedules := []Schedule{
+		{},
+		{IntervalDays: 1, AFactor: 2, Priority: 0.5},
+		{IntervalDays: 8, AFactor: 2.4, Reps: 3, Priority: 0.3},
+		{IntervalDays: 200, AFactor: 3, Reps: 9, Priority: 0.9},
+	}
+
+	for _, schedule := range schedules {
+		previews := Previews(schedule, today)
+
+		for _, grade := range []Grade{GradeNext, GradeSooner, GradeDefer} {
+			want := FormatInterval(Next(schedule, grade, today).IntervalDays)
+			if got := previews[grade].Interval; got != want {
+				t.Errorf("schedule %+v grade %d: preview %q, scheduler would give %q",
+					schedule, grade, got, want)
+			}
+		}
+
+		// Sooner must never advertise a longer wait than Next, or the labels
+		// contradict the words on them.
+		if previews[GradeSooner].Interval == previews[GradeDefer].Interval &&
+			schedule.IntervalDays > 2 {
+			t.Errorf("schedule %+v: Sooner and Defer preview the same interval", schedule)
+		}
+	}
+}
+
+func TestPreviewsMarkTerminalGrades(t *testing.T) {
+	previews := Previews(Schedule{IntervalDays: 5, AFactor: 2}, today)
+
+	for _, grade := range []Grade{GradeDone, GradeDismiss, GradeSuspend} {
+		if !previews[grade].Terminal {
+			t.Errorf("grade %d is not marked terminal", grade)
+		}
+	}
+	for _, grade := range []Grade{GradeNext, GradeSooner, GradeDefer, GradeBury} {
+		if previews[grade].Terminal {
+			t.Errorf("grade %d is wrongly marked terminal", grade)
+		}
+	}
+	if previews[GradeBury].Interval != "today" {
+		t.Errorf("bury previews %q, want \"today\"", previews[GradeBury].Interval)
+	}
+}
+
+// TestBuryLeavesTheScheduleAlone: burying moves an element within a day, not
+// between days, so nothing about its scheduling may change.
+func TestBuryLeavesTheScheduleAlone(t *testing.T) {
+	before := Schedule{
+		State: StateReading, IntervalDays: 8, AFactor: 2.4, Reps: 3,
+		Priority: 0.3, DueOn: today,
+	}
+
+	after := Next(before, GradeBury, today)
+
+	if after != before {
+		t.Errorf("bury changed the schedule:\n got %+v\nwant %+v", after, before)
 	}
 }

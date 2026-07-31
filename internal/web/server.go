@@ -38,12 +38,13 @@ var pageNames = []string{"queue.html", "reader.html", "library.html", "extracts.
 // struct rather than package-level variables, so a test can build a Server with
 // its own store and no global setup.
 type Server struct {
-	store      *store.Store
-	sources    map[string]source.Source
-	dailyLimit int
-	logger     *slog.Logger
-	policy     *bluemonday.Policy
-	pages      map[string]*template.Template
+	store        *store.Store
+	sources      map[string]source.Source
+	dailyLimit   int
+	extractDelay int
+	logger       *slog.Logger
+	policy       *bluemonday.Policy
+	pages        map[string]*template.Template
 
 	// publish asks the syncer to drain the outbox now. Optional: without it
 	// queued writes still go out on the next sync, just later.
@@ -55,7 +56,11 @@ type Options struct {
 	Store      *store.Store
 	Sources    map[string]source.Source
 	DailyLimit int
-	Logger     *slog.Logger
+
+	// ExtractDelay is how many days ahead a newly made extract becomes due.
+	ExtractDelay int
+
+	Logger *slog.Logger
 
 	// Publish is called after a change that needs sending to a provider, so it
 	// leaves promptly instead of waiting for the sync interval. It must not
@@ -70,13 +75,14 @@ type Options struct {
 // time someone opens that page.
 func New(options Options) (*Server, error) {
 	server := &Server{
-		store:      options.Store,
-		sources:    options.Sources,
-		dailyLimit: options.DailyLimit,
-		logger:     options.Logger,
-		policy:     newPolicy(),
-		pages:      make(map[string]*template.Template),
-		publish:    options.Publish,
+		store:        options.Store,
+		sources:      options.Sources,
+		dailyLimit:   options.DailyLimit,
+		extractDelay: options.ExtractDelay,
+		logger:       options.Logger,
+		policy:       newPolicy(),
+		pages:        make(map[string]*template.Template),
+		publish:      options.Publish,
 	}
 
 	for _, name := range pageNames {

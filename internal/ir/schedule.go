@@ -2,6 +2,8 @@ package ir
 
 import (
 	"math"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -35,13 +37,14 @@ const (
 type Grade int
 
 const (
-	// GradePause: read a slice, extracted what mattered, stop here for now.
+	// GradeNext: read a slice, extracted what mattered, stop here for now.
 	// The read point is kept and the interval grows normally. This is the
 	// everyday action — incremental reading is mostly the act of putting
 	// something down on purpose.
-	GradePause Grade = iota
-	// GradeLater: not compelling right now; push it out and let it drift further each time.
-	GradeLater
+	GradeNext Grade = iota
+	// GradeDefer: not compelling right now; push it out and let it drift
+	// further each time.
+	GradeDefer
 	// GradeSooner: more interesting than expected; bring it back and let it drift more slowly.
 	GradeSooner
 	// GradeDone: finished with this material.
@@ -51,6 +54,15 @@ const (
 	// GradeSuspend: parked indefinitely, resumable. Keeps the interval and
 	// repetition count, unlike the two terminal grades above.
 	GradeSuspend
+	// GradeBury: not this one right now, but before the session ends.
+	//
+	// Alone among the grades it does not touch the schedule at all — it moves
+	// an element within today rather than out of it, so Next leaves it
+	// unchanged and the store handles it by recording the date. Deliberately
+	// not Anki's bury, which hides until tomorrow: the case being served is
+	// "come back to it before I stop reading", which hiding until tomorrow
+	// does not serve.
+	GradeBury
 )
 
 // Scheduling constants.
@@ -124,7 +136,11 @@ func Next(schedule Schedule, grade Grade, today time.Time) Schedule {
 		next.DueOn = time.Time{}
 		return next
 
-	case GradeLater:
+	case GradeBury:
+		// Position within today, not a change of schedule.
+		return schedule
+
+	case GradeDefer:
 		next.AFactor = clamp(next.AFactor*aFactorStep, minAFactor, maxAFactor)
 		next.IntervalDays = grow(schedule.IntervalDays, next.AFactor)
 
@@ -134,7 +150,7 @@ func Next(schedule Schedule, grade Grade, today time.Time) Schedule {
 		// Sooner is a request to see this again, so growth would contradict it.
 		next.IntervalDays = math.Max(minInterval, schedule.IntervalDays/2)
 
-	default: // GradePause
+	default: // GradeNext
 		next.IntervalDays = grow(schedule.IntervalDays, next.AFactor)
 	}
 
@@ -195,4 +211,60 @@ func orDefault(value, fallback float64) float64 {
 		return fallback
 	}
 	return value
+}
+
+// FormatInterval renders a number of days the way a reader thinks about it.
+//
+// Anki puts the resulting interval on each answer button, and it is right to:
+// a grade whose effect you cannot see is a grade you have to remember the
+// meaning of. "412d" is not a quantity anyone reasons about, so longer spans
+// become months and years.
+func FormatInterval(days float64) string {
+	switch {
+	case days < 1:
+		return "today"
+	case days < 30:
+		return strconv.Itoa(int(math.Round(days))) + "d"
+	case days < 365:
+		return trimZero(days/30.44) + "mo"
+	default:
+		return trimZero(days/365.25) + "y"
+	}
+}
+
+// trimZero renders one decimal place, dropping it when it adds nothing:
+// "3.2" but "12" rather than "12.0".
+func trimZero(value float64) string {
+	text := strconv.FormatFloat(value, 'f', 1, 64)
+	return strings.TrimSuffix(text, ".0")
+}
+
+// Preview is what one grade would do, for labelling a button with it.
+type Preview struct {
+	Grade    Grade
+	Interval string
+
+	// Terminal marks a grade that removes the element from the queue rather
+	// than rescheduling it, so the interval is not the interesting part.
+	Terminal bool
+}
+
+// Previews describes what each grade would do to a schedule.
+//
+// It calls Next rather than reimplementing the arithmetic, so a button can
+// never advertise something the scheduler would not actually do — the preview
+// is the behaviour, not a description of it.
+func Previews(schedule Schedule, today time.Time) map[Grade]Preview {
+	previews := make(map[Grade]Preview, 4)
+
+	for _, grade := range []Grade{GradeNext, GradeSooner, GradeDefer} {
+		next := Next(schedule, grade, today)
+		previews[grade] = Preview{Grade: grade, Interval: FormatInterval(next.IntervalDays)}
+	}
+
+	previews[GradeBury] = Preview{Grade: GradeBury, Interval: "today"}
+	for _, grade := range []Grade{GradeDone, GradeDismiss, GradeSuspend} {
+		previews[grade] = Preview{Grade: grade, Terminal: true}
+	}
+	return previews
 }
