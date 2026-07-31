@@ -42,11 +42,39 @@ func main() {
 	}
 }
 
-func run() error {
-	configPath := flag.String("config", "config.yaml", "path to the configuration file")
-	flag.Parse()
+// commands are the subcommands increader accepts.
+var commands = map[string]bool{"serve": true, "sync": true, "healthcheck": true}
 
-	command := flag.Arg(0)
+// splitCommand separates a leading subcommand from the flags.
+//
+// The stdlib flag package stops parsing at the first non-flag argument, so
+// `increader serve -config /config.yaml` would silently ignore -config and fall
+// back to the default path — the failure mode being a confusing "no such file"
+// naming a file the caller never asked for. Pulling a leading subcommand off
+// first makes both orderings work.
+//
+// It only treats the *first* argument as a command, so a flag value that
+// happens to be spelled like one (-config serve) is never mistaken for it.
+func splitCommand(args []string) (command string, rest []string) {
+	if len(args) > 0 && commands[args[0]] {
+		return args[0], args[1:]
+	}
+	return "", args
+}
+
+func run() error {
+	command, args := splitCommand(os.Args[1:])
+
+	flags := flag.NewFlagSet("increader", flag.ExitOnError)
+	configPath := flags.String("config", "config.yaml", "path to the configuration file")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+
+	// Flags-first form: `increader -config /config.yaml sync`.
+	if command == "" {
+		command = flags.Arg(0)
+	}
 	if command == "" {
 		command = "serve"
 	}
