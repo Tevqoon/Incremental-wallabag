@@ -225,6 +225,57 @@ func (a *Article) FlatText() string {
 	return strings.Join(texts, blockSeparator)
 }
 
+// ByteOffset converts a position within block, measured in runes, into the
+// byte offset this package uses internally for slicing Block.Text. It
+// reports false if block is out of range.
+//
+// A browser's Selection API measures a position by JavaScript string
+// .length, which counts UTF-16 code units — one per rune for everything
+// article text contains (soft hyphens, curly quotes, em dashes all live in
+// the Basic Multilingual Plane). Go slices strings by byte, and article text
+// is full of multi-byte UTF-8 characters, so a raw browser offset used
+// directly as a byte index drifts out of alignment with the intended
+// position after the first such character. Converting once here, at the one
+// place browser-supplied offsets enter the system, keeps Text, HTML,
+// FlatOffset, Render and every stored Range agreeing with each other in
+// bytes, same as before this existed.
+func (a *Article) ByteOffset(block, runeOffset int) (int, bool) {
+	if block < 0 || block >= len(a.blocks) {
+		return 0, false
+	}
+	return runeToByte(a.blocks[block].Text, runeOffset), true
+}
+
+// ByteRange converts r's offsets from runes to bytes; see ByteOffset.
+func (a *Article) ByteRange(r Range) (Range, bool) {
+	start, ok := a.ByteOffset(r.StartBlock, r.StartOffset)
+	if !ok {
+		return Range{}, false
+	}
+	end, ok := a.ByteOffset(r.EndBlock, r.EndOffset)
+	if !ok {
+		return Range{}, false
+	}
+	return Range{StartBlock: r.StartBlock, StartOffset: start, EndBlock: r.EndBlock, EndOffset: end}, true
+}
+
+// runeToByte converts a position measured in runes into the corresponding
+// byte index of s, clamping to len(s) if the count runs past the end (Valid
+// then rejects it with a proper error instead of this silently misreading).
+func runeToByte(s string, n int) int {
+	if n <= 0 {
+		return 0
+	}
+	count := 0
+	for i := range s {
+		if count == n {
+			return i
+		}
+		count++
+	}
+	return len(s)
+}
+
 // NormalizeSpace collapses every run of whitespace to a single space and trims
 // the ends.
 //

@@ -160,6 +160,36 @@ func TestRangeText(t *testing.T) {
 	}
 }
 
+// TestByteOffsetHandlesMultibyteCharacters guards the seam between how a
+// browser measures a selection (JavaScript string .length, i.e. UTF-16 code
+// units — one per rune for everything article text contains) and how this
+// package addresses text (Go byte offsets). A soft hyphen, a curly quote or
+// an em dash is multiple bytes but one rune; treating a browser-reported
+// offset as a byte offset without converting drifts the position for every
+// character after the first multi-byte one, so any selection extending past
+// it would silently address the wrong text.
+func TestByteOffsetHandlesMultibyteCharacters(t *testing.T) {
+	// "Amer­ican" — a soft hyphen (2 UTF-8 bytes, 1 rune) inside a word,
+	// exactly the shape that comes from real justified-text sources.
+	article := mustParse(t, "<p>Amer­ican eco­nomists.</p>")
+
+	// A browser selecting "eco­nomists" would report these rune offsets:
+	// "Amer­ican " (soft hyphen, then a trailing space) is 10 runes, and the
+	// word itself, soft hyphen included, is 11 more.
+	byteRange, ok := article.ByteRange(Range{StartBlock: 0, StartOffset: 10, EndBlock: 0, EndOffset: 21})
+	if !ok {
+		t.Fatalf("ByteRange reported the range as out of bounds")
+	}
+
+	got, err := article.Text(byteRange)
+	if err != nil {
+		t.Fatalf("Text: %v", err)
+	}
+	if want := "eco­nomists"; got != want {
+		t.Errorf("got %q, want %q — a byte offset was used where a rune offset was meant", got, want)
+	}
+}
+
 func TestRangeValidation(t *testing.T) {
 	article := mustParse(t, `<p>Short.</p><p>Also short.</p>`)
 

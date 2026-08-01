@@ -197,6 +197,18 @@ func (s *Server) handleExtract(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The browser measures its selection in runes; everything from here on
+	// works in bytes, like the rest of this package. See Article.ByteOffset.
+	byteRange, ok := article.ByteRange(chosen.Range)
+	if !ok {
+		// Same status as a stale-quote mismatch below: an out-of-range block
+		// means the article no longer has the shape the browser saw.
+		http.Error(w, "that selection no longer fits the article; reload and try again",
+			http.StatusConflict)
+		return
+	}
+	chosen.Range = byteRange
+
 	// Re-derive the passage from the server's own copy and check it against
 	// what the browser reported. If the two disagree the offsets are stale —
 	// usually because the article was re-fetched and changed shape — and
@@ -315,8 +327,15 @@ func (s *Server) clozeOffsets(r *http.Request, element store.Element) (int, int,
 		return 0, 0, err
 	}
 
-	start, startOK := article.FlatOffset(chosen.Range.StartBlock, chosen.Range.StartOffset)
-	end, endOK := article.FlatOffset(chosen.Range.EndBlock, chosen.Range.EndOffset)
+	// The browser measures in runes; FlatOffset, like the rest of this
+	// package, works in bytes. See Article.ByteOffset.
+	byteRange, ok := article.ByteRange(chosen.Range)
+	if !ok {
+		return 0, 0, errors.New("that selection is outside the extract")
+	}
+
+	start, startOK := article.FlatOffset(byteRange.StartBlock, byteRange.StartOffset)
+	end, endOK := article.FlatOffset(byteRange.EndBlock, byteRange.EndOffset)
 	if !startOK || !endOK || end <= start {
 		return 0, 0, errors.New("that deletion does not fit the extract")
 	}

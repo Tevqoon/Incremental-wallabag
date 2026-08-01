@@ -256,6 +256,46 @@ func TestExtractPreservesLinks(t *testing.T) {
 	}
 }
 
+// TestExtractAcrossMultibyteCharacter guards the seam between a browser's
+// selection offsets (JavaScript string .length, counting UTF-16 code units —
+// one per rune for anything in the Basic Multilingual Plane) and this
+// package's own byte-indexed strings. A soft hyphen, curly quote or em dash
+// is more than one byte but exactly one rune; a real article is full of
+// them, and a request built the way a browser actually builds one — offsets
+// counted in runes, past a multi-byte character — used to come back a 409
+// because the server re-derived a different, byte-misaligned substring.
+func TestExtractAcrossMultibyteCharacter(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if err := db.SetDocumentContent(1, `<p>Amer­ican eco­nomists study markets.</p>`); err != nil {
+		t.Fatalf("SetDocumentContent: %v", err)
+	}
+
+	// A browser selecting "eco­nomists" (soft hyphen included) reports these
+	// as rune offsets: "Amer­ican " is 10 runes, the word itself 11 more.
+	response := post(t, server, "/elements/1/extract", url.Values{
+		"start_block":  {"0"},
+		"start_offset": {"10"},
+		"end_block":    {"0"},
+		"end_offset":   {"21"},
+		"quote":        {"eco­nomists"},
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
+	}
+
+	children, err := db.ChildrenOf(1)
+	if err != nil {
+		t.Fatalf("ChildrenOf: %v", err)
+	}
+	if len(children) != 1 {
+		t.Fatalf("got %d extracts, want 1", len(children))
+	}
+	if got := children[0].Quote; got != "eco­nomists" {
+		t.Errorf("stored quote = %q, want %q", got, "eco­nomists")
+	}
+}
+
 // TestExtractRejectsStaleSelection is the guard against silent corruption: if
 // the browser's idea of the text disagrees with the server's, the offsets are
 // stale and saving would attach the extract to the wrong passage.
