@@ -167,32 +167,51 @@ func (n nullableElement) apply(element *Element) {
 // Queue returns the elements due on the given day, most important first.
 //
 // This is the whole scheduling read path: one ordered query. Because topics and
-// items live in the same table, articles and extracts interleave by priority
-// with no merging step — which is exactly SuperMemo's behaviour and the reason
-// the schema unifies them.
+// items live in the same table, articles and extracts interleave with no
+// merging step — which is exactly SuperMemo's behaviour and the reason the
+// schema unifies them.
 //
-// The final tie-break is a multiplicative hash of the id rather than the id
-// itself. Within one priority band — an article and the extracts taken from it
-// share a priority — ordering by id would sort purely by insertion order, which
-// groups every article ahead of every extract because articles are inserted
-// first. The hash scatters them into each other while staying deterministic, so
+// Within the day, root articles (parent_id NULL) and everything taken from one
+// — extracts and clozes alike — are interleaved fairly rather than sorted into
+// two blocks: each row gets a fractional position — (rank within its group -
+// 0.5) / size of that group, both among what's due today — and rows are merged
+// by that position. This spreads the rarer group evenly through the more
+// common one in proportion to whatever is actually due, instead of a fixed
+// ratio that would either flood the queue with extracts when few are due or
+// bury them when many are. Priority (and, tied on that, due date, then a hash)
+// only decides rank inside a group — see importedPriority for why that still
+// keeps an imported backlog from swamping the front of that group's rank
+// order.
+//
+// The hash is a multiplicative scramble of the id rather than the id itself.
+// Within one group, items sharing a priority — a batch of highlights imported
+// together, say — would otherwise sort by insertion order, which groups the
+// oldest imports first. The hash scatters them while staying deterministic, so
 // the queue does not reshuffle itself between page loads.
-//
-// Priority still dominates, which is what keeps a large imported backlog from
-// swamping the reading list; see importedPriority.
 //
 // Anything buried today sorts behind everything else still due, so working
 // through the rest of the queue brings it back around rather than losing it for
 // the day.
 func (s *Store) Queue(day time.Time, limit int) ([]QueueItem, error) {
 	rows, err := s.db.Query(`
-		SELECT `+elementColumns+`, d.title, d.url, d.reading_time
-		FROM elements e
-		JOIN documents d ON d.id = e.document_id
-		WHERE e.state NOT IN ('done', 'dismissed', 'suspended')
-		  AND (e.due_on IS NULL OR e.due_on <= ?)
-		ORDER BY (CASE WHEN e.buried_on = ? THEN 1 ELSE 0 END) ASC,
-		         e.priority ASC, e.due_on ASC, (e.id * 2654435761) % 1000003 ASC
+		WITH due AS (
+			SELECT `+elementColumns+`, d.title AS doc_title, d.url AS doc_url,
+			       d.reading_time AS doc_reading_time,
+			       ROW_NUMBER() OVER (
+			           PARTITION BY (e.parent_id IS NULL)
+			           ORDER BY e.priority ASC, e.due_on ASC,
+			                    (e.id * 2654435761) % 1000003 ASC
+			       ) AS kind_rank,
+			       COUNT(*) OVER (PARTITION BY (e.parent_id IS NULL)) AS kind_count
+			FROM elements e
+			JOIN documents d ON d.id = e.document_id
+			WHERE e.state NOT IN ('done', 'dismissed', 'suspended')
+			  AND (e.due_on IS NULL OR e.due_on <= ?)
+		)
+		SELECT * FROM due
+		ORDER BY (CASE WHEN buried_on = ? THEN 1 ELSE 0 END) ASC,
+		         (CAST(kind_rank AS REAL) - 0.5) / kind_count ASC,
+		         priority ASC, due_on ASC, (id * 2654435761) % 1000003 ASC
 		LIMIT ?`,
 		day.Format(dateFormat), day.Format(dateFormat), limit,
 	)
@@ -204,11 +223,16 @@ func (s *Store) Queue(day time.Time, limit int) ([]QueueItem, error) {
 	var queue []QueueItem
 	for rows.Next() {
 		var (
-			item     QueueItem
-			nullable nullableElement
+			item                QueueItem
+			nullable            nullableElement
+			kindRank, kindCount float64
 		)
+		// The trailing two destinations discard the window-function columns
+		// (kind_rank, kind_count) added by the CTE for the ORDER BY — they
+		// exist only to compute the interleave position, not to be read back.
 		targets := append(scanTargets(&item.Element, &nullable),
-			&item.DocumentTitle, &item.DocumentURL, &item.ReadingTime)
+			&item.DocumentTitle, &item.DocumentURL, &item.ReadingTime,
+			&kindRank, &kindCount)
 
 		if err := rows.Scan(targets...); err != nil {
 			return nil, fmt.Errorf("store: scan queue row: %w", err)

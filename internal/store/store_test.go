@@ -583,6 +583,72 @@ func TestQueueInterleavesArticlesAndExtracts(t *testing.T) {
 	}
 }
 
+// TestQueueInterleavesProportionallyByCount guards the fair-interleave itself,
+// not just the tie-break: a handful of due articles (priority 0.5) against a
+// pile of due imported highlights (priority 0.6, importedPriority) must not
+// sort into two blocks just because their priorities differ. They should
+// spread through the queue in proportion to how many of each are due — three
+// articles among twenty-seven highlights land roughly every tenth slot, not
+// all three up front.
+func TestQueueInterleavesProportionallyByCount(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	highlights := make([]source.Highlight, 0, 27)
+	for i := 1; i <= 27; i++ {
+		highlights = append(highlights, source.Highlight{
+			ExternalID: "h" + strconv.Itoa(i),
+			Quote:      "Highlight " + strconv.Itoa(i),
+			UpdatedAt:  now,
+		})
+	}
+
+	documents := []source.Document{
+		{ExternalID: "1", Title: "Article 1", UpdatedAt: now},
+		{ExternalID: "2", Title: "Article 2", UpdatedAt: now},
+		{ExternalID: "3", Title: "Article 3", UpdatedAt: now},
+		// Archived so its own root topic is suspended and does not itself
+		// enter the queue — only its highlights should, keeping the count at
+		// exactly 3 due articles against 27 due highlights.
+		{ExternalID: "4", Title: "Annotated article", UpdatedAt: now, Highlights: highlights, IsArchived: true},
+	}
+	// delayDays 0 puts every highlight due today, alongside the articles —
+	// this test is about same-day ordering, not the multi-day spread that
+	// ExtractDelayDays already covers.
+	if _, err := db.UpsertDocuments("wallabag", documents, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	queue, err := db.Queue(now, 30)
+	if err != nil {
+		t.Fatalf("Queue: %v", err)
+	}
+	if len(queue) != 30 {
+		t.Fatalf("got %d queued, want 30", len(queue))
+	}
+
+	var articleIndexes []int
+	for i, item := range queue {
+		if item.IsRoot() {
+			articleIndexes = append(articleIndexes, i)
+		}
+	}
+	if len(articleIndexes) != 3 {
+		t.Fatalf("got %d articles in queue, want 3", len(articleIndexes))
+	}
+
+	// Fair interleave by rank puts the k-th of 3 articles at index
+	// floor((k-0.5)/3 * 30) among 30 due items: 4, 14, 24.
+	want := []int{4, 14, 24}
+	for i, index := range articleIndexes {
+		if index != want[i] {
+			t.Errorf("article %d landed at index %d, want %d (articles: %v); "+
+				"not interleaved in proportion to how many of each are due",
+				i, index, want[i], articleIndexes)
+		}
+	}
+}
+
 // TestWriteIsQueuedWithTheLocalChange is the guarantee the outbox exists for:
 // the local state and the intent to publish it commit together, so they cannot
 // disagree.
