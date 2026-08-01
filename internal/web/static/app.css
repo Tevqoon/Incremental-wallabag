@@ -131,7 +131,7 @@ h1 { font-size: 1.5rem; line-height: 1.25; margin: 0 0 0.35rem; }
 
 /* ---- Reader ----------------------------------------------------------- */
 
-.reader { max-width: var(--measure); margin: 0 auto; }
+.reader { max-width: calc(var(--measure) + 14rem); margin: 0 auto; }
 .reader-head { margin-bottom: 2rem; }
 .reader-head a { color: var(--muted); }
 
@@ -210,6 +210,9 @@ mark.extract {
   cursor: pointer;
 }
 .toolbar button:hover { background: var(--accent); color: var(--bg); }
+
+.toolbar-cancel { color: var(--muted); font-weight: 400; }
+.toolbar-cancel:hover { background: var(--danger); color: var(--bg); }
 
 /* ---- Clozes and extracts --------------------------------------------- */
 
@@ -295,6 +298,18 @@ button:hover, .button:hover { border-color: var(--accent); color: var(--accent);
   min-width: 4.6rem;
   padding: 0.5rem 0.75rem;
 }
+.paste-extract input {
+  font: 0.85rem/1 system-ui, sans-serif;
+  padding: 0.55rem 0.6rem;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  background: var(--bg);
+  color: var(--fg);
+  width: 12rem;
+}
+
+.paste-extract button { min-width: 0; flex-direction: row; }
+
 .grade-buttons button small {
   font-size: 0.65rem;
   font-weight: 400;
@@ -338,6 +353,8 @@ button.danger:hover { border-color: var(--danger); color: var(--danger); }
   .grade-groups { gap: 1rem; }
   .grade-buttons button { min-width: 3.9rem; padding: 0.45rem 0.5rem; }
   .priority { margin-left: 0; width: 100%; }
+  .paste-extract { width: 100%; }
+  .paste-extract input { flex: 1; width: auto; }
 }
 
 /* ---- Library search --------------------------------------------------- */

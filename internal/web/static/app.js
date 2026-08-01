@@ -108,41 +108,101 @@
     bar.style.left = `${Math.max(8, left)}px`;
   }
 
-  function hideToolbar() {
-    const bar = toolbar();
-    if (bar) bar.hidden = true;
-    captured = null;
-  }
-
   document.addEventListener("selectionchange", () => {
     const payload = readSelection();
     if (!toolbar()) return;
 
-    if (!payload) {
-      hideToolbar();
-      return;
-    }
+    // A collapse is ignored, not treated as "cancel". On iOS the very tap
+    // meant to press Extract or Cloze is usually what collapses the
+    // selection: WebKit uses the first touch outside the selection to
+    // dismiss its own selection UI, frequently without ever delivering a
+    // click to the page at all. Hiding the toolbar here would pull it out
+    // from under the tap that was supposed to use it. So the toolbar and
+    // `captured` now only go away for an explicit reason — Extract, Cloze,
+    // or the × button all route through clearSelection().
+    if (!payload) return;
 
     captured = payload;
     showToolbar(window.getSelection().getRangeAt(0));
   });
 
-  // Pressing the mouse anywhere on the toolbar must not disturb the selection.
+  // ---- Paste-to-extract fallback -----------------------------------------
   //
-  // Without this the browser collapses the selection on mousedown, before the
-  // click that htmx acts on — so by the time hx-vals asks for the payload there
-  // is nothing left to send. Guarding on document.activeElement instead does
-  // not work: Safari does not focus a button when it is clicked, so the guard
-  // reads <body> and clears the very selection it exists to protect.
-  //
-  // preventDefault here stops the collapse from happening at all, which is
-  // both simpler and portable.
-  document.addEventListener("mousedown", (event) => {
-    const bar = toolbar();
-    if (bar && !bar.hidden && bar.contains(event.target)) {
-      event.preventDefault();
+  // Belt and braces: the toolbar tap can still be unreliable right after a
+  // selection on iOS, where the first touch outside it is sometimes consumed
+  // by the OS to dismiss its own selection UI before any click reaches the
+  // page. This path never depends on that tap at all. Selecting and tapping
+  // "Copy" is native OS behaviour and always works, and stays plain
+  // clipboard copy — nothing here hooks it. From there the user pastes into
+  // an ordinary text input elsewhere on the page, which is an ordinary tap
+  // with no active selection UI for iOS to intercept.
+
+  /** Collapses whitespace runs and trims, matching the server's own
+   * normalization so a pasted quote compares the way it will once it
+   * reaches the extract handler. */
+  function normalizeSpace(text) {
+    return text.replace(/\s+/g, " ").trim();
+  }
+
+  /**
+   * Finds `normalized` inside `raw`, treating any whitespace run in the
+   * search text as equivalent to any whitespace run in the source. Pasted
+   * text often reflows line breaks differently than the DOM's own text
+   * content even though both hold the same words, so a plain indexOf would
+   * miss real matches.
+   */
+  function findInRawText(raw, normalized) {
+    if (!normalized) return null;
+    const pattern = normalized
+      .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+      .replace(/ /g, "\\s+");
+    const match = new RegExp(pattern).exec(raw);
+    if (!match) return null;
+    return { start: match.index, end: match.index + match[0].length, text: match[0] };
+  }
+
+  window.extractFromPaste = () => {
+    const input = document.getElementById("paste-extract-input");
+    if (!input) return;
+
+    const pasted = normalizeSpace(input.value);
+    if (!pasted) return;
+
+    const reader = document.querySelector(".reader");
+    if (!reader) return;
+
+    // Only a single block is searched: extracts spanning more than one
+    // paragraph are rare enough, and locating a cross-block match's offsets
+    // reliably enough to trust, that it is not worth the added complexity
+    // here. Select one paragraph at a time for those.
+    for (const block of document.querySelectorAll("#article [data-b]")) {
+      const hit = findInRawText(block.textContent, pasted);
+      if (!hit) continue;
+
+      fetch(`/elements/${reader.dataset.element}/extract`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          start_block: block.dataset.b,
+          start_offset: String(hit.start),
+          end_block: block.dataset.b,
+          end_offset: String(hit.end),
+          quote: hit.text,
+        }),
+      })
+        .then((res) => (res.ok ? res.text() : Promise.reject(res)))
+        .then((html) => {
+          document.getElementById("article").outerHTML = html;
+          input.value = "";
+        })
+        .catch(() => {
+          alert("That text could not be extracted — it may not match the article exactly.");
+        });
+      return;
     }
-  });
+
+    alert("No matching passage found. If the copied text spans more than one paragraph, try one paragraph at a time.");
+  };
 
   // ---- Reading position -------------------------------------------------
 

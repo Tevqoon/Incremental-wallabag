@@ -58,6 +58,12 @@
         Cloze
       </button>
     {{end}}
+    <!-- The toolbar no longer auto-hides when the selection collapses (see
+         app.js), so there needs to be an explicit way to dismiss it besides
+         Extract/Cloze succeeding. -->
+    <button type="button" class="toolbar-cancel" hx-on:click="clearSelection()" aria-label="Cancel">
+      ×
+    </button>
   </div>
 
   {{if .Element.IsRoot}}
@@ -123,6 +129,20 @@
          in N days. Each button carries the interval it would produce, taken
          from the scheduler itself. -->
     <div class="grade-groups">
+      <div class="grade-group">
+        <!-- iOS Safari can eat the tap that is supposed to press Extract
+             while a selection is showing (see app.js). This sidesteps the
+             problem: select and Copy as normal, then paste here — an
+             ordinary tap on an ordinary input field, nowhere near any
+             selection UI, which iOS has no reason to intercept. -->
+        <span class="grade-label">Extract</span>
+        <div class="grade-buttons paste-extract">
+          <input type="text" id="paste-extract-input" placeholder="Paste copied text"
+                 autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+          <button type="button" hx-on:click="extractFromPaste()">Extract</button>
+        </div>
+      </div>
+
       <div class="grade-group">
         <span class="grade-label">Finished</span>
         <div class="grade-buttons">
