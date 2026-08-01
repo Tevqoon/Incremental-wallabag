@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -562,10 +563,17 @@ func TestGradeRejectsUnknownValue(t *testing.T) {
 func TestPriorityUpdate(t *testing.T) {
 	server, db, _ := newTestServer(t, true)
 
-	if response := post(t, server, "/elements/1/priority", url.Values{
+	// Answers with the refreshed schedule buttons, not 204: the day counts
+	// they show depend on priority (via priorityCap), so the slider moving
+	// must bring back something for htmx to swap in.
+	response := post(t, server, "/elements/1/priority", url.Values{
 		"priority": {"0.1"},
-	}); response.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want 204", response.Code)
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.Code)
+	}
+	if !strings.Contains(response.Body.String(), `id="schedule-buttons"`) {
+		t.Errorf("response body does not contain the refreshed schedule buttons: %s", response.Body.String())
 	}
 
 	element, _ := db.ElementByID(1)
@@ -580,6 +588,129 @@ func TestPriorityUpdate(t *testing.T) {
 		}); response.Code != http.StatusBadRequest {
 			t.Errorf("priority %q: status = %d, want 400", bad, response.Code)
 		}
+	}
+}
+
+// TestPriorityUpdateChangesScheduleButtons guards the actual bug report: the
+// day counts on the schedule buttons must reflect the priority just set, not
+// whatever was on the page when it loaded. A fresh element's first interval
+// (1 day) sits under even the tightest priorityCap, so the two would look
+// identical regardless of whether the fix works — the element is graded
+// forward first so its interval is large enough for priority to visibly
+// clamp it.
+func TestPriorityUpdateChangesScheduleButtons(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	// Five "next" grades grow the interval 1, 2, 4, 8, 16 days (AFactor 2.0,
+	// untouched by GradeNext) — past the low-priority cap (7d) but short of
+	// the high-priority one (365d).
+	for i := 0; i < 5; i++ {
+		// Grading redirects on success (to wherever "next" sends the reader),
+		// so 200 is not the right expectation here.
+		if response := post(t, server, "/elements/1/grade", url.Values{"grade": {"next"}}); response.Code >= 400 {
+			t.Fatalf("grade %d: status = %d", i, response.Code)
+		}
+	}
+
+	low := post(t, server, "/elements/1/priority", url.Values{"priority": {"0"}})
+	if !strings.Contains(low.Body.String(), "Next<small>7d</small>") {
+		t.Errorf("priority 0 (cap 7d): body = %s", low.Body.String())
+	}
+
+	high := post(t, server, "/elements/1/priority", url.Values{"priority": {"1"}})
+	if !strings.Contains(high.Body.String(), "Next<small>1.1mo</small>") {
+		t.Errorf("priority 1 (cap 365d, raw interval 32d): body = %s", high.Body.String())
+	}
+}
+
+// TestPriorityImmediatelyBacklogsAFreshElement is the actual bug report: a
+// freshly imported highlight has never been graded, so it has no interval for
+// priority to cap and the slider used to have no visible effect at all — not
+// until the reader graded it, which for a deliberately deprioritized item
+// might be months later, if ever. Dragging priority toward "matters less"
+// must reschedule it immediately instead of waiting for that grade.
+//
+// Uses an extract rather than element 1 itself so it exercises the
+// unconditional non-root path — an already-untouched article takes the
+// protected first-touch path instead, covered by
+// TestPriorityCanBacklogAWholeArticle and TestPriorityNeverBuriesAnUntouchedArticle.
+func TestPriorityImmediatelyBacklogsAFreshElement(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	extractID, err := db.CreateExtract(store.NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "A passage.",
+		ContentHTML: "<p>A passage.</p>", Priority: 0.6,
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+
+	before, _ := db.ElementByID(extractID)
+	if before.Schedule.State != ir.StateNew {
+		t.Fatalf("fixture element state = %q, want %q for this test to mean anything", before.Schedule.State, ir.StateNew)
+	}
+
+	response := post(t, server, fmt.Sprintf("/elements/%d/priority", extractID), url.Values{"priority": {"1"}})
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.Code)
+	}
+	if strings.Contains(response.Body.String(), "Next<small>1d</small>") {
+		t.Errorf("schedule buttons still show the unbacklogged 1d preview: %s", response.Body.String())
+	}
+
+	element, _ := db.ElementByID(extractID)
+	if element.Schedule.State != ir.StateNew {
+		t.Errorf("state = %q, want %q — reprioritizing must not grade it", element.Schedule.State, ir.StateNew)
+	}
+	if !element.Schedule.DueOn.After(before.Schedule.DueOn) {
+		t.Errorf("due = %v, want pushed out past the original %v", element.Schedule.DueOn, before.Schedule.DueOn)
+	}
+}
+
+// TestPriorityCanBacklogAWholeArticle: "I'll read this in a week" has to work
+// on a whole article, not just an extract — dragging priority toward less
+// important pushes a fresh article's due date out too, immediately.
+func TestPriorityCanBacklogAWholeArticle(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	before, _ := db.ElementByID(1)
+
+	// The fixture article sits at defaultPriority (0.5); this moves toward
+	// less important.
+	response := post(t, server, "/elements/1/priority", url.Values{"priority": {"1"}})
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.Code)
+	}
+	if strings.Contains(response.Body.String(), "Next<small>1d</small>") {
+		t.Errorf("a whole article's preview did not change from backlogging it: %s", response.Body.String())
+	}
+
+	element, _ := db.ElementByID(1)
+	if !element.Schedule.DueOn.After(before.Schedule.DueOn) {
+		t.Errorf("due = %v, want pushed out past the original %v", element.Schedule.DueOn, before.Schedule.DueOn)
+	}
+}
+
+// TestPriorityNeverBuriesAnUntouchedArticle: an article is due immediately by
+// default. Raising its priority — the only direction that matters while it
+// still sits at that default — must not silently postpone it; only a
+// deliberate move toward less important is a request to put it off.
+func TestPriorityNeverBuriesAnUntouchedArticle(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	before, _ := db.ElementByID(1)
+
+	response := post(t, server, "/elements/1/priority", url.Values{"priority": {"0.1"}})
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.Code)
+	}
+	if !strings.Contains(response.Body.String(), "Next<small>1d</small>") {
+		t.Errorf("a fresh article's preview changed just from raising its priority: %s", response.Body.String())
+	}
+
+	element, _ := db.ElementByID(1)
+	if !element.Schedule.DueOn.Equal(before.Schedule.DueOn) {
+		t.Errorf("due = %v, want unchanged at %v", element.Schedule.DueOn, before.Schedule.DueOn)
 	}
 }
 

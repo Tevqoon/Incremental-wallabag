@@ -97,8 +97,12 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 
 	// Each button is labelled with the interval its grade would produce. The
 	// previews come from the scheduler itself rather than a parallel
-	// calculation, so a button cannot advertise something that would not happen.
-	previews := ir.Previews(element.Schedule, s.today())
+	// calculation, so a button cannot advertise something that would not
+	// happen — EffectiveSchedule included: an ungraded extract or highlight's
+	// interval is substituted from its priority before previewing, the same
+	// substitution handleGrade makes before actually grading it, so the two
+	// never disagree.
+	previews := ir.Previews(element.Schedule.EffectiveSchedule(element.IsRoot()), s.today())
 	intervals := map[string]string{
 		"next":   previews[ir.GradeNext].Interval,
 		"sooner": previews[ir.GradeSooner].Interval,

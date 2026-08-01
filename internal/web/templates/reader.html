@@ -168,24 +168,7 @@
 
       <div class="grade-group">
         <span class="grade-label">Schedule</span>
-        <div class="grade-buttons">
-          <button hx-post="/elements/{{.Element.ID}}/grade"
-                  hx-vals='js:{grade:"sooner", block: topBlock()}'
-                  title="More interesting than expected; bring it back sooner">
-            Sooner<small>{{index .Intervals "sooner"}}</small>
-          </button>
-          <button class="primary"
-                  hx-post="/elements/{{.Element.ID}}/grade"
-                  hx-vals='js:{grade:"next", block: topBlock()}'
-                  title="Read a slice; come back on schedule">
-            Next<small>{{index .Intervals "next"}}</small>
-          </button>
-          <button hx-post="/elements/{{.Element.ID}}/grade"
-                  hx-vals='js:{grade:"defer", block: topBlock()}'
-                  title="Not compelling; push it out, and further each time">
-            Defer<small>{{index .Intervals "defer"}}</small>
-          </button>
-        </div>
+        {{template "schedule-buttons" .}}
       </div>
     </div>
 
@@ -202,12 +185,40 @@
         Priority
         <input type="range" min="0" max="100" step="5"
                value="{{percent .Element.Schedule.Priority}}"
+               oninput="this.nextElementSibling.value = this.value"
                hx-post="/elements/{{.Element.ID}}/priority"
                hx-trigger="change"
+               hx-target="#schedule-buttons"
+               hx-swap="outerHTML"
                hx-vals="js:{priority: event.target.value / 100}">
         <output>{{percent .Element.Schedule.Priority}}</output>
       </label>
     </div>
   </footer>
 </article>
+{{end}}
+
+<!-- Its own named template so handlePriority can re-render just this after
+     the slider moves: the previews still come from ir.Previews, the same
+     scheduler call handleRead makes, never a parallel client-side estimate
+     that could drift from what grading would actually do. -->
+{{define "schedule-buttons"}}
+<div id="schedule-buttons" class="grade-buttons">
+  <button hx-post="/elements/{{.Element.ID}}/grade"
+          hx-vals='js:{grade:"sooner", block: topBlock()}'
+          title="More interesting than expected; bring it back sooner">
+    Sooner<small>{{index .Intervals "sooner"}}</small>
+  </button>
+  <button class="primary"
+          hx-post="/elements/{{.Element.ID}}/grade"
+          hx-vals='js:{grade:"next", block: topBlock()}'
+          title="Read a slice; come back on schedule">
+    Next<small>{{index .Intervals "next"}}</small>
+  </button>
+  <button hx-post="/elements/{{.Element.ID}}/grade"
+          hx-vals='js:{grade:"defer", block: topBlock()}'
+          title="Not compelling; push it out, and further each time">
+    Defer<small>{{index .Intervals "defer"}}</small>
+  </button>
+</div>
 {{end}}

@@ -518,3 +518,213 @@ func TestBuryLeavesTheScheduleAlone(t *testing.T) {
 		t.Errorf("bury changed the schedule:\n got %+v\nwant %+v", after, before)
 	}
 }
+
+// TestFreshInterval pins the curve's endpoints and its shape: geometric, not
+// linear, for the same reason priorityCap is — halfway down the scale should
+// feel like a middling wait, not land near six months.
+func TestFreshInterval(t *testing.T) {
+	if got := FreshInterval(0); !closeEnough(got, 1) {
+		t.Errorf("FreshInterval(0) = %.2f, want 1 (a day, the floor)", got)
+	}
+	if got := FreshInterval(1); !closeEnough(got, 365) {
+		t.Errorf("FreshInterval(1) = %.2f, want 365 (a year, the ceiling)", got)
+	}
+	if mid := FreshInterval(0.5); mid < 15 || mid > 25 {
+		t.Errorf("FreshInterval(0.5) = %.1f, want roughly 19 (sqrt(365)), not linear interpolation (~183)", mid)
+	}
+}
+
+// TestEffectiveScheduleSubstitutesForFreshNonRootElements: an ungraded
+// extract or highlight has no interval of its own yet, so without this
+// substitution its priority has nothing to act on until it is graded once —
+// see FreshInterval.
+func TestEffectiveScheduleSubstitutesForFreshNonRootElements(t *testing.T) {
+	fresh := Schedule{State: StateNew, Priority: 0.6, DueOn: today}
+
+	effective := fresh.EffectiveSchedule(false)
+
+	want := FreshInterval(0.6)
+	if !closeEnough(effective.IntervalDays, want) {
+		t.Errorf("interval = %.1f, want %.1f (FreshInterval(0.6))", effective.IntervalDays, want)
+	}
+}
+
+// TestEffectiveScheduleLeavesRootArticlesAlone: a whole article is due on
+// import's own schedule, not a priority curve — substituting FreshInterval
+// for it would make touching priority at all silently postpone a
+// due-today article, with nothing in the UI suggesting that would happen.
+func TestEffectiveScheduleLeavesRootArticlesAlone(t *testing.T) {
+	fresh := Schedule{State: StateNew, Priority: 0.5, DueOn: today}
+
+	effective := fresh.EffectiveSchedule(true)
+
+	if effective != fresh {
+		t.Errorf("EffectiveSchedule(isRoot=true) changed a root article's schedule: got %+v, want %+v", effective, fresh)
+	}
+}
+
+// TestEffectiveScheduleLeavesGradedElementsAlone: once something has a due
+// date earned by actually reading it, that supersedes any priority-derived
+// guess — same reasoning as Reprioritize's own State check.
+func TestEffectiveScheduleLeavesGradedElementsAlone(t *testing.T) {
+	reading := Schedule{State: StateReading, IntervalDays: 8, Priority: 0.6, DueOn: today}
+
+	effective := reading.EffectiveSchedule(false)
+
+	if effective != reading {
+		t.Errorf("EffectiveSchedule changed a graded element's schedule: got %+v, want %+v", effective, reading)
+	}
+}
+
+// TestReprioritizeBacklogsAFreshElement: a fresh highlight has no due date
+// earned by reading, so dragging its priority toward "matters less" must move
+// the date itself immediately rather than waiting for a grade that may never
+// come for months.
+func TestReprioritizeBacklogsAFreshElement(t *testing.T) {
+	fresh := Schedule{State: StateNew, Priority: 0.5, DueOn: today, AFactor: 2.0}
+
+	after := Reprioritize(fresh, 1.0, false, today)
+
+	if after.Priority != 1.0 {
+		t.Errorf("priority = %.2f, want 1.0", after.Priority)
+	}
+	wantDue := Day(today).AddDate(0, 0, 365)
+	if !after.DueOn.Equal(wantDue) {
+		t.Errorf("due = %v, want %v (a year out, FreshInterval(1.0))", after.DueOn, wantDue)
+	}
+	if !closeEnough(after.IntervalDays, 365) {
+		t.Errorf("interval = %.1f, want ~365 so a later grade grows from this anchor, not from zero", after.IntervalDays)
+	}
+	if after.State != StateNew {
+		t.Errorf("state = %q, want %q — reprioritizing is not grading it", after.State, StateNew)
+	}
+}
+
+// TestReprioritizeTracksTheSliderInBothDirections: priority always shapes an
+// ungraded element's schedule, not just the first time it is dragged toward
+// "matters less" — moving it back toward "matters more" afterwards must pull
+// the due date back in too, not leave it pinned to the furthest point ever
+// reached. This is also what keeps Sooner distinguishable from Next and
+// Defer: pinned to a stale, oversized anchor, halving it (Sooner) can still
+// exceed the cap and collapse into the same clamped value as the other two.
+func TestReprioritizeTracksTheSliderInBothDirections(t *testing.T) {
+	fresh := Schedule{State: StateNew, Priority: 0.5, DueOn: today, AFactor: 2.0}
+
+	backlogged := Reprioritize(fresh, 1.0, false, today)
+	settled := Reprioritize(backlogged, 0.8, false, today)
+
+	wantInterval := FreshInterval(0.8)
+	if !closeEnough(settled.IntervalDays, wantInterval) {
+		t.Errorf("interval = %.1f, want ~%.1f (FreshInterval(0.8), not still anchored to FreshInterval(1.0))",
+			settled.IntervalDays, wantInterval)
+	}
+	wantDue := Day(today).AddDate(0, 0, int(math.Round(wantInterval)))
+	if !settled.DueOn.Equal(wantDue) {
+		t.Errorf("due = %v, want %v", settled.DueOn, wantDue)
+	}
+
+	// With the anchor no longer oversized, the three grade previews must not
+	// all collapse into the same clamped ceiling.
+	previews := Previews(settled, today)
+	if previews[GradeSooner].Interval == previews[GradeNext].Interval {
+		t.Errorf("Sooner and Next both preview %q; the anchor is still too large for Sooner to differ",
+			previews[GradeNext].Interval)
+	}
+}
+
+// TestReprioritizeCanBacklogAWholeArticle: "I'll read this in a week" has to
+// apply to a root the same as an extract — dragging priority toward less
+// important pushes a fresh article's due date out too.
+func TestReprioritizeCanBacklogAWholeArticle(t *testing.T) {
+	article := Schedule{State: StateNew, Priority: 0.5, DueOn: today}
+
+	after := Reprioritize(article, 1.0, true, today)
+
+	if after.Priority != 1.0 {
+		t.Errorf("priority = %.2f, want 1.0", after.Priority)
+	}
+	wantDue := Day(today).AddDate(0, 0, 365)
+	if !after.DueOn.Equal(wantDue) {
+		t.Errorf("due = %v, want %v (a year out, FreshInterval(1.0))", after.DueOn, wantDue)
+	}
+}
+
+// TestReprioritizeNeverBuriesAnUntouchedArticle: an article is due
+// immediately by default. The very first time priority moves on it, raising
+// importance (the only direction that matters while it still sits at that
+// default) must leave the due date alone — without this, nudging priority at
+// all would jump a due-today article out to FreshInterval's floor, which is
+// always later than "today" and the opposite of what raising priority means.
+func TestReprioritizeNeverBuriesAnUntouchedArticle(t *testing.T) {
+	article := Schedule{State: StateNew, Priority: 0.6, DueOn: today}
+
+	after := Reprioritize(article, 0.1, true, today)
+
+	if after.Priority != 0.1 {
+		t.Errorf("priority = %.2f, want 0.1", after.Priority)
+	}
+	if !after.DueOn.Equal(today) || after.IntervalDays != article.IntervalDays {
+		t.Errorf("raising priority on an untouched article changed its schedule: %+v", after)
+	}
+}
+
+// TestReprioritizeTracksAnAlreadyBacklogedArticleFreely: once an article has
+// been backlogged at all, its interval is no longer import's default, so
+// further slider moves — including back toward more important — track it
+// freely, the same as an extract does once anchored. Leaving it pinned to
+// the furthest point ever dragged to would be the exact bug
+// TestReprioritizeTracksTheSliderInBothDirections guards for extracts.
+func TestReprioritizeTracksAnAlreadyBacklogedArticleFreely(t *testing.T) {
+	article := Schedule{State: StateNew, Priority: 0.5, DueOn: today}
+
+	backlogged := Reprioritize(article, 1.0, true, today)
+	settled := Reprioritize(backlogged, 0.2, true, today)
+
+	wantInterval := FreshInterval(0.2)
+	if !closeEnough(settled.IntervalDays, wantInterval) {
+		t.Errorf("interval = %.1f, want ~%.1f (FreshInterval(0.2), not still anchored to FreshInterval(1.0))",
+			settled.IntervalDays, wantInterval)
+	}
+	wantDue := Day(today).AddDate(0, 0, int(math.Round(wantInterval)))
+	if !settled.DueOn.Equal(wantDue) {
+		t.Errorf("due = %v, want %v", settled.DueOn, wantDue)
+	}
+}
+
+// TestReprioritizeOnlyPushesAnArticleOutPastItsCurrentDueDate: on an
+// untouched article's first backlog, a small move toward less important must
+// not pull the due date in if it is already scheduled further out than that —
+// same reasoning as the guard against pulling a due date in at all, just for
+// the case where there already is a later one to preserve.
+func TestReprioritizeOnlyPushesAnArticleOutPastItsCurrentDueDate(t *testing.T) {
+	farOut := Day(today).AddDate(0, 0, 300)
+	article := Schedule{State: StateNew, Priority: 0.5, DueOn: farOut}
+
+	// FreshInterval(0.6) is roughly 34 days — far short of the 300 days this
+	// article is already scheduled out to.
+	after := Reprioritize(article, 0.6, true, today)
+
+	if !after.DueOn.Equal(farOut) {
+		t.Errorf("due = %v, want unchanged at %v (already further out than the new interval)", after.DueOn, farOut)
+	}
+}
+
+// TestReprioritizeLeavesGradedElementsAlone: an element already in circulation
+// has a due date earned by actually reading it. Reprioritize must behave like
+// a plain priority write there — see the min() clamp in Next for how priority
+// still bounds it, just not by rewriting history on the spot.
+func TestReprioritizeLeavesGradedElementsAlone(t *testing.T) {
+	reading := Schedule{
+		State: StateReading, IntervalDays: 8, AFactor: 2.4, Reps: 3,
+		Priority: 0.3, DueOn: today,
+	}
+
+	after := Reprioritize(reading, 0.9, false, today)
+
+	if after.Priority != 0.9 {
+		t.Errorf("priority = %.2f, want 0.9", after.Priority)
+	}
+	if !after.DueOn.Equal(today) || after.IntervalDays != 8 || after.Reps != 3 {
+		t.Errorf("reprioritizing a graded element changed its schedule: %+v", after)
+	}
+}

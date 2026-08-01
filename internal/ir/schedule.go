@@ -161,6 +161,89 @@ func Next(schedule Schedule, grade Grade, today time.Time) Schedule {
 	return next
 }
 
+// FreshInterval is the interval an ungraded element is treated as carrying
+// before it has ever been graded: one day at priority 0.0 up to a year at
+// priority 1.0. Used both to back-fill a preview (see EffectiveSchedule, for
+// an extract or highlight) and to actually reschedule one (see Reprioritize,
+// for either).
+//
+// priorityCap only ever caps an interval a real grade already produced —
+// there is nothing to cap before the first one. Without a baseline of its
+// own, an ungraded element's interval sits at zero regardless of priority, so
+// grow's flat one-day floor is all Next, Sooner and Defer can ever preview
+// for it, and priority has nothing to visibly act on until it is graded once.
+func FreshInterval(priority float64) float64 {
+	return math.Pow(maxPriorityCap, clamp(priority, 0, 1))
+}
+
+// EffectiveSchedule is the schedule Next and Previews should actually use.
+//
+// For anything already graded at least once, that is just s unchanged — a
+// due date earned by actually reading something is not something priority
+// second-guesses; see the clamp in Next for how priority still bounds it.
+// Root articles are excluded even when ungraded: an article's due date is
+// import's own, real and already accurate the moment Reprioritize has
+// touched it, so there is nothing left to substitute for preview purposes —
+// unlike an extract or highlight, which only ever gets a real interval once
+// graded, so FreshInterval fills in for the stored (zero) one, keeping its
+// preview honest about what priority alone would do right now.
+func (s Schedule) EffectiveSchedule(isRoot bool) Schedule {
+	if isRoot || s.State != StateNew {
+		return s
+	}
+	effective := s
+	effective.IntervalDays = FreshInterval(s.Priority)
+	return effective
+}
+
+// Reprioritize changes an element's priority and, for anything ungraded,
+// immediately pushes its due date out to match — see EffectiveSchedule for
+// why priority otherwise has nothing to act on until graded once. That
+// covers both an imported highlight and a whole article the reader wants to
+// put off — "I'll read this in a week" is exactly this, applied to a root.
+//
+// A root gets one extra protection an extract does not need: the very first
+// time this runs on it, only a move toward less important reschedules it,
+// and only ever further out than wherever it is already due. An article is
+// due immediately by default, and without that guard, simply raising its
+// priority (nudging it toward more important) would first jump the due date
+// out to FreshInterval's own floor — always later than "today" — which is
+// the opposite of what raising priority is supposed to mean. An extract has
+// no such default to protect: importedPriority already delays it, so there
+// is no "immediate" state a stray touch could undo.
+//
+// Once a root has been through here at all, the guard no longer applies: its
+// interval is no longer import's default, and from then on it tracks the
+// slider freely in both directions, exactly like an extract already does —
+// see the non-root case for why leaving it anchored to the furthest point
+// ever dragged to would collapse Sooner, Next and Defer into one identical,
+// useless preview.
+func Reprioritize(schedule Schedule, priority float64, isRoot bool, today time.Time) Schedule {
+	next := schedule
+	next.AFactor = clamp(orDefault(schedule.AFactor, defaultAFactor), minAFactor, maxAFactor)
+	next.Priority = clamp(priority, 0, 1)
+
+	if schedule.State != StateNew {
+		return next
+	}
+
+	interval := FreshInterval(next.Priority)
+	candidate := Day(today).AddDate(0, 0, int(math.Round(interval)))
+
+	if isRoot && schedule.IntervalDays < minInterval {
+		switch {
+		case next.Priority <= schedule.Priority:
+			return next
+		case !schedule.DueOn.IsZero() && !candidate.After(schedule.DueOn):
+			return next
+		}
+	}
+
+	next.IntervalDays = interval
+	next.DueOn = candidate
+	return next
+}
+
 // grow advances an interval by one repetition.
 func grow(interval, afactor float64) float64 {
 	if interval < minInterval {

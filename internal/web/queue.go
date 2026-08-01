@@ -1,6 +1,8 @@
 package web
 
 import (
+	"bytes"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -126,7 +128,12 @@ func (s *Server) handleGrade(w http.ResponseWriter, r *http.Request) {
 
 	// The whole scheduling decision is one pure function call. Everything
 	// stateful — reading the row, writing it back — stays here.
-	updated := ir.Next(element.Schedule, grade, s.today())
+	//
+	// EffectiveSchedule first, so grading an ungraded extract or highlight for
+	// the very first time grows from the same priority-derived interval its
+	// button preview already promised (see handleRead) — not the flat one-day
+	// floor Next would otherwise fall back to.
+	updated := ir.Next(element.Schedule.EffectiveSchedule(element.IsRoot()), grade, s.today())
 
 	if err := s.store.SaveSchedule(id, updated, time.Now()); err != nil {
 		s.fail(w, err)
@@ -360,6 +367,12 @@ func (s *Server) tagTarget(w http.ResponseWriter, r *http.Request) (int64, store
 }
 
 // handlePriority changes how urgently an element competes for attention.
+//
+// Answers with the schedule buttons re-rendered for the new priority, rather
+// than 204, because the buttons' day counts are a function of it (via
+// priorityCap) — leaving them stale would let the slider silently disagree
+// with what grading is about to do. The reader.html template targets this
+// response at #schedule-buttons.
 func (s *Server) handlePriority(w http.ResponseWriter, r *http.Request) {
 	id, err := elementID(r)
 	if err != nil {
@@ -377,11 +390,43 @@ func (s *Server) handlePriority(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.store.SetPriority(id, priority, time.Now()); err != nil {
+	element, err := s.store.ElementByID(id)
+	if err != nil {
+		s.notFoundOrFail(w, err)
+		return
+	}
+
+	// Reprioritize, not a plain field write: an ungraded extract or highlight
+	// has no due date earned by reading it, so dragging the slider toward
+	// "matters less" needs to move the date itself, not just a number that
+	// would only ever be consulted once the reader gets around to grading it.
+	// Root articles are excluded — see Reprioritize.
+	element.Schedule = ir.Reprioritize(element.Schedule, priority, element.IsRoot(), s.today())
+	if err := s.store.SaveSchedule(id, element.Schedule, time.Now()); err != nil {
 		s.fail(w, err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+
+	// Same call handleRead makes: the previews come from the scheduler
+	// itself, so this fragment cannot promise an interval grading would not
+	// actually produce.
+	previews := ir.Previews(element.Schedule, s.today())
+	data := readerData{
+		Element: element,
+		Intervals: map[string]string{
+			"next":   previews[ir.GradeNext].Interval,
+			"sooner": previews[ir.GradeSooner].Interval,
+			"defer":  previews[ir.GradeDefer].Interval,
+		},
+	}
+
+	var buffer bytes.Buffer
+	if err := s.pages["reader.html"].ExecuteTemplate(&buffer, "schedule-buttons", data); err != nil {
+		s.fail(w, fmt.Errorf("web: render schedule buttons: %w", err))
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	buffer.WriteTo(w)
 }
 
 // handleProgress records how far through a topic the reader has scrolled.
