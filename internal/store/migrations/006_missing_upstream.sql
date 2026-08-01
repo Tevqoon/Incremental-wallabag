@@ -1,0 +1,15 @@
+-- Whether a document could no longer be found in wallabag's own listing, the
+-- last time a full reconciliation ran.
+--
+-- The regular sync only ever asks for entries changed since a watermark, so
+-- a document that was deleted at wallabag produces no event for increader to
+-- notice -- nothing "changed" about it, it simply stopped being listed. Only
+-- a full listing can reveal an absence, which is why this flag is set by a
+-- separate reconciliation pass (see Syncer.Reconcile) rather than the
+-- ordinary incremental one.
+--
+-- Deliberately not acted on automatically: increader keeps material the
+-- reader has not finished with regardless of what wallabag still thinks, so
+-- this is visibility for a manual decision in the library, not a trigger for
+-- automatic deletion.
+ALTER TABLE documents ADD COLUMN missing_upstream INTEGER NOT NULL DEFAULT 0;

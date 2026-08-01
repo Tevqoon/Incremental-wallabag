@@ -225,6 +225,18 @@ func serve(settings config.Config, logger *slog.Logger) error {
 		ExtractDelay: settings.ExtractDelayDays,
 		Logger:       logger,
 		Publish:      sync.Publish,
+		SyncNow: func(ctx context.Context) error {
+			// Reconciling here too, rather than waiting for the scheduled
+			// loop's daily check: a manual sync is exactly the moment
+			// someone wants to know the library actually matches wallabag,
+			// not just that anything new has arrived.
+			_, syncErr := sync.SyncAll(ctx)
+			reconcileErr := sync.Reconcile(ctx)
+			if syncErr != nil {
+				return syncErr
+			}
+			return reconcileErr
+		},
 	})
 	if err != nil {
 		return err

@@ -30,6 +30,12 @@ type Document struct {
 	PublishedAt     time.Time
 	SourceUpdatedAt time.Time
 	ImportedAt      time.Time
+
+	// MissingUpstream is set by Reconcile when a full listing no longer
+	// includes this document — the provider's own signal for "deleted" that
+	// an incremental sync can never observe, since nothing "changed" about a
+	// document that stopped existing.
+	MissingUpstream bool
 }
 
 // UpsertResult reports what a batch import changed.
@@ -229,14 +235,14 @@ func (s *Store) DocumentByID(id int64) (Document, error) {
 	err := s.db.QueryRow(`
 		SELECT id, source, external_id, url, title, author, language,
 		       content_html, has_content, is_archived, is_starred, reading_time,
-		       published_at, source_updated_at, imported_at
+		       published_at, source_updated_at, imported_at, missing_upstream
 		FROM documents WHERE id = ?`, id,
 	).Scan(
 		&document.ID, &document.Source, &document.ExternalID, &document.URL,
 		&document.Title, &document.Author, &document.Language,
 		&document.ContentHTML, &document.HasContent,
 		&document.IsArchived, &document.IsStarred, &document.ReadingTime,
-		&published, &updated, &imported,
+		&published, &updated, &imported, &document.MissingUpstream,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Document{}, fmt.Errorf("store: document %d: %w", id, ErrNotFound)
@@ -249,6 +255,83 @@ func (s *Store) DocumentByID(id int64) (Document, error) {
 	document.SourceUpdatedAt = parseTime(updated)
 	document.ImportedAt = parseTime(imported)
 	return document, nil
+}
+
+// ReconcileMissing flags documents whose external_id is absent from present
+// as missing upstream, and clears the flag on any that have reappeared in it.
+//
+// present must be every external_id a full listing of the source currently
+// reports — not an incremental "changed since" one. The distinction matters:
+// an entry that was deleted at the provider produces no "changed" event for
+// an incremental fetch to see, so only a full listing can reveal its absence.
+//
+// present is loaded into a temporary table rather than an IN (...) list built
+// from placeholders: a personal library can run past SQLite's default bound
+// parameter limit, and a temp table has no such ceiling.
+func (s *Store) ReconcileMissing(sourceName string, present []string) (marked, cleared int, err error) {
+	err = s.inTransaction(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`CREATE TEMP TABLE present_ids (external_id TEXT PRIMARY KEY)`); err != nil {
+			return fmt.Errorf("store: create temp table: %w", err)
+		}
+		defer tx.Exec(`DROP TABLE present_ids`)
+
+		insert, err := tx.Prepare(`INSERT OR IGNORE INTO present_ids VALUES (?)`)
+		if err != nil {
+			return fmt.Errorf("store: prepare temp insert: %w", err)
+		}
+		defer insert.Close()
+		for _, externalID := range present {
+			if _, err := insert.Exec(externalID); err != nil {
+				return fmt.Errorf("store: populate temp table: %w", err)
+			}
+		}
+
+		result, err := tx.Exec(`
+			UPDATE documents SET missing_upstream = 1
+			WHERE source = ? AND missing_upstream = 0
+			  AND external_id NOT IN (SELECT external_id FROM present_ids)`,
+			sourceName)
+		if err != nil {
+			return fmt.Errorf("store: mark missing documents: %w", err)
+		}
+		if n, err := result.RowsAffected(); err == nil {
+			marked = int(n)
+		}
+
+		result, err = tx.Exec(`
+			UPDATE documents SET missing_upstream = 0
+			WHERE source = ? AND missing_upstream = 1
+			  AND external_id IN (SELECT external_id FROM present_ids)`,
+			sourceName)
+		if err != nil {
+			return fmt.Errorf("store: clear missing documents: %w", err)
+		}
+		if n, err := result.RowsAffected(); err == nil {
+			cleared = int(n)
+		}
+		return nil
+	})
+	return marked, cleared, err
+}
+
+// DeleteDocument permanently removes a document and everything under it — its
+// root topic, every extract and cloze taken from it, its tags — via the
+// schema's ON DELETE CASCADE.
+//
+// Meant for a document ReconcileMissing has already flagged gone upstream:
+// increader has no way to keep a local copy in step with a provider that no
+// longer has the original, so the only choices left are keeping a permanent
+// orphan or removing it — and that is the reader's call, never automatic,
+// which is why nothing in the sync path calls this on its own.
+func (s *Store) DeleteDocument(id int64) error {
+	result, err := s.db.Exec(`DELETE FROM documents WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("store: delete document %d: %w", id, err)
+	}
+	if n, _ := result.RowsAffected(); n == 0 {
+		return fmt.Errorf("store: document %d: %w", id, ErrNotFound)
+	}
+	return nil
 }
 
 // CountDocuments returns how many documents are stored for a source.
@@ -276,8 +359,10 @@ type LibraryEntry struct {
 type LibraryFilter struct {
 	Query string
 
-	// State is "", "unread", "starred", "archived" or "annotated" — the same
-	// divisions wallabag's own sidebar offers, so the two read the same way.
+	// State is "", "unread", "starred", "archived", "annotated" or "missing" —
+	// the first four are the same divisions wallabag's own sidebar offers, so
+	// the two read the same way. "missing" is increader's own: documents the
+	// last reconciliation could not find upstream any more.
 	State string
 
 	// Tag restricts to documents carrying this label.
@@ -301,6 +386,7 @@ func (s *Store) SearchDocuments(filter LibraryFilter) ([]LibraryEntry, error) {
 		SELECT d.id, d.source, d.external_id, d.url, d.title, d.author,
 		       d.language, d.has_content, d.is_archived, d.is_starred,
 		       d.reading_time, d.published_at, d.source_updated_at,
+		       d.missing_upstream,
 		       root.id, root.state,
 		       (SELECT COUNT(*) FROM elements child WHERE child.parent_id = root.id)
 		FROM documents d
@@ -310,6 +396,7 @@ func (s *Store) SearchDocuments(filter LibraryFilter) ([]LibraryEntry, error) {
 		       OR (? = 'unread'    AND d.is_archived = 0)
 		       OR (? = 'starred'   AND d.is_starred  = 1)
 		       OR (? = 'archived'  AND d.is_archived = 1)
+		       OR (? = 'missing'   AND d.missing_upstream = 1)
 		       OR (? = 'annotated' AND EXISTS (
 		              SELECT 1 FROM elements child
 		              WHERE child.parent_id = root.id AND child.origin = 'import')))
@@ -320,7 +407,7 @@ func (s *Store) SearchDocuments(filter LibraryFilter) ([]LibraryEntry, error) {
 		ORDER BY d.source_updated_at DESC
 		LIMIT ?`,
 		filter.Query, pattern, pattern, pattern,
-		filter.State, filter.State, filter.State, filter.State, filter.State,
+		filter.State, filter.State, filter.State, filter.State, filter.State, filter.State,
 		filter.Tag, filter.Tag,
 		filter.Limit,
 	)
@@ -340,7 +427,7 @@ func (s *Store) SearchDocuments(filter LibraryFilter) ([]LibraryEntry, error) {
 			&entry.ID, &entry.Source, &entry.ExternalID, &entry.URL, &entry.Title,
 			&entry.Author, &entry.Language, &entry.HasContent,
 			&entry.IsArchived, &entry.IsStarred, &entry.ReadingTime,
-			&published, &updated,
+			&published, &updated, &entry.MissingUpstream,
 			&entry.RootElementID, &entry.State, &entry.ExtractCount,
 		)
 		if err != nil {
@@ -380,17 +467,19 @@ func (s *Store) CountByState(sourceName string) (map[string]int, error) {
 		    SUM(CASE WHEN is_archived = 0 THEN 1 ELSE 0 END),
 		    SUM(CASE WHEN is_starred  = 1 THEN 1 ELSE 0 END),
 		    SUM(CASE WHEN is_archived = 1 THEN 1 ELSE 0 END),
+		    SUM(CASE WHEN missing_upstream = 1 THEN 1 ELSE 0 END),
 		    (SELECT COUNT(DISTINCT document_id) FROM elements WHERE origin = 'import')
 		FROM documents WHERE source = ?`, sourceName)
 
-	var all, unread, starred, archived, annotated int
-	if err := row.Scan(&all, &unread, &starred, &archived, &annotated); err != nil {
+	var all, unread, starred, archived, missing, annotated int
+	if err := row.Scan(&all, &unread, &starred, &archived, &missing, &annotated); err != nil {
 		return nil, fmt.Errorf("store: count documents by state: %w", err)
 	}
 	counts["all"] = all
 	counts["unread"] = unread
 	counts["starred"] = starred
 	counts["archived"] = archived
+	counts["missing"] = missing
 	counts["annotated"] = annotated
 	return counts, nil
 }

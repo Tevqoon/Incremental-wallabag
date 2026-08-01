@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -19,8 +20,18 @@ type writingSource struct {
 	archived          map[string]bool
 	tags              map[string][]string
 	deletedHighlights []string
-	failWith          error
-	calls             int
+	createdHighlights []string // "entryID:quote", in call order
+
+	// nextHighlightID is handed out as the id of each created highlight,
+	// standing in for wallabag assigning a real one.
+	nextHighlightID int
+
+	// listing is what Fetch returns, standing in for whatever a full or
+	// incremental listing would currently report upstream.
+	listing []source.Document
+
+	failWith error
+	calls    int
 }
 
 func newWritingSource() *writingSource {
@@ -30,7 +41,7 @@ func newWritingSource() *writingSource {
 func (w *writingSource) Name() string { return "wallabag" }
 
 func (w *writingSource) Fetch(context.Context, time.Time) ([]source.Document, error) {
-	return nil, nil
+	return w.listing, w.failWith
 }
 func (w *writingSource) Content(context.Context, string) (string, error) { return "", nil }
 
@@ -69,6 +80,16 @@ func (w *writingSource) DeleteHighlight(_ context.Context, id string) error {
 	}
 	w.deletedHighlights = append(w.deletedHighlights, id)
 	return nil
+}
+
+func (w *writingSource) CreateHighlight(_ context.Context, entryID, quote string) (string, error) {
+	w.calls++
+	if w.failWith != nil {
+		return "", w.failWith
+	}
+	w.createdHighlights = append(w.createdHighlights, entryID+":"+quote)
+	w.nextHighlightID++
+	return strconv.Itoa(w.nextHighlightID), nil
 }
 
 // readOnlySource cannot write, which must be handled rather than assumed away.
@@ -127,6 +148,82 @@ func TestDrainPublishesQueuedWrites(t *testing.T) {
 	remaining, _ := db.PendingWrites("wallabag", 10)
 	if len(remaining) != 0 {
 		t.Errorf("%d writes still queued after publishing", len(remaining))
+	}
+}
+
+// TestDrainPushesNewHighlightsAndRecordsTheirID is the round trip a manual
+// extract needs: draining sends it upstream as a new annotation, and the id
+// wallabag hands back for it is written onto the local element, not
+// discarded — without that, deleting the extract later would have nothing to
+// remove upstream.
+func TestDrainPushesNewHighlightsAndRecordsTheirID(t *testing.T) {
+	db, logger := testSetup(t)
+	seed(t, db)
+
+	extractID, err := db.CreateExtract(store.NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "A passage worth keeping.",
+		ContentHTML: "<p>A passage worth keeping.</p>", Origin: store.OriginManual,
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+
+	provider := newWritingSource()
+	published := New(db, logger, provider).drainWrites(context.Background(), provider)
+
+	if published != 1 {
+		t.Fatalf("published %d writes, want 1", published)
+	}
+	if len(provider.createdHighlights) != 1 || provider.createdHighlights[0] != "77:A passage worth keeping." {
+		t.Errorf("created highlights = %v, want one for entry 77", provider.createdHighlights)
+	}
+
+	element, err := db.ElementByID(extractID)
+	if err != nil {
+		t.Fatalf("ElementByID: %v", err)
+	}
+	if element.ExternalRef != "1" {
+		t.Errorf("ExternalRef = %q, want the id wallabag handed back for the new annotation", element.ExternalRef)
+	}
+
+	// Published writes are cleared, same as any other operation.
+	remaining, _ := db.PendingWrites("wallabag", 10)
+	if len(remaining) != 0 {
+		t.Errorf("%d writes still queued after publishing", len(remaining))
+	}
+}
+
+// TestReconcileFlagsDeletedEntries is the end-to-end path behind the
+// library's "missing upstream" badge: Reconcile does a full listing, and
+// anything previously known locally but absent from it gets flagged.
+func TestReconcileFlagsDeletedEntries(t *testing.T) {
+	db, logger := testSetup(t)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "77", Title: "Stays", UpdatedAt: time.Now()},
+		{ExternalID: "78", Title: "Gets deleted at wallabag", UpdatedAt: time.Now()},
+	}, 0, time.Now()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	provider := newWritingSource()
+	// The full listing Reconcile fetches now only reports entry 77 — 78 has
+	// vanished from wallabag's own side since the seed above.
+	provider.listing = []source.Document{
+		{ExternalID: "77", Title: "Stays", UpdatedAt: time.Now()},
+	}
+
+	if err := New(db, logger, provider).Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	stays, _ := db.DocumentByID(1)
+	if stays.MissingUpstream {
+		t.Error("a document still in the listing was flagged missing")
+	}
+	gone, _ := db.DocumentByID(2)
+	if !gone.MissingUpstream {
+		t.Error("a document absent from the listing was not flagged missing")
 	}
 }
 

@@ -1508,3 +1508,44 @@ func TestDeleteExtractMissing(t *testing.T) {
 		t.Errorf("status = %d, want 404", response.Code)
 	}
 }
+
+// TestDeleteDocumentRequiresMissingFlag is what keeps the library's delete
+// button from being a general-purpose "remove any article" action: a
+// document still found upstream would just be re-created on the very next
+// sync, so deleting one is refused until reconciliation has flagged it gone.
+func TestDeleteDocumentRequiresMissingFlag(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if response := del(t, server, "/documents/1"); response.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 — the document still exists upstream", response.Code)
+	}
+	if _, err := db.DocumentByID(1); err != nil {
+		t.Errorf("the document was removed despite the rejection: %v", err)
+	}
+}
+
+func TestDeleteDocumentRemovesAFlaggedOne(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	// An empty listing: nothing is present any more, so document 1 gets
+	// flagged missing.
+	if _, _, err := db.ReconcileMissing("wallabag", nil); err != nil {
+		t.Fatalf("ReconcileMissing: %v", err)
+	}
+
+	response := del(t, server, "/documents/1")
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", response.Code)
+	}
+	if _, err := db.DocumentByID(1); err == nil {
+		t.Error("the document survived the delete")
+	}
+}
+
+func TestDeleteDocumentMissing(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	if response := del(t, server, "/documents/999"); response.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", response.Code)
+	}
+}

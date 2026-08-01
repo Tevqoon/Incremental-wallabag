@@ -49,6 +49,11 @@ type Server struct {
 	// publish asks the syncer to drain the outbox now. Optional: without it
 	// queued writes still go out on the next sync, just later.
 	publish func()
+
+	// syncNow runs a full sync of every source immediately, blocking until it
+	// finishes. Optional: without it, new documents at a provider only arrive
+	// on the next scheduled tick.
+	syncNow func(context.Context) error
 }
 
 // Options configures a Server.
@@ -66,6 +71,11 @@ type Options struct {
 	// leaves promptly instead of waiting for the sync interval. It must not
 	// block: reading should never wait on the network.
 	Publish func()
+
+	// SyncNow runs a full sync immediately, for the "sync now" button. Unlike
+	// Publish it is expected to block for the duration of the request: the
+	// point is for the page that follows to already show what it fetched.
+	SyncNow func(context.Context) error
 }
 
 // New builds a Server and parses its templates.
@@ -83,6 +93,7 @@ func New(options Options) (*Server, error) {
 		policy:       newPolicy(),
 		pages:        make(map[string]*template.Template),
 		publish:      options.Publish,
+		syncNow:      options.SyncNow,
 	}
 
 	for _, name := range pageNames {
@@ -109,8 +120,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /static/", http.FileServerFS(assets))
 
 	mux.HandleFunc("GET /{$}", s.handleQueue)
+	mux.HandleFunc("POST /sync", s.handleSyncNow)
 	mux.HandleFunc("GET /next", s.handleNext)
 	mux.HandleFunc("GET /library", s.handleLibrary)
+	mux.HandleFunc("DELETE /documents/{id}", s.handleDeleteDocument)
 	mux.HandleFunc("GET /extracts", s.handleExtracts)
 	mux.HandleFunc("GET /read/{id}", s.handleRead)
 

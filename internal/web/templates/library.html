@@ -16,6 +16,9 @@
     <a href="/library?state=starred" class="{{if eq .State "starred"}}on{{end}}">Starred {{index .Counts "starred"}}</a>
     <a href="/library?state=archived" class="{{if eq .State "archived"}}on{{end}}">Archive {{index .Counts "archived"}}</a>
     <a href="/library?state=annotated" class="{{if eq .State "annotated"}}on{{end}}">Annotated {{index .Counts "annotated"}}</a>
+    {{if index .Counts "missing"}}
+      <a href="/library?state=missing" class="{{if eq .State "missing"}}on{{end}}">Missing {{index .Counts "missing"}}</a>
+    {{end}}
   </nav>
 
   {{if .Tags}}
@@ -32,12 +35,15 @@
   {{if .Entries}}
     <ol class="items">
       {{range .Entries}}
-        <li class="item">
+        <li class="item" id="document-{{.ID}}">
           <a class="item-title" href="/read/{{.RootElementID}}">{{.Title}}</a>
           <div class="item-meta">
             <span class="badge">{{.State}}</span>
             {{if .IsArchived}}<span class="badge">archived</span>{{end}}
             {{if .IsStarred}}<span class="badge badge-item">★</span>{{end}}
+            {{if .MissingUpstream}}
+              <span class="badge badge-danger" title="the last check could not find this in wallabag any more">missing upstream</span>
+            {{end}}
             {{if eq .State "suspended"}}
               <button class="tiny" hx-post="/elements/{{.RootElementID}}/unsuspend">queue it</button>
             {{end}}
@@ -50,6 +56,14 @@
             {{if not .HasContent}}<span title="fetched on first open">not yet fetched</span>{{end}}
             {{if .URL}}
               <a href="{{.URL}}" rel="noopener noreferrer" target="_blank">source ↗</a>
+            {{end}}
+            {{if .MissingUpstream}}
+              <button class="tiny danger"
+                      hx-delete="/documents/{{.ID}}?swap_only=1"
+                      hx-target="#document-{{.ID}}" hx-swap="outerHTML"
+                      hx-confirm="Delete “{{.Title}}” from increader? It no longer exists in wallabag, and this cannot be undone.">
+                delete
+              </button>
             {{end}}
           </div>
         </li>

@@ -1,6 +1,11 @@
 {{define "content"}}
 <section class="queue">
-  <h1>Queue</h1>
+  <div class="queue-head">
+    <h1>Queue</h1>
+    <button type="button" hx-post="/sync" title="Fetch anything new from wallabag right now, instead of waiting for the next scheduled sync">
+      Sync now
+    </button>
+  </div>
   <p class="meta">
     {{.Due}} due today · {{.Total}} elements in total
   </p>

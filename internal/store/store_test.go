@@ -1216,3 +1216,94 @@ func TestDeleteExtractMissing(t *testing.T) {
 		t.Errorf("DeleteExtract(999) = %v, want ErrNotFound", err)
 	}
 }
+
+// TestReconcileMissingFlagsAbsentDocuments is the mechanism behind the
+// "missing upstream" badge: a full listing that no longer includes a
+// document's external_id is the only signal increader ever gets that
+// something was deleted at the provider, since an incremental sync cannot
+// distinguish "deleted" from "unchanged" — neither produces an event.
+func TestReconcileMissingFlagsAbsentDocuments(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "1", Title: "Still there", UpdatedAt: now},
+		{ExternalID: "2", Title: "Deleted at wallabag", UpdatedAt: now},
+	}, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	// A fresh full listing that only reports entry 1: entry 2 has vanished.
+	marked, cleared, err := db.ReconcileMissing("wallabag", []string{"1"})
+	if err != nil {
+		t.Fatalf("ReconcileMissing: %v", err)
+	}
+	if marked != 1 || cleared != 0 {
+		t.Errorf("marked=%d cleared=%d, want marked=1 cleared=0", marked, cleared)
+	}
+
+	present, _ := db.DocumentByID(1)
+	if present.MissingUpstream {
+		t.Error("a document that is still listed was flagged missing")
+	}
+	absent, _ := db.DocumentByID(2)
+	if !absent.MissingUpstream {
+		t.Error("a document absent from the listing was not flagged missing")
+	}
+
+	// It reappears in a later listing — restored, or the earlier check was a
+	// transient fluke. Either way the flag must clear, not stay stuck.
+	marked, cleared, err = db.ReconcileMissing("wallabag", []string{"1", "2"})
+	if err != nil {
+		t.Fatalf("ReconcileMissing (restored): %v", err)
+	}
+	if marked != 0 || cleared != 1 {
+		t.Errorf("marked=%d cleared=%d, want marked=0 cleared=1", marked, cleared)
+	}
+	restored, _ := db.DocumentByID(2)
+	if restored.MissingUpstream {
+		t.Error("a document present again in the listing stayed flagged missing")
+	}
+}
+
+// TestDeleteDocumentCascades checks a whole-document delete takes its
+// extracts with it — the local-only cleanup for something ReconcileMissing
+// has already flagged gone upstream.
+func TestDeleteDocumentCascades(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "1", Title: "An article", UpdatedAt: now},
+	}, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+	extractID, err := db.CreateExtract(NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "A passage.",
+		ContentHTML: "<p>A passage.</p>",
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+
+	if err := db.DeleteDocument(1); err != nil {
+		t.Fatalf("DeleteDocument: %v", err)
+	}
+
+	if _, err := db.DocumentByID(1); !errors.Is(err, ErrNotFound) {
+		t.Errorf("DocumentByID after delete: %v, want ErrNotFound", err)
+	}
+	if _, err := db.ElementByID(1); !errors.Is(err, ErrNotFound) {
+		t.Errorf("root topic survived DeleteDocument: %v, want ErrNotFound", err)
+	}
+	if _, err := db.ElementByID(extractID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("extract survived DeleteDocument: %v, want ErrNotFound", err)
+	}
+}
+
+func TestDeleteDocumentMissing(t *testing.T) {
+	db := testStore(t)
+	if err := db.DeleteDocument(999); !errors.Is(err, ErrNotFound) {
+		t.Errorf("DeleteDocument(999) = %v, want ErrNotFound", err)
+	}
+}

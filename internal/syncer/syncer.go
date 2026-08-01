@@ -20,6 +20,13 @@ import (
 // is worked through over several passes instead of stalling a single one.
 const writeBatch = 200
 
+// reconcileInterval is how often the scheduled loop pays for a full listing
+// to check for documents deleted upstream, rather than every tick. A
+// deletion is rare enough, and a full listing costly enough against a
+// library of any size, that checking on every 30-minute sync would trade
+// real cost for no real benefit over checking once a day.
+const reconcileInterval = 24 * time.Hour
+
 // Syncer imports from a fixed set of sources.
 type Syncer struct {
 	store   *store.Store
@@ -34,6 +41,12 @@ type Syncer struct {
 	// queueing a drain per keystroke, and non-blocking sends mean a handler
 	// never waits on it.
 	nudge chan struct{}
+
+	// lastReconcile is when Reconcile last ran, read and written only from
+	// within Run's own goroutine — nothing else touches it, so it needs no
+	// lock. It gates how often the scheduled loop pays for a full listing;
+	// the manual "sync now" path reconciles unconditionally instead.
+	lastReconcile time.Time
 }
 
 // New builds a syncer over the given sources.
@@ -167,6 +180,59 @@ func (s *Syncer) Sync(ctx context.Context, provider source.Source) (Result, erro
 	return result, nil
 }
 
+// Reconcile checks each source's full current listing against what is stored
+// locally, flagging any document no longer found upstream.
+//
+// This is deliberately separate from the ordinary incremental Sync. Sync asks
+// a provider for what changed since a watermark, which by construction can
+// never report a deletion: nothing "changed" about a document that stopped
+// existing, it simply stopped appearing. Only a full listing — since the
+// zero time, meaning everything — can reveal an absence, which is also why
+// this is not folded into every scheduled sync; see reconcileInterval.
+//
+// One failing source does not abort the others, matching SyncAll.
+func (s *Syncer) Reconcile(ctx context.Context) error {
+	var firstErr error
+
+	for _, provider := range s.sources {
+		documents, err := provider.Fetch(ctx, time.Time{})
+		if err != nil {
+			s.logger.Error("reconcile: fetch failed", "source", provider.Name(), "error", err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+
+		if _, err := s.store.UpsertDocuments(provider.Name(), documents, s.extractDelayDays, time.Now()); err != nil {
+			s.logger.Error("reconcile: upsert failed", "source", provider.Name(), "error", err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+
+		present := make([]string, len(documents))
+		for i, document := range documents {
+			present[i] = document.ExternalID
+		}
+
+		marked, cleared, err := s.store.ReconcileMissing(provider.Name(), present)
+		if err != nil {
+			s.logger.Error("reconcile: marking missing documents failed", "source", provider.Name(), "error", err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if marked > 0 || cleared > 0 {
+			s.logger.Info("reconciled library against upstream",
+				"source", provider.Name(), "newly_missing", marked, "restored", cleared)
+		}
+	}
+	return firstErr
+}
+
 // Run syncs on a fixed interval until the context is cancelled.
 //
 // It syncs once immediately: on a fresh start the queue would otherwise be
@@ -176,6 +242,13 @@ func (s *Syncer) Run(ctx context.Context, interval time.Duration) {
 	if _, err := s.SyncAll(ctx); err != nil {
 		s.logger.Error("initial sync failed", "error", err)
 	}
+	// Reconciling right after the initial sync, rather than waiting a full
+	// reconcileInterval, means a fresh start also gets a deletion check —
+	// there is no earlier state for it to have missed anyway.
+	if err := s.Reconcile(ctx); err != nil {
+		s.logger.Error("initial reconcile failed", "error", err)
+	}
+	s.lastReconcile = time.Now()
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -188,6 +261,12 @@ func (s *Syncer) Run(ctx context.Context, interval time.Duration) {
 		case <-ticker.C:
 			if _, err := s.SyncAll(ctx); err != nil {
 				s.logger.Error("scheduled sync failed", "error", err)
+			}
+			if time.Since(s.lastReconcile) > reconcileInterval {
+				if err := s.Reconcile(ctx); err != nil {
+					s.logger.Error("scheduled reconcile failed", "error", err)
+				}
+				s.lastReconcile = time.Now()
 			}
 
 		case <-s.nudge:

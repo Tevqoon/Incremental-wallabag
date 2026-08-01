@@ -10,6 +10,19 @@ import (
 	"github.com/Tevqoon/increader/internal/store"
 )
 
+// handleSyncNow runs a full sync immediately rather than waiting for the
+// scheduled interval, so a document just added at a provider shows up without
+// a restart. It blocks for the duration of the sync, on purpose: the queue
+// page it redirects back to should already reflect what was fetched.
+func (s *Server) handleSyncNow(w http.ResponseWriter, r *http.Request) {
+	if s.syncNow != nil {
+		if err := s.syncNow(r.Context()); err != nil {
+			s.logger.Error("manual sync failed", "error", err)
+		}
+	}
+	s.redirect(w, r, "/")
+}
+
 // queueData is what the queue page renders.
 type queueData struct {
 	Title string
@@ -467,7 +480,7 @@ func (s *Server) handleLibrary(w http.ResponseWriter, r *http.Request) {
 		Tag:   query.Get("tag"),
 	}
 	switch filter.State {
-	case "", "unread", "starred", "archived", "annotated":
+	case "", "unread", "starred", "archived", "annotated", "missing":
 	default:
 		http.Error(w, "unknown state filter", http.StatusBadRequest)
 		return
@@ -498,6 +511,48 @@ func (s *Server) handleLibrary(w http.ResponseWriter, r *http.Request) {
 		Counts:  counts,
 		Tags:    tags,
 	})
+}
+
+// handleDeleteDocument permanently removes a document no longer found
+// upstream, and everything under it.
+//
+// Scoped deliberately to documents ReconcileMissing has flagged: this is not
+// a general "delete any article" button. increader otherwise treats a
+// document's lifecycle as wallabag's to decide, and one still found upstream
+// would just be re-created on the very next sync anyway — so the guard here
+// is not just caution, it is what keeps the button from being pointless.
+func (s *Server) handleDeleteDocument(w http.ResponseWriter, r *http.Request) {
+	id, err := elementID(r) // generic {id} path value, not element-specific
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	document, err := s.store.DocumentByID(id)
+	if err != nil {
+		s.notFoundOrFail(w, err)
+		return
+	}
+	if !document.MissingUpstream {
+		http.Error(w, "this document still exists upstream; only one missing from wallabag can be deleted here",
+			http.StatusBadRequest)
+		return
+	}
+
+	if err := s.store.DeleteDocument(id); err != nil {
+		s.fail(w, err)
+		return
+	}
+
+	// The library page deletes a row in place — swap_only tells the handler
+	// to answer with an empty 200 so htmx's outerHTML swap on the containing
+	// <li> removes it, with no navigation and no lost scroll position or
+	// filter state.
+	if r.FormValue("swap_only") == "1" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	s.redirect(w, r, "/library")
 }
 
 // extractsData is what the extracts browse page renders.
