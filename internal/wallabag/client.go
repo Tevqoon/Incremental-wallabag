@@ -7,6 +7,7 @@
 package wallabag
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -101,7 +102,7 @@ func (c *Client) get(ctx context.Context, path string, query url.Values, out any
 }
 
 func (c *Client) getOnce(ctx context.Context, path string, query url.Values, out any) error {
-	return c.doOnce(ctx, http.MethodGet, path, query, nil, out)
+	return c.doOnce(ctx, http.MethodGet, path, requestBody{}, query, out)
 }
 
 // send performs an authenticated request with a form-encoded body, retrying
@@ -112,16 +113,42 @@ func (c *Client) getOnce(ctx context.Context, path string, query url.Values, out
 // accepted by the router and then silently ignored, which would look like a
 // write that succeeded and did nothing.
 func (c *Client) send(ctx context.Context, method, path string, form url.Values, out any) error {
-	err := c.doOnce(ctx, method, path, nil, form, out)
+	err := c.doOnce(ctx, method, path, requestBody{form: form}, nil, out)
 	if errors.Is(err, errUnauthorized) {
 		c.forgetTokens()
-		err = c.doOnce(ctx, method, path, nil, form, out)
+		err = c.doOnce(ctx, method, path, requestBody{form: form}, nil, out)
 	}
 	return err
 }
 
+// sendJSON is send's counterpart for the handful of endpoints — annotations,
+// so far — that read their body with json_decode($request->getContent())
+// rather than the form body every other write endpoint uses. Confirmed
+// against wallabag's own AnnotationController source rather than assumed:
+// getting this wrong would look like a write that succeeded and silently
+// created nothing, the same trap the form-only comment above warns about.
+func (c *Client) sendJSON(ctx context.Context, method, path string, payload, out any) error {
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("wallabag: encode request for %s: %w", path, err)
+	}
+	err = c.doOnce(ctx, method, path, requestBody{json: encoded}, nil, out)
+	if errors.Is(err, errUnauthorized) {
+		c.forgetTokens()
+		err = c.doOnce(ctx, method, path, requestBody{json: encoded}, nil, out)
+	}
+	return err
+}
+
+// requestBody is at most one of its fields set, picking the encoding doOnce
+// sends: form data, a raw JSON payload, or (both nil) no body at all.
+type requestBody struct {
+	form url.Values
+	json []byte
+}
+
 // doOnce performs a single authenticated request.
-func (c *Client) doOnce(ctx context.Context, method, path string, query, form url.Values, out any) error {
+func (c *Client) doOnce(ctx context.Context, method, path string, body requestBody, query url.Values, out any) error {
 	token, err := c.accessToken(ctx)
 	if err != nil {
 		return err
@@ -132,18 +159,24 @@ func (c *Client) doOnce(ctx context.Context, method, path string, query, form ur
 		endpoint += "?" + query.Encode()
 	}
 
-	var body io.Reader
-	if form != nil {
-		body = strings.NewReader(form.Encode())
+	var reqBody io.Reader
+	switch {
+	case body.json != nil:
+		reqBody = bytes.NewReader(body.json)
+	case body.form != nil:
+		reqBody = strings.NewReader(body.form.Encode())
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, endpoint, body)
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, reqBody)
 	if err != nil {
 		return fmt.Errorf("wallabag: build request for %s: %w", path, err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
-	if form != nil {
+	switch {
+	case body.json != nil:
+		req.Header.Set("Content-Type", "application/json")
+	case body.form != nil:
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
 

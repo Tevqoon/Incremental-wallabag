@@ -254,6 +254,12 @@ func (s *Server) handleExtract(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// CreateExtract may have just queued pushing this upstream as a new
+	// wallabag annotation. Nudge it out promptly, the same as every other
+	// write-back in this package, rather than leaving it to wait for the
+	// next scheduled sync.
+	s.publishSoon()
+
 	// Re-render the article with the new highlight in place. Returning the
 	// fragment rather than redirecting is what keeps the reader's scroll
 	// position, which matters when extracting from the middle of a long piece.

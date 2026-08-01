@@ -88,6 +88,13 @@ type Writer interface {
 	// extract that came from an imported highlight must remove the highlight
 	// upstream too, or the next sync recreates the very extract just deleted.
 	DeleteHighlight(ctx context.Context, highlightExternalID string) error
+
+	// CreateHighlight makes a new annotation at the provider on the entry
+	// identified by documentExternalID, from a passage extracted locally. It
+	// returns the provider's own id for the new annotation, so the caller can
+	// record it — a later delete of the same local extract needs it to remove
+	// the right thing upstream.
+	CreateHighlight(ctx context.Context, documentExternalID, quote string) (string, error)
 }
 
 // Document is one importable piece of content, normalised across providers.

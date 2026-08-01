@@ -233,10 +233,19 @@ func (s *Syncer) drainWrites(ctx context.Context, provider source.Source) int {
 
 	published := 0
 	for _, write := range writes {
-		err := applyWrite(ctx, writer, write)
+		ref, err := applyWrite(ctx, writer, write)
 
 		switch {
 		case err == nil:
+			// Only OpHighlightCreate ever returns a ref: the provider's id for
+			// something that did not exist until this write. Recording it is
+			// what lets a later delete of the same element find it upstream.
+			if ref != "" && write.ElementID.Valid {
+				if err := s.store.SetExternalRef(write.ElementID.Int64, ref); err != nil {
+					s.logger.Error("could not record new highlight's id",
+						"element", write.ElementID.Int64, "error", err)
+				}
+			}
 			if err := s.store.CompleteWrite(write.ID); err != nil {
 				s.logger.Error("could not clear a published write", "id", write.ID, "error", err)
 			}
@@ -266,23 +275,27 @@ func (s *Syncer) drainWrites(ctx context.Context, provider source.Source) int {
 	return published
 }
 
-// applyWrite dispatches one queued change to the provider.
-func applyWrite(ctx context.Context, writer source.Writer, write store.PendingWrite) error {
+// applyWrite dispatches one queued change to the provider. The returned
+// string is only ever non-empty for OpHighlightCreate, which is the one
+// operation whose result the caller needs back.
+func applyWrite(ctx context.Context, writer source.Writer, write store.PendingWrite) (string, error) {
 	switch write.Operation {
 	case store.OpArchive:
-		return writer.SetArchived(ctx, write.ExternalID, store.PayloadBool(write.Payload))
+		return "", writer.SetArchived(ctx, write.ExternalID, store.PayloadBool(write.Payload))
 	case store.OpStar:
-		return writer.SetStarred(ctx, write.ExternalID, store.PayloadBool(write.Payload))
+		return "", writer.SetStarred(ctx, write.ExternalID, store.PayloadBool(write.Payload))
 	case store.OpTagAdd:
-		return writer.AddTags(ctx, write.ExternalID, []string{write.Payload})
+		return "", writer.AddTags(ctx, write.ExternalID, []string{write.Payload})
 	case store.OpTagRemove:
-		return writer.RemoveTag(ctx, write.ExternalID, write.Payload)
+		return "", writer.RemoveTag(ctx, write.ExternalID, write.Payload)
 	case store.OpHighlightDelete:
-		return writer.DeleteHighlight(ctx, write.ExternalID)
+		return "", writer.DeleteHighlight(ctx, write.ExternalID)
+	case store.OpHighlightCreate:
+		return writer.CreateHighlight(ctx, write.ExternalID, write.Payload)
 	default:
 		// Unknown operations are dropped rather than retried: the row was
 		// written by a version of increader that understood it, and no future
 		// attempt by this one will do better.
-		return nil
+		return "", nil
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/Tevqoon/increader/internal/source"
 )
@@ -114,6 +115,79 @@ func (s *Source) DeleteHighlight(ctx context.Context, highlightExternalID string
 	}
 	path := fmt.Sprintf("/api/annotations/%d.json", id)
 	return s.client.send(ctx, "DELETE", path, nil, nil)
+}
+
+// maxHighlightQuoteLength guards against a limit that exists only on
+// app.wallabag.it's actual database, not in its published source: wallabag's
+// own Annotation entity declares an Assert\Length(max: 10000) on quote, but a
+// POST past roughly 1000 bytes 500s in practice — confirmed by bisecting
+// against the live API, plain-ASCII text included to rule out a UTF-8
+// artifact, not inferred from the validator. Whatever the real column is
+// sized for, it is far short of what the application claims to accept.
+//
+// Left well under the observed 1000-byte failure line rather than pushed
+// right up against it, since the true limit could differ slightly on another
+// wallabag deployment or version.
+const maxHighlightQuoteLength = 900
+
+// truncateQuote shortens quote to fit maxHighlightQuoteLength, if needed.
+//
+// The cut lands on a UTF-8 rune boundary rather than an arbitrary byte
+// offset — the quotes this handles are real prose, not ASCII, and slicing
+// mid-character would corrupt the last rune sent rather than merely
+// shortening the text. DecodeLastRuneInString is what makes that reliable:
+// checking whether the trailing byte itself starts a rune is not enough,
+// since the last byte of a complete multi-byte character is never a rune
+// start either — that check alone would trim one rune too many every time.
+// RuneError specifically means the cut landed inside an incomplete sequence.
+func truncateQuote(quote string) string {
+	if len(quote) <= maxHighlightQuoteLength {
+		return quote
+	}
+	cut := quote[:maxHighlightQuoteLength]
+	if r, _ := utf8.DecodeLastRuneInString(cut); r == utf8.RuneError {
+		cut = cut[:len(cut)-1]
+	}
+	return strings.TrimSpace(cut) + "…"
+}
+
+// CreateHighlight adds a new annotation to an entry, for a passage extracted
+// locally in increader rather than in wallabag's own reader. It returns the
+// new annotation's id, which the caller must keep: without it, deleting this
+// extract later would have no way to remove the matching highlight upstream.
+//
+// Only what is sent upstream is shortened by truncateQuote when the passage
+// is long; the local extract keeps the full text regardless, since this
+// limit is a wallabag peculiarity that has no bearing on increader's own copy.
+//
+// Unlike every other write in this file, wallabag's annotation endpoint reads
+// a JSON body (json_decode($request->getContent())) rather than the form body
+// the rest of the API uses — confirmed against wallabag's own
+// AnnotationController source, not assumed. ranges is sent empty: it is
+// wallabag's own XPath-based location for its web reader's DOM, which
+// increader has nothing equivalent to produce, and Quote is all a human
+// re-locating the passage in wallabag's interface actually reads.
+func (s *Source) CreateHighlight(ctx context.Context, documentExternalID, quote string) (string, error) {
+	id, err := entryID(documentExternalID)
+	if err != nil {
+		return "", err
+	}
+
+	path := fmt.Sprintf("/api/annotations/%d.json", id)
+	body := struct {
+		Text   string   `json:"text"`
+		Quote  string   `json:"quote"`
+		Ranges []string `json:"ranges"`
+	}{
+		Quote:  truncateQuote(quote),
+		Ranges: []string{},
+	}
+
+	var created Annotation
+	if err := s.client.sendJSON(ctx, "POST", path, body, &created); err != nil {
+		return "", err
+	}
+	return strconv.Itoa(created.ID), nil
 }
 
 // tagID resolves a label to wallabag's id for it, or 0 when there is none.

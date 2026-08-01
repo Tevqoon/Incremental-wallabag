@@ -1151,9 +1151,12 @@ func TestPauseDoesNotArchive(t *testing.T) {
 	}
 }
 
-// TestExtractsDoNotWriteBack: an extract has no identity in wallabag, so
-// finishing one must not touch the article it came from.
-func TestExtractsDoNotWriteBack(t *testing.T) {
+// TestExtractsDoNotArchiveOnFinish: an extract is a passage, not a whole
+// article, so finishing one must not touch the article's own archive state.
+// Making the extract does queue its own highlight_create write — a manual
+// extract is now pushed to wallabag as an annotation — but grading it must
+// not add anything further.
+func TestExtractsDoNotArchiveOnFinish(t *testing.T) {
 	server, db, _ := newTestServer(t, true)
 
 	post(t, server, "/elements/1/extract", url.Values{
@@ -1169,8 +1172,8 @@ func TestExtractsDoNotWriteBack(t *testing.T) {
 		t.Error("finishing an extract archived its whole article")
 	}
 	writes, _ := db.PendingWrites("wallabag", 10)
-	if len(writes) != 0 {
-		t.Errorf("finishing an extract queued %d writes", len(writes))
+	if len(writes) != 1 || writes[0].Operation != store.OpHighlightCreate {
+		t.Errorf("queued writes = %+v, want exactly one highlight_create from creating the extract", writes)
 	}
 }
 

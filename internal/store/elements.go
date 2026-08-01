@@ -292,6 +292,13 @@ type NewExtract struct {
 // straight back in front of the reader is the opposite of the point: the value
 // of an extract is re-reading it once the article has faded, not twice in the
 // same sitting.
+//
+// A manually made passage extract also queues itself for push upstream, in
+// the same transaction as the local insert — the counterpart to how an
+// imported highlight arrives with ExternalRef already set. Excluded: clozes
+// (wallabag has no such concept) and anything already carrying an
+// ExternalRef, which means it came from wallabag in the first place and
+// pushing it back would just recreate what is already there.
 func (s *Store) CreateExtract(extract NewExtract, now time.Time) (int64, error) {
 	if extract.Kind == "" {
 		extract.Kind = KindTopic
@@ -314,27 +321,46 @@ func (s *Store) CreateExtract(extract NewExtract, now time.Time) (int64, error) 
 		externalRef = extract.ExternalRef
 	}
 
-	outcome, err := s.db.Exec(`
-		INSERT INTO elements
-		    (document_id, parent_id, kind, title, content_html, quote,
-		     start_block, start_offset, end_block, end_offset,
-		     priority, state, due_on, interval_days, afactor, reps, read_block,
-		     origin, external_ref, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, 0, 2.0, 0, 0, ?, ?, ?, ?)`,
-		extract.DocumentID, extract.ParentID, extract.Kind, extract.Title,
-		extract.ContentHTML, extract.Quote,
-		startBlock, startOffset, endBlock, endOffset,
-		extract.Priority, now.AddDate(0, 0, extract.DelayDays).Format(dateFormat),
-		extract.Origin, externalRef,
-		formatTime(now), formatTime(now),
-	)
-	if err != nil {
-		return 0, fmt.Errorf("store: create extract under %d: %w", extract.ParentID, err)
-	}
+	var id int64
+	err := s.inTransaction(func(tx *sql.Tx) error {
+		outcome, err := tx.Exec(`
+			INSERT INTO elements
+			    (document_id, parent_id, kind, title, content_html, quote,
+			     start_block, start_offset, end_block, end_offset,
+			     priority, state, due_on, interval_days, afactor, reps, read_block,
+			     origin, external_ref, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, 0, 2.0, 0, 0, ?, ?, ?, ?)`,
+			extract.DocumentID, extract.ParentID, extract.Kind, extract.Title,
+			extract.ContentHTML, extract.Quote,
+			startBlock, startOffset, endBlock, endOffset,
+			extract.Priority, now.AddDate(0, 0, extract.DelayDays).Format(dateFormat),
+			extract.Origin, externalRef,
+			formatTime(now), formatTime(now),
+		)
+		if err != nil {
+			return fmt.Errorf("store: create extract under %d: %w", extract.ParentID, err)
+		}
 
-	id, err := outcome.LastInsertId()
+		id, err = outcome.LastInsertId()
+		if err != nil {
+			return fmt.Errorf("store: read id of new extract: %w", err)
+		}
+
+		if extract.Kind == KindTopic && extract.Origin == OriginManual && extract.ExternalRef == "" {
+			var docSource, docExternalID string
+			err := tx.QueryRow(`SELECT source, external_id FROM documents WHERE id = ?`, extract.DocumentID).
+				Scan(&docSource, &docExternalID)
+			if err != nil {
+				return fmt.Errorf("store: look up document %d for highlight push: %w", extract.DocumentID, err)
+			}
+			if err := enqueueHighlightCreate(tx, id, docSource, docExternalID, extract.Quote); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 	if err != nil {
-		return 0, fmt.Errorf("store: read id of new extract: %w", err)
+		return 0, err
 	}
 	return id, nil
 }
@@ -643,7 +669,8 @@ func (s *Store) Unsuspend(id int64, today time.Time, now time.Time) error {
 // different, much larger decision than the "accidental selection" this exists
 // for, and belongs to a different action (Dismiss) if ever wanted at all.
 //
-// If the extract came from an imported wallabag highlight, this also queues its
+// If the extract has an id upstream — imported from a wallabag highlight, or
+// a manual one that was successfully pushed there — this also queues its
 // removal upstream, in the same transaction as the local delete. Without that
 // pairing the highlight would survive at the provider and the next sync would
 // recreate the very extract just deleted — silently undoing the one thing the
@@ -651,14 +678,14 @@ func (s *Store) Unsuspend(id int64, today time.Time, now time.Time) error {
 func (s *Store) DeleteExtract(id int64) error {
 	return s.inTransaction(func(tx *sql.Tx) error {
 		var (
-			parentID                       sql.NullInt64
-			origin, externalRef, docSource string
+			parentID               sql.NullInt64
+			externalRef, docSource string
 		)
 		err := tx.QueryRow(`
-			SELECT e.parent_id, e.origin, COALESCE(e.external_ref, ''), d.source
+			SELECT e.parent_id, COALESCE(e.external_ref, ''), d.source
 			FROM elements e JOIN documents d ON d.id = e.document_id
 			WHERE e.id = ?`, id,
-		).Scan(&parentID, &origin, &externalRef, &docSource)
+		).Scan(&parentID, &externalRef, &docSource)
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("store: element %d: %w", id, ErrNotFound)
 		}
@@ -669,7 +696,7 @@ func (s *Store) DeleteExtract(id int64) error {
 			return fmt.Errorf("store: element %d is a whole article, not an extract", id)
 		}
 
-		if origin == OriginImport && externalRef != "" {
+		if externalRef != "" {
 			if err := enqueueWrite(tx, docSource, externalRef, OpHighlightDelete, ""); err != nil {
 				return err
 			}

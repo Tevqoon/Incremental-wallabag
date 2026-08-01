@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // TestTimeUnmarshal pins the timestamp format. wallabag emits an offset without
@@ -336,5 +337,108 @@ func TestDeleteHighlightRejectsNonNumericID(t *testing.T) {
 
 	if err := adapter.DeleteHighlight(context.Background(), "not-a-number"); err == nil {
 		t.Fatal("expected an error for a non-numeric annotation id")
+	}
+}
+
+// TestCreateHighlight guards the one thing this endpoint gets wrong if
+// assumed rather than checked: wallabag's annotation controller reads
+// json_decode($request->getContent()) rather than the form body every other
+// write endpoint in this package uses. A form-encoded body would be accepted
+// by the router and silently produce an empty annotation — indistinguishable
+// from success unless something here actually inspects what was sent.
+func TestCreateHighlight(t *testing.T) {
+	var (
+		requestedPath string
+		contentType   string
+		body          map[string]any
+	)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /oauth/v2/token", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(tokenResponse{AccessToken: "tok", ExpiresIn: 3600})
+	})
+	mux.HandleFunc("POST /api/annotations/42.json", func(w http.ResponseWriter, r *http.Request) {
+		requestedPath = r.URL.Path
+		contentType = r.Header.Get("Content-Type")
+		json.NewDecoder(r.Body).Decode(&body)
+		json.NewEncoder(w).Encode(map[string]any{"id": 555, "quote": body["quote"]})
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := testClient(t, server.URL)
+	adapter := NewSource(client)
+
+	id, err := adapter.CreateHighlight(context.Background(), "42", "a passage worth keeping")
+	if err != nil {
+		t.Fatalf("CreateHighlight: %v", err)
+	}
+
+	if requestedPath != "/api/annotations/42.json" {
+		t.Errorf("requested %q, want the entry's annotations path", requestedPath)
+	}
+	if !strings.HasPrefix(contentType, "application/json") {
+		t.Errorf("Content-Type = %q, want JSON — wallabag reads this endpoint's body with json_decode", contentType)
+	}
+	if body["quote"] != "a passage worth keeping" {
+		t.Errorf("quote sent = %v, want the extracted passage", body["quote"])
+	}
+	if _, ok := body["ranges"]; !ok {
+		t.Error("ranges was omitted; wallabag's CollectionType field expects it present, even empty")
+	}
+	if id != "555" {
+		t.Errorf("id = %q, want the annotation id wallabag assigned", id)
+	}
+}
+
+// TestCreateHighlightTruncatesLongQuotes guards the discovery behind
+// truncateQuote: app.wallabag.it's actual database rejects a quote past
+// roughly 1000 bytes with a 500, well short of the 10000-character validator
+// wallabag's own source declares. Without this, any extract longer than that
+// would retry against the outbox forever and never reach wallabag.
+func TestCreateHighlightTruncatesLongQuotes(t *testing.T) {
+	var body map[string]any
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /oauth/v2/token", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(tokenResponse{AccessToken: "tok", ExpiresIn: 3600})
+	})
+	mux.HandleFunc("POST /api/annotations/42.json", func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&body)
+		json.NewEncoder(w).Encode(map[string]any{"id": 1})
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := testClient(t, server.URL)
+	adapter := NewSource(client)
+
+	// A multi-byte rune repeated past the limit, so a naive byte-count cut
+	// would split one in half rather than merely shortening the text.
+	long := strings.Repeat("é", maxHighlightQuoteLength)
+	if _, err := adapter.CreateHighlight(context.Background(), "42", long); err != nil {
+		t.Fatalf("CreateHighlight: %v", err)
+	}
+
+	sent, _ := body["quote"].(string)
+	if len(sent) > maxHighlightQuoteLength+len("…") {
+		t.Errorf("sent quote is %d bytes, want at most %d", len(sent), maxHighlightQuoteLength+len("…"))
+	}
+	if !strings.HasSuffix(sent, "…") {
+		t.Errorf("truncated quote = %q, want it to end with an ellipsis", sent)
+	}
+	if !utf8.ValidString(sent) {
+		t.Error("truncation produced invalid UTF-8 — the cut split a multi-byte rune")
+	}
+
+	short := "well under the limit"
+	body = nil
+	if _, err := adapter.CreateHighlight(context.Background(), "42", short); err != nil {
+		t.Fatalf("CreateHighlight: %v", err)
+	}
+	if body["quote"] != short {
+		t.Errorf("short quote was altered: got %v, want %q unchanged", body["quote"], short)
 	}
 }

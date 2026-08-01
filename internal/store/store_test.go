@@ -620,6 +620,92 @@ func TestWriteIsQueuedWithTheLocalChange(t *testing.T) {
 	}
 }
 
+// TestManualExtractQueuesHighlightPush is the counterpart to an imported
+// highlight already carrying its external_ref: a passage taken manually
+// inside increader should reach wallabag too, not only the reverse.
+func TestManualExtractQueuesHighlightPush(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "77", Title: "An article", UpdatedAt: now},
+	}, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	id, err := db.CreateExtract(NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "A passage I took myself.",
+		ContentHTML: "<p>A passage I took myself.</p>", Origin: OriginManual,
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+
+	writes, err := db.PendingWrites("wallabag", 10)
+	if err != nil {
+		t.Fatalf("PendingWrites: %v", err)
+	}
+	if len(writes) != 1 {
+		t.Fatalf("got %d queued writes, want 1", len(writes))
+	}
+	write := writes[0]
+	if write.Operation != OpHighlightCreate || write.ExternalID != "77" {
+		t.Errorf("queued %+v, want a highlight_create write for entry 77", write)
+	}
+	if write.Payload != "A passage I took myself." {
+		t.Errorf("payload = %q, want the extract's quote", write.Payload)
+	}
+	if !write.ElementID.Valid || write.ElementID.Int64 != id {
+		t.Errorf("ElementID = %+v, want it to point at the new extract %d", write.ElementID, id)
+	}
+}
+
+// TestExtractsExcludedFromHighlightPush covers the two ways an extract must
+// not queue a highlight_create: a cloze, which has no wallabag equivalent at
+// all, and one that arrived already carrying an external_ref — an imported
+// highlight, which already exists upstream and would otherwise be recreated.
+func TestExtractsExcludedFromHighlightPush(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "77", Title: "An article", UpdatedAt: now},
+	}, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	extractID, err := db.CreateExtract(NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "Parent passage.",
+		ContentHTML: "<p>Parent passage.</p>", Origin: OriginManual,
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateExtract (parent): %v", err)
+	}
+	if _, err := db.CreateExtract(NewExtract{
+		ParentID: extractID, DocumentID: 1, Kind: KindItem, Quote: "cloze text",
+		ContentHTML: "<p>cloze text</p>", Origin: OriginManual,
+	}, now); err != nil {
+		t.Fatalf("CreateExtract (cloze): %v", err)
+	}
+	if _, err := db.CreateExtract(NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "Already in wallabag.",
+		ContentHTML: "<p>Already in wallabag.</p>",
+		Origin:      OriginImport, ExternalRef: "999",
+	}, now); err != nil {
+		t.Fatalf("CreateExtract (imported): %v", err)
+	}
+
+	writes, err := db.PendingWrites("wallabag", 10)
+	if err != nil {
+		t.Fatalf("PendingWrites: %v", err)
+	}
+	// Exactly the one write from the manual parent extract above; neither the
+	// cloze nor the already-imported extract should have queued anything.
+	if len(writes) != 1 || writes[0].Payload != "Parent passage." {
+		t.Errorf("queued writes = %+v, want only the manual topic extract's push", writes)
+	}
+}
+
 // TestArchivingLocallyDoesNotRetriggerTheSyncTransition is the interaction that
 // would otherwise demote a finished article: writing the archive flag locally
 // means the next sync sees no change, so M6's transition does not fire.

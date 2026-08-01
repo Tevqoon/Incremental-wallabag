@@ -13,6 +13,7 @@ const (
 	OpTagAdd          = "tag_add"
 	OpTagRemove       = "tag_remove"
 	OpHighlightDelete = "highlight_delete"
+	OpHighlightCreate = "highlight_create"
 )
 
 // maxWriteAttempts caps retries so a write that can never succeed stops
@@ -30,6 +31,12 @@ type PendingWrite struct {
 	Attempts   int
 	LastError  string
 	CreatedAt  time.Time
+
+	// ElementID is the local element this write was made for, set only for
+	// operations whose result needs writing back to it — currently just
+	// OpHighlightCreate, which needs somewhere to put the id wallabag hands
+	// back for the annotation it just created.
+	ElementID sql.NullInt64
 }
 
 // inTransaction runs fn in a transaction, committing on success.
@@ -98,13 +105,50 @@ func (s *Store) EnqueueWrite(sourceName, externalID, operation, payload string) 
 	})
 }
 
+// enqueueHighlightCreate queues pushing a brand-new local extract upstream as
+// an annotation. Unlike enqueueWrite, it always inserts rather than
+// superseding an existing row: each call is for a distinct, just-created
+// element, so there is nothing of its own to replace.
+//
+// It carries elementID rather than leaving it to the caller to reattach
+// later, because that pairing is exactly what lets a successful write be
+// matched back to the row it needs to update — see SetExternalRef.
+func enqueueHighlightCreate(tx *sql.Tx, elementID int64, sourceName, externalID, quote string) error {
+	if externalID == "" {
+		// The document has no provider identity, so there is nothing to push
+		// this to.
+		return nil
+	}
+	_, err := tx.Exec(`
+		INSERT INTO pending_writes (source, external_id, operation, payload, element_id, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		sourceName, externalID, OpHighlightCreate, quote, elementID, formatTime(time.Now()),
+	)
+	if err != nil {
+		return fmt.Errorf("store: queue highlight create: %w", err)
+	}
+	return nil
+}
+
+// SetExternalRef records the provider's id for an element after a queued
+// write creates something upstream that did not exist before — currently
+// only a highlight just pushed via OpHighlightCreate. Without this a later
+// delete of that same extract would have no id to remove upstream.
+func (s *Store) SetExternalRef(elementID int64, ref string) error {
+	_, err := s.db.Exec(`UPDATE elements SET external_ref = ? WHERE id = ?`, ref, elementID)
+	if err != nil {
+		return fmt.Errorf("store: set external ref on element %d: %w", elementID, err)
+	}
+	return nil
+}
+
 // PendingWrites returns queued writes for a source, oldest first.
 //
 // Order matters: two writes to the same entry must reach the provider in the
 // order they were made, or the older one wins.
 func (s *Store) PendingWrites(sourceName string, limit int) ([]PendingWrite, error) {
 	rows, err := s.db.Query(`
-		SELECT id, source, external_id, operation, payload, attempts, last_error, created_at
+		SELECT id, source, external_id, operation, payload, attempts, last_error, element_id, created_at
 		FROM pending_writes
 		WHERE source = ? AND attempts < ?
 		ORDER BY id
@@ -124,7 +168,7 @@ func (s *Store) PendingWrites(sourceName string, limit int) ([]PendingWrite, err
 		)
 		if err := rows.Scan(&write.ID, &write.Source, &write.ExternalID,
 			&write.Operation, &write.Payload, &write.Attempts,
-			&write.LastError, &createdAt); err != nil {
+			&write.LastError, &write.ElementID, &createdAt); err != nil {
 			return nil, fmt.Errorf("store: scan pending write: %w", err)
 		}
 		write.CreatedAt = parseTime(createdAt)
