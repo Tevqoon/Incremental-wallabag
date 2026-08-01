@@ -1,0 +1,16 @@
+-- The same visibility documents already get (see 006_missing_upstream.sql),
+-- for individual extracts: whether the annotation this extract corresponds
+-- to could no longer be found in wallabag's own listing, the last time a
+-- full reconciliation ran.
+--
+-- increader is meant to hold a superset of wallabag's data, not merely a
+-- mirror of it — deleting a passage upstream must not silently delete the
+-- reader's own record of having pulled it out and scheduled it. So this is
+-- visibility for a manual decision, exactly like the document-level flag,
+-- never a trigger for automatic deletion.
+--
+-- Applies to any extract carrying an external_ref, regardless of origin: an
+-- imported highlight and a manual extract that was successfully pushed
+-- upstream both now have a real annotation in wallabag, and both can
+-- equally have it deleted out from under them there.
+ALTER TABLE elements ADD COLUMN missing_upstream INTEGER NOT NULL DEFAULT 0;

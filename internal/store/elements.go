@@ -72,6 +72,14 @@ type Element struct {
 	Origin      string
 	ExternalRef string
 
+	// MissingUpstream is set by Reconcile when a full listing's annotations no
+	// longer include this extract's ExternalRef — the counterpart to
+	// Document.MissingUpstream, for an individual highlight rather than a
+	// whole article. Only ever meaningful when ExternalRef is set: increader
+	// keeps a superset of wallabag's data, so a highlight deleted there stays
+	// here, flagged rather than removed.
+	MissingUpstream bool
+
 	// BuriedOn is the date this element was skipped, as YYYY-MM-DD. Kept as a
 	// string because it is only ever compared to today for equality, never
 	// ordered or arithmetic'd.
@@ -101,7 +109,7 @@ const elementColumns = `
 	e.content_html, e.quote,
 	e.start_block, e.start_offset, e.end_block, e.end_offset,
 	e.priority, e.state, e.due_on, e.interval_days, e.afactor, e.reps,
-	e.read_block, e.origin, COALESCE(e.external_ref, ''),
+	e.read_block, e.origin, COALESCE(e.external_ref, ''), e.missing_upstream,
 	e.buried_on, e.created_at, e.updated_at`
 
 // nullableElement holds the columns that can be NULL, which cannot be scanned
@@ -132,7 +140,7 @@ func scanTargets(element *Element, nullable *nullableElement) []any {
 		&nullable.endBlock, &nullable.endOffset,
 		&element.Schedule.Priority, &element.Schedule.State, &nullable.dueOn,
 		&element.Schedule.IntervalDays, &element.Schedule.AFactor, &element.Schedule.Reps,
-		&element.ReadBlock, &element.Origin, &element.ExternalRef,
+		&element.ReadBlock, &element.Origin, &element.ExternalRef, &element.MissingUpstream,
 		&nullable.buriedOn, &nullable.createdAt, &nullable.updatedAt,
 	}
 }
@@ -687,6 +695,158 @@ func (s *Store) Unsuspend(id int64, today time.Time, now time.Time) error {
 	return nil
 }
 
+// ReconcileMissingHighlights flags extracts whose annotation is absent from
+// present as missing upstream, and clears the flag on any that have
+// reappeared in it — the same mechanism as Store.ReconcileMissing, one level
+// down: an individual highlight rather than a whole document.
+//
+// present must be every annotation external_ref a full listing of the source
+// currently reports, gathered the same way Reconcile gathers present document
+// ids: an incremental "changed since" fetch can never notice a deletion.
+//
+// Only extracts belonging to a document of the given source, and actually
+// carrying an external_ref, are ever touched — a plain manual extract was
+// never meant to correspond to anything upstream, and this is not the place
+// to decide otherwise. Origin does not matter beyond that: an imported
+// highlight and a manual extract successfully pushed to wallabag are both,
+// from this point on, just an extract with a real annotation behind it.
+func (s *Store) ReconcileMissingHighlights(sourceName string, present []string) (marked, cleared int, err error) {
+	err = s.inTransaction(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`CREATE TEMP TABLE present_refs (external_ref TEXT PRIMARY KEY)`); err != nil {
+			return fmt.Errorf("store: create temp table: %w", err)
+		}
+		defer tx.Exec(`DROP TABLE present_refs`)
+
+		insert, err := tx.Prepare(`INSERT OR IGNORE INTO present_refs VALUES (?)`)
+		if err != nil {
+			return fmt.Errorf("store: prepare temp insert: %w", err)
+		}
+		defer insert.Close()
+		for _, ref := range present {
+			if _, err := insert.Exec(ref); err != nil {
+				return fmt.Errorf("store: populate temp table: %w", err)
+			}
+		}
+
+		result, err := tx.Exec(`
+			UPDATE elements SET missing_upstream = 1
+			WHERE missing_upstream = 0
+			  AND external_ref IS NOT NULL AND external_ref <> ''
+			  AND external_ref NOT IN (SELECT external_ref FROM present_refs)
+			  AND document_id IN (SELECT id FROM documents WHERE source = ?)`,
+			sourceName)
+		if err != nil {
+			return fmt.Errorf("store: mark missing highlights: %w", err)
+		}
+		if n, err := result.RowsAffected(); err == nil {
+			marked = int(n)
+		}
+
+		result, err = tx.Exec(`
+			UPDATE elements SET missing_upstream = 0
+			WHERE missing_upstream = 1
+			  AND external_ref IN (SELECT external_ref FROM present_refs)
+			  AND document_id IN (SELECT id FROM documents WHERE source = ?)`,
+			sourceName)
+		if err != nil {
+			return fmt.Errorf("store: clear missing highlights: %w", err)
+		}
+		if n, err := result.RowsAffected(); err == nil {
+			cleared = int(n)
+		}
+		return nil
+	})
+	return marked, cleared, err
+}
+
+// BackfillHighlightPushes gives a missed extract push a fresh chance, two
+// ways: queuing one for an extract that has never had one queued at all —
+// made before the push-back feature existed, say — and separately resetting
+// any that exhausted every retry attempt before a bug in this pipeline was
+// fixed (the wallabag quote-length limit discovered after shipping, or the
+// database corruption incident) rather than because the write could never
+// succeed. PendingWrites filters attempts >= maxWriteAttempts out of every
+// future drain, so without this reset an extract caught by either bug would
+// sit abandoned forever: the retries that exhausted it happened for a reason
+// that no longer applies, but nothing else would ever look at it again.
+//
+// Idempotent by construction: an extract already carrying an external_ref
+// matches none of this, and one with a live (not exhausted) write already
+// queued is left to that write rather than duplicated. That is what makes it
+// safe to run from Reconcile on every pass rather than as a one-off
+// migration step.
+func (s *Store) BackfillHighlightPushes(sourceName string) (queued int, err error) {
+	err = s.inTransaction(func(tx *sql.Tx) error {
+		reset, err := tx.Exec(`
+			UPDATE pending_writes SET attempts = 0, last_error = ''
+			WHERE operation = ? AND attempts >= ?
+			  AND element_id IN (
+			      SELECT e.id FROM elements e
+			      JOIN documents d ON d.id = e.document_id
+			      WHERE d.source = ?
+			        AND (e.external_ref IS NULL OR e.external_ref = ''))`,
+			OpHighlightCreate, maxWriteAttempts, sourceName)
+		if err != nil {
+			return fmt.Errorf("store: reset abandoned highlight pushes: %w", err)
+		}
+		if n, err := reset.RowsAffected(); err == nil {
+			queued += int(n)
+		}
+
+		type candidate struct {
+			id                 int64
+			quote, documentRef string
+		}
+
+		// Collected into a slice and the Rows closed before any INSERT below,
+		// rather than enqueueing from inside this loop: with the connection
+		// pool capped at one, a write attempted while this SELECT is still
+		// open would wait for a connection the loop itself is holding.
+		candidates, err := func() ([]candidate, error) {
+			rows, err := tx.Query(`
+				SELECT e.id, e.quote, d.external_id
+				FROM elements e
+				JOIN documents d ON d.id = e.document_id
+				WHERE d.source = ?
+				  AND e.parent_id IS NOT NULL
+				  AND e.kind = ?
+				  AND e.origin = ?
+				  AND (e.external_ref IS NULL OR e.external_ref = '')
+				  AND NOT EXISTS (
+				      SELECT 1 FROM pending_writes pw
+				      WHERE pw.element_id = e.id AND pw.operation = ?
+				  )`,
+				sourceName, KindTopic, OriginManual, OpHighlightCreate)
+			if err != nil {
+				return nil, fmt.Errorf("store: find extracts needing backfill: %w", err)
+			}
+			defer rows.Close()
+
+			var found []candidate
+			for rows.Next() {
+				var c candidate
+				if err := rows.Scan(&c.id, &c.quote, &c.documentRef); err != nil {
+					return nil, fmt.Errorf("store: scan backfill candidate: %w", err)
+				}
+				found = append(found, c)
+			}
+			return found, rows.Err()
+		}()
+		if err != nil {
+			return err
+		}
+
+		for _, c := range candidates {
+			if err := enqueueHighlightCreate(tx, c.id, sourceName, c.documentRef, c.quote); err != nil {
+				return err
+			}
+			queued++
+		}
+		return nil
+	})
+	return queued, err
+}
+
 // DeleteExtract permanently removes an extract or item, and everything under
 // it — its own extracts, clozes, and export ledger rows — via the schema's
 // ON DELETE CASCADE. Refuses a root element: deleting a whole article is a
@@ -788,6 +948,10 @@ type ExtractFilter struct {
 	// WithClozes lists only extracts that have become items.
 	WithClozes bool
 
+	// MissingOnly lists only extracts Reconcile could not find upstream any
+	// more, the extract-level counterpart to LibraryFilter's "missing" state.
+	MissingOnly bool
+
 	Query string
 	Limit int
 }
@@ -821,11 +985,13 @@ func (s *Store) Extracts(filter ExtractFilter) ([]ExtractRow, error) {
 		  AND e.state NOT IN ('dismissed')
 		  AND (? = '' OR e.origin = ?)
 		  AND (? = 0 OR e.kind = 'item')
+		  AND (? = 0 OR e.missing_upstream = 1)
 		  AND (? = '' OR e.quote LIKE ? OR d.title LIKE ?)
 		ORDER BY e.id DESC
 		LIMIT ?`,
 		filter.Origin, filter.Origin,
 		filter.WithClozes,
+		filter.MissingOnly,
 		filter.Query, pattern, pattern,
 		filter.Limit,
 	)
@@ -862,6 +1028,19 @@ func (s *Store) CountExtracts(origin string) (int, error) {
 	).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("store: count extracts: %w", err)
+	}
+	return count, nil
+}
+
+// CountMissingHighlights returns how many extracts Reconcile has flagged as
+// no longer found upstream, for the "Missing" filter tab on the extracts page.
+func (s *Store) CountMissingHighlights() (int, error) {
+	var count int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM elements WHERE parent_id IS NOT NULL AND missing_upstream = 1`,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("store: count missing highlights: %w", err)
 	}
 	return count, nil
 }

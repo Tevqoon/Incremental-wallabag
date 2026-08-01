@@ -1373,3 +1373,261 @@ func TestDeleteDocumentMissing(t *testing.T) {
 		t.Errorf("DeleteDocument(999) = %v, want ErrNotFound", err)
 	}
 }
+
+// TestReconcileMissingHighlightsFlagsDeletedAnnotations is the extract-level
+// counterpart to TestReconcileMissingFlagsAbsentDocuments: increader is meant
+// to hold a superset of wallabag's data, so a highlight deleted upstream must
+// stay here, flagged rather than removed — covering both an imported
+// highlight and a manual extract that was successfully pushed, since from
+// wallabag's side those are indistinguishable once both carry a real
+// annotation id.
+func TestReconcileMissingHighlightsFlagsDeletedAnnotations(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "1", Title: "An article", UpdatedAt: now, Highlights: []source.Highlight{
+			{ExternalID: "h1", Quote: "Stays annotated."},
+			{ExternalID: "h2", Quote: "Deleted at wallabag."},
+		}},
+	}, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	// A manual extract already successfully pushed upstream — indistinguishable
+	// from an import at this point, since it now carries a real external_ref.
+	pushedID, err := db.CreateExtract(NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "Manual, but pushed, then deleted.",
+		ContentHTML: "<p>Manual, but pushed, then deleted.</p>",
+		Origin:      OriginManual, ExternalRef: "h3",
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+	// CreateExtract only queues a push when ExternalRef is empty; setting it
+	// directly above stands in for "the push already succeeded".
+
+	// A plain manual extract with no upstream identity at all — must never be
+	// touched by reconciliation just because "h-something" is not in the list.
+	plainID, err := db.CreateExtract(NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "Never left increader.",
+		ContentHTML: "<p>Never left increader.</p>", Origin: OriginManual,
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateExtract (plain): %v", err)
+	}
+
+	// The fresh listing reports h1 and h3 still annotated; h2 has vanished.
+	marked, cleared, err := db.ReconcileMissingHighlights("wallabag", []string{"h1", "h3"})
+	if err != nil {
+		t.Fatalf("ReconcileMissingHighlights: %v", err)
+	}
+	if marked != 1 || cleared != 0 {
+		t.Errorf("marked=%d cleared=%d, want marked=1 cleared=0", marked, cleared)
+	}
+
+	imports, _ := db.Extracts(ExtractFilter{Origin: OriginImport})
+	var stays, gone Element
+	for _, extract := range imports {
+		switch extract.ExternalRef {
+		case "h1":
+			stays = extract.Element
+		case "h2":
+			gone = extract.Element
+		}
+	}
+	if stays.MissingUpstream {
+		t.Error("an annotation still in the listing was flagged missing")
+	}
+	if !gone.MissingUpstream {
+		t.Error("an annotation absent from the listing was not flagged missing")
+	}
+
+	pushed, _ := db.ElementByID(pushedID)
+	if pushed.MissingUpstream {
+		t.Error("a pushed extract still in the listing was flagged missing")
+	}
+	plain, _ := db.ElementByID(plainID)
+	if plain.MissingUpstream {
+		t.Error("a plain manual extract with no external_ref was incorrectly flagged")
+	}
+
+	// h2 reappears — restored, or the earlier check was a fluke either way
+	// the flag must clear.
+	marked, cleared, err = db.ReconcileMissingHighlights("wallabag", []string{"h1", "h2", "h3"})
+	if err != nil {
+		t.Fatalf("ReconcileMissingHighlights (restored): %v", err)
+	}
+	if marked != 0 || cleared != 1 {
+		t.Errorf("marked=%d cleared=%d, want marked=0 cleared=1", marked, cleared)
+	}
+}
+
+// TestBackfillHighlightPushesQueuesMissedExtracts covers the gap CreateExtract
+// alone cannot: an extract made before the push-back feature existed, or one
+// whose write was somehow lost, has no external_ref and nothing queued for
+// it, and CreateExtract itself only ever runs once, at creation. Backfill is
+// what gives such an extract a second chance.
+func TestBackfillHighlightPushesQueuesMissedExtracts(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "77", Title: "An article", UpdatedAt: now},
+	}, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	// Simulates an extract made before the feature existed: a plain INSERT
+	// with no queued write, which is exactly what CreateExtract itself
+	// produced prior to that change.
+	missedID, err := db.CreateExtract(NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "Made before the feature existed.",
+		ContentHTML: "<p>Made before the feature existed.</p>", Origin: OriginManual,
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateExtract (missed): %v", err)
+	}
+	if _, err := db.db.Exec(`DELETE FROM pending_writes WHERE element_id = ?`, missedID); err != nil {
+		t.Fatalf("clear the write CreateExtract queued, to simulate one predating the feature: %v", err)
+	}
+
+	// A normal extract made after the feature existed, still with its
+	// original queued write intact — must not be queued a second time.
+	freshID, err := db.CreateExtract(NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "Made after, already queued.",
+		ContentHTML: "<p>Made after, already queued.</p>", Origin: OriginManual,
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateExtract (fresh): %v", err)
+	}
+
+	// Already pushed — must not be re-queued despite having no pending write.
+	pushedID, err := db.CreateExtract(NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "Already on wallabag.",
+		ContentHTML: "<p>Already on wallabag.</p>",
+		Origin:      OriginManual, ExternalRef: "h1",
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateExtract (pushed): %v", err)
+	}
+
+	queued, err := db.BackfillHighlightPushes("wallabag")
+	if err != nil {
+		t.Fatalf("BackfillHighlightPushes: %v", err)
+	}
+	if queued != 1 {
+		t.Fatalf("queued %d, want 1", queued)
+	}
+
+	writes, err := db.PendingWrites("wallabag", 10)
+	if err != nil {
+		t.Fatalf("PendingWrites: %v", err)
+	}
+	if len(writes) != 2 {
+		t.Fatalf("got %d pending writes, want 2 (the fresh extract's original plus the backfilled one)", len(writes))
+	}
+
+	var sawMissed, sawFresh, sawPushed bool
+	for _, w := range writes {
+		if !w.ElementID.Valid {
+			t.Errorf("write %+v has no element_id", w)
+			continue
+		}
+		switch w.ElementID.Int64 {
+		case missedID:
+			sawMissed = true
+		case freshID:
+			sawFresh = true
+		case pushedID:
+			sawPushed = true
+		}
+	}
+	if !sawMissed {
+		t.Error("the extract with no queued write was not backfilled")
+	}
+	if !sawFresh {
+		t.Error("the extract's original write disappeared")
+	}
+	if sawPushed {
+		t.Error("an extract already carrying an external_ref was queued again")
+	}
+
+	// Idempotent: running it again queues nothing further for the same
+	// extract, since it now has a pending write of its own.
+	queued, err = db.BackfillHighlightPushes("wallabag")
+	if err != nil {
+		t.Fatalf("BackfillHighlightPushes (second run): %v", err)
+	}
+	if queued != 0 {
+		t.Errorf("second run queued %d, want 0", queued)
+	}
+}
+
+// TestBackfillHighlightPushesResetsAbandonedWrites covers the other way an
+// extract gets stuck: not never queued, but queued and then failed until it
+// hit maxWriteAttempts — exactly what happened to real extracts here before
+// the wallabag quote-length limit was discovered and fixed. PendingWrites
+// filters those out of every future drain, so without a reset they would sit
+// abandoned forever even though the bug that exhausted them no longer exists.
+func TestBackfillHighlightPushesResetsAbandonedWrites(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "77", Title: "An article", UpdatedAt: now},
+	}, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	extractID, err := db.CreateExtract(NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "Exhausted its retries before the fix.",
+		ContentHTML: "<p>Exhausted its retries before the fix.</p>", Origin: OriginManual,
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+
+	writes, err := db.PendingWrites("wallabag", 10)
+	if err != nil {
+		t.Fatalf("PendingWrites: %v", err)
+	}
+	if len(writes) != 1 {
+		t.Fatalf("got %d pending writes, want 1", len(writes))
+	}
+	// Drive it past maxWriteAttempts, the same way a real repeated failure
+	// would — FailWrite is the exact call drainWrites itself makes.
+	for i := 0; i < maxWriteAttempts; i++ {
+		if err := db.FailWrite(writes[0].ID, errors.New("simulated failure")); err != nil {
+			t.Fatalf("FailWrite: %v", err)
+		}
+	}
+
+	// Exhausted: the normal drain path no longer sees it.
+	remaining, err := db.PendingWrites("wallabag", 10)
+	if err != nil {
+		t.Fatalf("PendingWrites (after exhausting): %v", err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("got %d writes still visible to the drain path, want 0 (exhausted)", len(remaining))
+	}
+
+	queued, err := db.BackfillHighlightPushes("wallabag")
+	if err != nil {
+		t.Fatalf("BackfillHighlightPushes: %v", err)
+	}
+	if queued != 1 {
+		t.Errorf("queued/reset %d, want 1", queued)
+	}
+
+	revived, err := db.PendingWrites("wallabag", 10)
+	if err != nil {
+		t.Fatalf("PendingWrites (after backfill): %v", err)
+	}
+	if len(revived) != 1 || !revived[0].ElementID.Valid || revived[0].ElementID.Int64 != extractID {
+		t.Fatalf("PendingWrites after backfill = %+v, want the same extract's write, reset and visible again", revived)
+	}
+	if revived[0].Attempts != 0 {
+		t.Errorf("attempts = %d, want reset to 0", revived[0].Attempts)
+	}
+}

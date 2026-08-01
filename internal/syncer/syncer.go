@@ -213,8 +213,12 @@ func (s *Syncer) Reconcile(ctx context.Context) error {
 		}
 
 		present := make([]string, len(documents))
+		var presentHighlights []string
 		for i, document := range documents {
 			present[i] = document.ExternalID
+			for _, highlight := range document.Highlights {
+				presentHighlights = append(presentHighlights, highlight.ExternalID)
+			}
 		}
 
 		marked, cleared, err := s.store.ReconcileMissing(provider.Name(), present)
@@ -228,6 +232,42 @@ func (s *Syncer) Reconcile(ctx context.Context) error {
 		if marked > 0 || cleared > 0 {
 			s.logger.Info("reconciled library against upstream",
 				"source", provider.Name(), "newly_missing", marked, "restored", cleared)
+		}
+
+		highlightsMarked, highlightsCleared, err := s.store.ReconcileMissingHighlights(provider.Name(), presentHighlights)
+		if err != nil {
+			s.logger.Error("reconcile: marking missing highlights failed", "source", provider.Name(), "error", err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if highlightsMarked > 0 || highlightsCleared > 0 {
+			s.logger.Info("reconciled highlights against upstream",
+				"source", provider.Name(), "newly_missing", highlightsMarked, "restored", highlightsCleared)
+		}
+
+		// Only a Writer can ever drain what this queues; a read-only source
+		// would just accumulate writes nothing ever sends.
+		if _, ok := provider.(source.Writer); ok {
+			backfilled, err := s.store.BackfillHighlightPushes(provider.Name())
+			if err != nil {
+				s.logger.Error("reconcile: backfilling highlight pushes failed", "source", provider.Name(), "error", err)
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			if backfilled > 0 {
+				s.logger.Info("queued highlight pushes for extracts that had missed theirs",
+					"source", provider.Name(), "count", backfilled)
+				// Drained here rather than left for the next nudge or tick:
+				// Reconcile already runs rarely enough (once a day, or on a
+				// manual sync) that whoever triggered it should see the
+				// backfilled extracts actually reach wallabag, not just get
+				// queued.
+				s.drainWrites(ctx, provider)
+			}
 		}
 	}
 	return firstErr

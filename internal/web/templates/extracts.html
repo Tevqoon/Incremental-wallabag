@@ -14,13 +14,17 @@
 
   <nav class="filters">
     <a href="/extracts{{if .Query}}?q={{.Query}}{{end}}"
-       class="{{if and (not .Origin) (not .WithClozes)}}on{{end}}">All</a>
+       class="{{if and (not .Origin) (not .WithClozes) (not .MissingOnly)}}on{{end}}">All</a>
     <a href="/extracts?origin=manual{{if .Query}}&q={{.Query}}{{end}}"
        class="{{if eq .Origin "manual"}}on{{end}}">Mine</a>
     <a href="/extracts?origin=import{{if .Query}}&q={{.Query}}{{end}}"
        class="{{if eq .Origin "import"}}on{{end}}">Imported</a>
     <a href="/extracts?clozes=1{{if .Query}}&q={{.Query}}{{end}}"
        class="{{if .WithClozes}}on{{end}}">With clozes</a>
+    {{if .Missing}}
+      <a href="/extracts?missing=1{{if .Query}}&q={{.Query}}{{end}}"
+         class="{{if .MissingOnly}}on{{end}}">Missing {{.Missing}}</a>
+    {{end}}
   </nav>
 
   {{if .Extracts}}
@@ -30,6 +34,9 @@
           <a class="item-title" href="/read/{{.ID}}">{{.Quote}}</a>
           <div class="item-meta">
             {{if eq .Origin "import"}}<span class="badge">wallabag</span>{{end}}
+            {{if .MissingUpstream}}
+              <span class="badge badge-danger" title="the last check could not find this annotation in wallabag any more">missing upstream</span>
+            {{end}}
             {{if .ClozeCount}}
               <span class="badge badge-item">{{.ClozeCount}} cloze{{if ne .ClozeCount 1}}s{{end}}</span>
             {{end}}

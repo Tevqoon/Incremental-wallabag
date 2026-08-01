@@ -227,6 +227,103 @@ func TestReconcileFlagsDeletedEntries(t *testing.T) {
 	}
 }
 
+// TestReconcileFlagsDeletedHighlights is TestReconcileFlagsDeletedEntries one
+// level down: an annotation deleted upstream, on a document that is still
+// there, must be flagged rather than silently forgotten — increader keeps a
+// superset of wallabag's data, so the extract itself must survive.
+func TestReconcileFlagsDeletedHighlights(t *testing.T) {
+	db, logger := testSetup(t)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "77", Title: "An article", UpdatedAt: time.Now(), Highlights: []source.Highlight{
+			{ExternalID: "h1", Quote: "Stays annotated."},
+			{ExternalID: "h2", Quote: "Deleted at wallabag."},
+		}},
+	}, 0, time.Now()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	provider := newWritingSource()
+	// The article itself is unchanged, but its annotations list has shrunk
+	// to just h1 — h2 was deleted at wallabag.
+	provider.listing = []source.Document{
+		{ExternalID: "77", Title: "An article", UpdatedAt: time.Now(), Highlights: []source.Highlight{
+			{ExternalID: "h1", Quote: "Stays annotated."},
+		}},
+	}
+
+	if err := New(db, logger, provider).Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	extracts, err := db.Extracts(store.ExtractFilter{Origin: store.OriginImport})
+	if err != nil {
+		t.Fatalf("Extracts: %v", err)
+	}
+	if len(extracts) != 2 {
+		t.Fatalf("got %d imported extracts, want 2 — a deletion upstream must not remove increader's own copy", len(extracts))
+	}
+	for _, extract := range extracts {
+		want := extract.ExternalRef == "h2"
+		if extract.MissingUpstream != want {
+			t.Errorf("extract %s: MissingUpstream = %v, want %v", extract.ExternalRef, extract.MissingUpstream, want)
+		}
+	}
+}
+
+// TestReconcileBackfillsAndDrainsMissedPushes is the fix for extracts that
+// were made before push-back existed, or whose write was somehow lost: they
+// have no external_ref and nothing queued, so nothing would ever retry them
+// on its own. Reconcile must not just queue the backfilled write but also
+// push it out immediately — the whole point of running this from a manual
+// sync is seeing the result, not queueing something for later.
+func TestReconcileBackfillsAndDrainsMissedPushes(t *testing.T) {
+	db, logger := testSetup(t)
+	seed(t, db)
+
+	missedID, err := db.CreateExtract(store.NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "Missed its original push.",
+		ContentHTML: "<p>Missed its original push.</p>", Origin: store.OriginManual,
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+	// Simulate an extract that predates the feature, or a lost write: no
+	// queued push for it despite having no external_ref. CompleteWrite is
+	// the same call drainWrites itself makes once a write has gone out —
+	// here it stands in for "this write is gone", regardless of why.
+	writes, err := db.PendingWrites("wallabag", 10)
+	if err != nil {
+		t.Fatalf("PendingWrites: %v", err)
+	}
+	for _, w := range writes {
+		if w.ElementID.Valid && w.ElementID.Int64 == missedID {
+			if err := db.CompleteWrite(w.ID); err != nil {
+				t.Fatalf("CompleteWrite: %v", err)
+			}
+		}
+	}
+
+	provider := newWritingSource()
+	provider.listing = []source.Document{{ExternalID: "77", Title: "An article", UpdatedAt: time.Now()}}
+
+	if err := New(db, logger, provider).Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	if len(provider.createdHighlights) != 1 {
+		t.Fatalf("created highlights = %v, want exactly the backfilled one pushed immediately", provider.createdHighlights)
+	}
+
+	element, err := db.ElementByID(missedID)
+	if err != nil {
+		t.Fatalf("ElementByID: %v", err)
+	}
+	if element.ExternalRef == "" {
+		t.Error("the backfilled extract still has no external_ref — it was queued but not drained")
+	}
+}
+
 // TestFailedWritesSurviveForRetry is the reason the outbox exists: a wallabag
 // outage is exactly when a lost write would go unnoticed, because nothing looks
 // wrong locally.

@@ -602,13 +602,15 @@ func (s *Server) handleDeleteDocument(w http.ResponseWriter, r *http.Request) {
 
 // extractsData is what the extracts browse page renders.
 type extractsData struct {
-	Title      string
-	Extracts   []store.ExtractRow
-	Query      string
-	Origin     string
-	WithClozes bool
-	Imported   int
-	Manual     int
+	Title       string
+	Extracts    []store.ExtractRow
+	Query       string
+	Origin      string
+	WithClozes  bool
+	MissingOnly bool
+	Imported    int
+	Manual      int
+	Missing     int
 }
 
 // handleExtracts lists everything harvested, independently of what is due.
@@ -622,9 +624,10 @@ func (s *Server) handleExtracts(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 
 	filter := store.ExtractFilter{
-		Origin:     query.Get("origin"),
-		WithClozes: query.Get("clozes") == "1",
-		Query:      strings.TrimSpace(query.Get("q")),
+		Origin:      query.Get("origin"),
+		WithClozes:  query.Get("clozes") == "1",
+		MissingOnly: query.Get("missing") == "1",
+		Query:       strings.TrimSpace(query.Get("q")),
 	}
 	if filter.Origin != "" && filter.Origin != store.OriginImport && filter.Origin != store.OriginManual {
 		http.Error(w, "unknown origin filter", http.StatusBadRequest)
@@ -646,14 +649,21 @@ func (s *Server) handleExtracts(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	missing, err := s.store.CountMissingHighlights()
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
 
 	s.render(w, "extracts.html", extractsData{
-		Title:      "Extracts",
-		Extracts:   extracts,
-		Query:      filter.Query,
-		Origin:     filter.Origin,
-		WithClozes: filter.WithClozes,
-		Imported:   imported,
-		Manual:     manual,
+		Title:       "Extracts",
+		Extracts:    extracts,
+		Query:       filter.Query,
+		Origin:      filter.Origin,
+		WithClozes:  filter.WithClozes,
+		MissingOnly: filter.MissingOnly,
+		Imported:    imported,
+		Manual:      manual,
+		Missing:     missing,
 	})
 }
