@@ -45,6 +45,11 @@ main { padding: 1.5rem 1.25rem 6rem; }
   align-items: baseline;
   gap: 1.25rem;
   padding: 0.9rem 1.25rem;
+  /* viewport-fit=cover (see layout.html) lets page content extend under the
+     status bar and notch instead of Safari insetting it automatically, so
+     this needs to reclaim that space itself now — otherwise the top bar
+     would end up rendering partly underneath them. */
+  padding-top: calc(0.9rem + env(safe-area-inset-top, 0px));
   border-bottom: 1px solid var(--rule);
   font-family: system-ui, sans-serif;
   font-size: 0.85rem;
@@ -250,6 +255,12 @@ mark.extract {
   bottom: 0;
   margin-top: 3rem;
   padding: 0.9rem 0 0.6rem;
+  /* On top of the ordinary bottom padding, not instead of it: this is what
+     keeps the grade buttons clear of the home indicator and Safari's own
+     collapsing toolbar. Without viewport-fit=cover on the page's viewport
+     meta tag (see layout.html), env() here resolves to 0 and this is a
+     no-op, which is exactly the fallback wanted on anything else. */
+  padding-bottom: calc(0.6rem + env(safe-area-inset-bottom, 0px));
   background: var(--bg);
   border-top: 1px solid var(--rule);
 }

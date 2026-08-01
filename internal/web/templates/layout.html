@@ -2,7 +2,12 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- viewport-fit=cover is what makes env(safe-area-inset-bottom) resolve
+       to something other than 0 on iOS — see the reader's .grades bar in
+       app.css, which is pinned to the screen's bottom edge for nearly the
+       entire time an article is open and needs that inset to stay clear of
+       the home indicator and Safari's own collapsing toolbar. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>{{.Title}} · increader</title>
   <link rel="stylesheet" href="/static/app.css">
   <script src="/static/htmx.min.js" defer></script>
@@ -21,10 +26,18 @@
 
   <main>
     {{template "content" .}}
-  </main>
 
-  <footer class="build" title="the running build, so a stale container is visible">
-    {{build}}
-  </footer>
+    <!-- Inside main, not after it, purely for the last moment of scrolling:
+         the reader's grading bar (.grades) is sticky within main, and stays
+         pinned to the screen's bottom edge for nearly the whole time an
+         article is open. Right at the true end, it settles into its normal
+         resting place; anything scrollable past main's own end at that exact
+         moment is one more thing that transition could catch on. Keeping
+         this inside main means there is nothing left outside it to catch
+         on. -->
+    <footer class="build" title="the running build, so a stale container is visible">
+      {{build}}
+    </footer>
+  </main>
 </body>
 </html>{{end}}
