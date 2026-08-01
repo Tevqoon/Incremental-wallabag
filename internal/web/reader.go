@@ -21,6 +21,7 @@ type readerData struct {
 	ArticleHTML  template.HTML
 	Extracts     []store.Element
 	Clozes       []ir.Cloze
+	ClozeRows    []clozeRow
 	ClozePreview string
 	Remaining    int
 	Tags         []string
@@ -29,6 +30,16 @@ type readerData struct {
 	// Intervals labels each grade button with what it would actually do,
 	// keyed by the form value the button posts.
 	Intervals map[string]string
+}
+
+// clozeRow is one deletion as the reader needs to manage it individually —
+// ir.Cloze plus the text it actually covers, sliced out here because a
+// template has no clean way to index a string by a pair of byte offsets
+// itself.
+type clozeRow struct {
+	Ordinal int
+	Text    string
+	Hint    string
 }
 
 // handleRead shows one element: an article to read, or an extract to refine.
@@ -67,6 +78,24 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.fail(w, err)
 		return
+	}
+
+	// Sliced out per cloze so each one can be managed — and deleted —
+	// individually, rather than only seen as part of the combined preview
+	// below. Bounds are re-checked here rather than trusted, the same
+	// defensiveness RenderCloze already applies just below: the extract's
+	// own quote cannot change once stored, but nothing stops guarding
+	// against it anyway rather than a page that fails to render at all.
+	clozeRows := make([]clozeRow, 0, len(clozes))
+	for _, cloze := range clozes {
+		if cloze.Start < 0 || cloze.End > len(element.Quote) || cloze.End <= cloze.Start {
+			continue
+		}
+		clozeRows = append(clozeRows, clozeRow{
+			Ordinal: cloze.Ordinal,
+			Text:    element.Quote[cloze.Start:cloze.End],
+			Hint:    cloze.Hint,
+		})
 	}
 
 	preview := ""
@@ -127,6 +156,7 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 		})),
 		Extracts:     children,
 		Clozes:       clozes,
+		ClozeRows:    clozeRows,
 		ClozePreview: preview,
 		Remaining:    due,
 		Tags:         tags,
@@ -308,6 +338,45 @@ func (s *Server) handleCloze(w http.ResponseWriter, r *http.Request) {
 	// now produces a card, which is what distinguishes the two kinds.
 	if element.Kind != store.KindItem {
 		if err := s.store.SetKind(id, store.KindItem, time.Now()); err != nil {
+			s.fail(w, err)
+			return
+		}
+	}
+
+	s.redirect(w, r, "/read/"+strconv.FormatInt(id, 10))
+}
+
+// handleDeleteCloze removes one deletion from an item, addressed by the same
+// ordinal Anki would turn into a card number — not a database id, which
+// nothing outside this package ever sees.
+func (s *Server) handleDeleteCloze(w http.ResponseWriter, r *http.Request) {
+	id, err := elementID(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	ordinal, err := strconv.Atoi(r.PathValue("ordinal"))
+	if err != nil {
+		http.Error(w, "invalid cloze ordinal", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.store.DeleteCloze(id, ordinal); err != nil {
+		s.notFoundOrFail(w, err)
+		return
+	}
+
+	// An item is defined by having at least one deletion — that is the whole
+	// distinction from a plain extract — so removing the last one demotes it
+	// back, the exact reverse of the promotion handleCloze makes on the
+	// first cloze added.
+	remaining, err := s.store.ClozesOf(id)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	if len(remaining) == 0 {
+		if err := s.store.SetKind(id, store.KindTopic, time.Now()); err != nil {
 			s.fail(w, err)
 			return
 		}

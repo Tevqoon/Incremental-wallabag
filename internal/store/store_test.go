@@ -1194,6 +1194,68 @@ func TestDeleteExtractCascades(t *testing.T) {
 	}
 }
 
+// TestDeleteClozeRemovesOnlyThatOne guards the ordinal-addressed deletion
+// against the obvious way to get it wrong: removing cloze 2 out of {1, 2, 3}
+// must leave 1 and 3 both present and unrenumbered — Anki has no trouble
+// with a gap in ordinals, but silently shifting 3 down to 2 would rewrite a
+// deletion nobody asked to change.
+func TestDeleteClozeRemovesOnlyThatOne(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "1", Title: "An article", UpdatedAt: now},
+	}, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+	extractID, err := db.CreateExtract(NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "one two three four five six",
+		ContentHTML: "<p>one two three four five six</p>",
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+	for _, span := range [][2]int{{0, 3}, {4, 7}, {8, 13}} {
+		if _, err := db.AddCloze(extractID, span[0], span[1], ""); err != nil {
+			t.Fatalf("AddCloze: %v", err)
+		}
+	}
+
+	if err := db.DeleteCloze(extractID, 2); err != nil {
+		t.Fatalf("DeleteCloze: %v", err)
+	}
+
+	clozes, err := db.ClozesOf(extractID)
+	if err != nil {
+		t.Fatalf("ClozesOf: %v", err)
+	}
+	if len(clozes) != 2 || clozes[0].Ordinal != 1 || clozes[1].Ordinal != 3 {
+		t.Errorf("clozes = %+v, want ordinals 1 and 3 surviving, unrenumbered", clozes)
+	}
+}
+
+func TestDeleteClozeMissing(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "1", Title: "An article", UpdatedAt: now},
+	}, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+	extractID, err := db.CreateExtract(NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "A passage.",
+		ContentHTML: "<p>A passage.</p>",
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+
+	if err := db.DeleteCloze(extractID, 1); !errors.Is(err, ErrNotFound) {
+		t.Errorf("DeleteCloze on an extract with no clozes = %v, want ErrNotFound", err)
+	}
+}
+
 // TestDeleteExtractQueuesHighlightRemoval is the pairing that keeps a deletion
 // from silently undoing itself: without the queued upstream removal, the next
 // sync would re-import the very highlight just deleted.

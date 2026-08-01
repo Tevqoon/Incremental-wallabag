@@ -513,6 +513,30 @@ func (s *Store) ClozesOf(elementID int64) ([]ir.Cloze, error) {
 	return clozes, rows.Err()
 }
 
+// DeleteCloze removes one deletion from an item, identified by its ordinal
+// within that element — the number Anki turns into a card, and the number
+// the reader actually sees, rather than a database row id nothing outside
+// this package ever handles.
+//
+// Deleting every deletion an item has does not delete the item itself, nor
+// does it touch its kind: whether an item with zero clozes should revert to
+// being a plain extract is the caller's call to make, the same way
+// promoting a plain extract to an item on its first cloze is handleCloze's
+// call and not AddCloze's.
+func (s *Store) DeleteCloze(elementID int64, ordinal int) error {
+	result, err := s.db.Exec(
+		`DELETE FROM cloze_ranges WHERE element_id = ? AND ordinal = ?`,
+		elementID, ordinal,
+	)
+	if err != nil {
+		return fmt.Errorf("store: delete cloze %d of element %d: %w", ordinal, elementID, err)
+	}
+	if n, _ := result.RowsAffected(); n == 0 {
+		return fmt.Errorf("store: element %d has no cloze %d: %w", elementID, ordinal, ErrNotFound)
+	}
+	return nil
+}
+
 // insertRootTopic creates the queue entry for a newly imported document and
 // returns its id.
 //

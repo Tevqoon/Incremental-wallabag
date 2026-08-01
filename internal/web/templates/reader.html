@@ -91,6 +91,21 @@
       <h2>Card</h2>
       <p class="meta">{{len .Clozes}} deletion(s); exported to Anki as a Cloze note.</p>
       <pre class="cloze-preview">{{.ClozePreview}}</pre>
+      <ul class="cloze-list">
+        {{range .ClozeRows}}
+          <li>
+            <span class="cloze-ordinal">c{{.Ordinal}}</span>
+            <span class="cloze-text">{{.Text}}</span>
+            {{if .Hint}}<span class="cloze-hint">{{.Hint}}</span>{{end}}
+            <button class="link-danger"
+                    hx-delete="/elements/{{$.Element.ID}}/cloze/{{.Ordinal}}"
+                    hx-confirm="Delete this deletion? The rest of the extract is unaffected."
+                    title="Remove just this deletion, not the whole extract">
+              delete
+            </button>
+          </li>
+        {{end}}
+      </ul>
     </section>
   {{end}}
 

@@ -395,6 +395,102 @@ func TestClozePromotesExtractToItem(t *testing.T) {
 	}
 }
 
+// TestDeleteClozeDemotesItemBackToTopic is the reverse of the promotion
+// above: an item is defined by having at least one deletion, so removing its
+// only one must hand that distinction back, not leave a "cloze" badge on
+// something that no longer has one.
+func TestDeleteClozeDemotesItemBackToTopic(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	post(t, server, "/elements/1/extract", url.Values{
+		"start_block": {"0"}, "start_offset": {"4"},
+		"end_block": {"0"}, "end_offset": {"19"}, "quote": {"quick brown fox"},
+	})
+	children, _ := db.ChildrenOf(1)
+	extractID := children[0].ID
+
+	post(t, server, "/elements/"+itoa(extractID)+"/cloze", url.Values{
+		"start_block": {"0"}, "start_offset": {"6"},
+		"end_block": {"0"}, "end_offset": {"11"}, "quote": {"brown"},
+	})
+	promoted, _ := db.ElementByID(extractID)
+	if promoted.Kind != store.KindItem {
+		t.Fatalf("setup: kind = %q, want %q before the delete under test", promoted.Kind, store.KindItem)
+	}
+
+	response := del(t, server, "/elements/"+itoa(extractID)+"/cloze/1")
+	if response.Code != http.StatusSeeOther && response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+
+	demoted, err := db.ElementByID(extractID)
+	if err != nil {
+		t.Fatalf("ElementByID: %v", err)
+	}
+	if demoted.Kind != store.KindTopic {
+		t.Errorf("kind = %q, want %q once its last deletion is gone", demoted.Kind, store.KindTopic)
+	}
+	clozes, _ := db.ClozesOf(extractID)
+	if len(clozes) != 0 {
+		t.Errorf("got %d clozes remaining, want 0", len(clozes))
+	}
+}
+
+// TestDeleteClozeLeavesSiblingsAndKindAlone covers the more common case:
+// removing one of several deletions must not touch the others, and must not
+// demote an item that still has clozes left.
+func TestDeleteClozeLeavesSiblingsAndKindAlone(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	post(t, server, "/elements/1/extract", url.Values{
+		"start_block": {"0"}, "start_offset": {"4"},
+		"end_block": {"0"}, "end_offset": {"19"}, "quote": {"quick brown fox"},
+	})
+	children, _ := db.ChildrenOf(1)
+	extractID := children[0].ID
+
+	post(t, server, "/elements/"+itoa(extractID)+"/cloze", url.Values{
+		"start_block": {"0"}, "start_offset": {"0"},
+		"end_block": {"0"}, "end_offset": {"5"}, "quote": {"quick"},
+	})
+	post(t, server, "/elements/"+itoa(extractID)+"/cloze", url.Values{
+		"start_block": {"0"}, "start_offset": {"6"},
+		"end_block": {"0"}, "end_offset": {"11"}, "quote": {"brown"},
+	})
+
+	if response := del(t, server, "/elements/"+itoa(extractID)+"/cloze/1"); response.Code != http.StatusSeeOther && response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+
+	still, err := db.ElementByID(extractID)
+	if err != nil {
+		t.Fatalf("ElementByID: %v", err)
+	}
+	if still.Kind != store.KindItem {
+		t.Errorf("kind = %q, want %q — one deletion is still left", still.Kind, store.KindItem)
+	}
+	clozes, _ := db.ClozesOf(extractID)
+	if len(clozes) != 1 || clozes[0].Ordinal != 2 {
+		t.Errorf("clozes = %+v, want only c2 (\"brown\") surviving", clozes)
+	}
+}
+
+func TestDeleteClozeMissing(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	post(t, server, "/elements/1/extract", url.Values{
+		"start_block": {"0"}, "start_offset": {"4"},
+		"end_block": {"0"}, "end_offset": {"19"}, "quote": {"quick brown fox"},
+	})
+	children, _ := db.ChildrenOf(1)
+	extractID := children[0].ID
+
+	response := del(t, server, "/elements/"+itoa(extractID)+"/cloze/1")
+	if response.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 for an extract with no such cloze", response.Code)
+	}
+}
+
 func TestClozeRejectedOnWholeArticle(t *testing.T) {
 	server, _, _ := newTestServer(t, true)
 
