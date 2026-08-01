@@ -1463,6 +1463,81 @@ func TestReconcileMissingHighlightsFlagsDeletedAnnotations(t *testing.T) {
 	}
 }
 
+// TestQueueLocationUpdatesFindsExtractsNeedingOne covers the gap left by
+// shipping ranges after highlights already existed upstream: every extract
+// pushed before that point has a real annotation with nothing for wallabag's
+// own reader to draw it at, and nothing about creating it originally would
+// ever revisit that.
+func TestQueueLocationUpdatesFindsExtractsNeedingOne(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "1", Title: "An article", UpdatedAt: now},
+	}, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	// Pushed before ranges existed: a real annotation, nothing to draw it at.
+	locationlessID, err := db.CreateExtract(NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "Pushed before ranges existed.",
+		ContentHTML: "<p>Pushed before ranges existed.</p>",
+		Origin:      OriginManual, ExternalRef: "h1",
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateExtract (locationless): %v", err)
+	}
+
+	// Already has one — must not be queued again just because it is manual.
+	// Not a candidate at all, since "h2" is never passed to
+	// QueueLocationUpdates below; already proven by len(writes) == 1.
+	if _, err := db.CreateExtract(NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "Already has a location.",
+		ContentHTML: "<p>Already has a location.</p>",
+		Origin:      OriginManual, ExternalRef: "h2",
+	}, now); err != nil {
+		t.Fatalf("CreateExtract (located): %v", err)
+	}
+
+	queued, err := db.QueueLocationUpdates("wallabag", []string{"h1"})
+	if err != nil {
+		t.Fatalf("QueueLocationUpdates: %v", err)
+	}
+	if queued != 1 {
+		t.Fatalf("queued %d, want 1", queued)
+	}
+
+	writes, err := db.PendingWrites("wallabag", 10)
+	if err != nil {
+		t.Fatalf("PendingWrites: %v", err)
+	}
+	if len(writes) != 1 {
+		t.Fatalf("got %d pending writes, want 1", len(writes))
+	}
+	write := writes[0]
+	if write.Operation != OpHighlightUpdateLocation {
+		t.Errorf("operation = %q, want %q", write.Operation, OpHighlightUpdateLocation)
+	}
+	if write.ExternalID != "h1" {
+		t.Errorf("external_id = %q, want the old annotation's own id, the same convention OpHighlightDelete uses", write.ExternalID)
+	}
+	if write.Payload != "Pushed before ranges existed." {
+		t.Errorf("payload = %q, want the extract's quote", write.Payload)
+	}
+	if !write.ElementID.Valid || write.ElementID.Int64 != locationlessID {
+		t.Errorf("ElementID = %+v, want it to point at the locationless extract", write.ElementID)
+	}
+
+	// Idempotent: a second call with the same input queues nothing further.
+	queued, err = db.QueueLocationUpdates("wallabag", []string{"h1"})
+	if err != nil {
+		t.Fatalf("QueueLocationUpdates (second run): %v", err)
+	}
+	if queued != 0 {
+		t.Errorf("second run queued %d, want 0", queued)
+	}
+}
+
 // TestBackfillHighlightPushesQueuesMissedExtracts covers the gap CreateExtract
 // alone cannot: an extract made before the push-back feature existed, or one
 // whose write was somehow lost, has no external_ref and nothing queued for

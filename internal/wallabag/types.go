@@ -108,19 +108,25 @@ type Tag struct {
 	Slug  string `json:"slug"`
 }
 
-// Annotation is a highlight the reader made in wallabag's own interface.
+// Annotation is a highlight the reader made in wallabag's own interface, or
+// pushed there by increader.
 //
-// The API also returns annotator.js "ranges" (XPath plus character offsets)
-// locating the highlight in the original DOM. increader deliberately ignores
-// them: they are brittle across the HTML sanitisation this app performs, and
-// Quote carries the text itself, which is all that is needed to re-locate a
-// passage.
+// Ranges is the annotator.js "ranges" array (XPath plus character offsets)
+// locating the highlight in wallabag's own rendered DOM — see
+// internal/wallabag/ranges.go for what increader does with it on the way
+// out. On the way in, only its presence is ever inspected, never its
+// contents: an annotation with an empty Ranges is one wallabag's own web and
+// Android clients cannot draw as a highlight in place, most often because it
+// was pushed before increader computed ranges at all, and that absence is
+// what queues an update for it. Left as raw JSON rather than a typed slice
+// because nothing here needs to read the shape, only ask len(Ranges) == 0.
 type Annotation struct {
-	ID        int    `json:"id"`
-	Text      string `json:"text"`
-	Quote     string `json:"quote"`
-	CreatedAt Time   `json:"created_at"`
-	UpdatedAt Time   `json:"updated_at"`
+	ID        int               `json:"id"`
+	Text      string            `json:"text"`
+	Quote     string            `json:"quote"`
+	Ranges    []json.RawMessage `json:"ranges"`
+	CreatedAt Time              `json:"created_at"`
+	UpdatedAt Time              `json:"updated_at"`
 }
 
 // entryPage is the HAL-shaped envelope wrapping a page of entries.

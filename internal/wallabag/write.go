@@ -117,6 +117,35 @@ func (s *Source) DeleteHighlight(ctx context.Context, highlightExternalID string
 	return s.client.send(ctx, "DELETE", path, nil, nil)
 }
 
+// UpdateHighlightLocation gives an annotation a location by replacing it,
+// not by updating it in place — confirmed against wallabag's own
+// EditAnnotationType, which accepts a comment field and nothing else, so
+// there is no PUT that could attach ranges after the fact.
+//
+// Ordered create-then-delete deliberately, not the other way round: if the
+// create half fails, the old (locationless, but real) annotation is still
+// there. Deleting first and having the create fail would instead leave
+// nothing behind at all — the annotation quietly gone rather than merely
+// still missing a location, which is a worse failure for a best-effort
+// operation to risk.
+//
+// A failure to delete the old annotation is deliberately not returned as an
+// error once the new one exists, even though that leaves a duplicate
+// behind. The caller's outbox retries a failed write by calling this again
+// with the same old id — which by then may already be gone, or about to be
+// replaced a second time regardless — so surfacing the error would not fix
+// the duplicate, only manufacture another one on every retry until the
+// delete eventually succeeds or the attempt cap gives up. A stray duplicate
+// annotation is a smaller, quieter problem than that.
+func (s *Source) UpdateHighlightLocation(ctx context.Context, highlightExternalID, documentExternalID, quote string) (string, error) {
+	newID, err := s.CreateHighlight(ctx, documentExternalID, quote)
+	if err != nil {
+		return "", err
+	}
+	_ = s.DeleteHighlight(ctx, highlightExternalID)
+	return newID, nil
+}
+
 // maxHighlightQuoteLength guards against a limit that exists only on
 // app.wallabag.it's actual database, not in its published source: wallabag's
 // own Annotation entity declares an Assert\Length(max: 10000) on quote, but a
@@ -163,24 +192,37 @@ func truncateQuote(quote string) string {
 // Unlike every other write in this file, wallabag's annotation endpoint reads
 // a JSON body (json_decode($request->getContent())) rather than the form body
 // the rest of the API uses — confirmed against wallabag's own
-// AnnotationController source, not assumed. ranges is sent empty: it is
-// wallabag's own XPath-based location for its web reader's DOM, which
-// increader has nothing equivalent to produce, and Quote is all a human
-// re-locating the passage in wallabag's interface actually reads.
+// AnnotationController source, not assumed.
+//
+// ranges — the XPath-based location wallabag's own web and Android clients
+// need to actually draw the highlight in place, rather than just store the
+// text — is computed by fetching the entry's own content and locating quote
+// within it (see computeRanges). Best-effort: a failure to fetch or locate
+// it is not fatal, and simply falls back to an empty ranges array, exactly
+// what this sent unconditionally before ranges existed. The annotation
+// itself, and Quote, are what a human reads regardless of whether wallabag's
+// reader can also draw it in place.
 func (s *Source) CreateHighlight(ctx context.Context, documentExternalID, quote string) (string, error) {
 	id, err := entryID(documentExternalID)
 	if err != nil {
 		return "", err
 	}
 
+	ranges := []serializedRange{}
+	if content, err := s.Content(ctx, documentExternalID); err == nil {
+		if found := computeRanges(content, quote); found != nil {
+			ranges = found
+		}
+	}
+
 	path := fmt.Sprintf("/api/annotations/%d.json", id)
 	body := struct {
-		Text   string   `json:"text"`
-		Quote  string   `json:"quote"`
-		Ranges []string `json:"ranges"`
+		Text   string            `json:"text"`
+		Quote  string            `json:"quote"`
+		Ranges []serializedRange `json:"ranges"`
 	}{
 		Quote:  truncateQuote(quote),
-		Ranges: []string{},
+		Ranges: ranges,
 	}
 
 	var created Annotation

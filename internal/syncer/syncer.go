@@ -213,11 +213,14 @@ func (s *Syncer) Reconcile(ctx context.Context) error {
 		}
 
 		present := make([]string, len(documents))
-		var presentHighlights []string
+		var presentHighlights, locationlessHighlights []string
 		for i, document := range documents {
 			present[i] = document.ExternalID
 			for _, highlight := range document.Highlights {
 				presentHighlights = append(presentHighlights, highlight.ExternalID)
+				if !highlight.HasLocation {
+					locationlessHighlights = append(locationlessHighlights, highlight.ExternalID)
+				}
 			}
 		}
 
@@ -266,6 +269,20 @@ func (s *Syncer) Reconcile(ctx context.Context) error {
 				// manual sync) that whoever triggered it should see the
 				// backfilled extracts actually reach wallabag, not just get
 				// queued.
+				s.drainWrites(ctx, provider)
+			}
+
+			relocated, err := s.store.QueueLocationUpdates(provider.Name(), locationlessHighlights)
+			if err != nil {
+				s.logger.Error("reconcile: queuing highlight location updates failed", "source", provider.Name(), "error", err)
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			if relocated > 0 {
+				s.logger.Info("queued location updates for highlights the provider could not draw in place",
+					"source", provider.Name(), "count", relocated)
 				s.drainWrites(ctx, provider)
 			}
 		}
@@ -352,12 +369,14 @@ func (s *Syncer) drainWrites(ctx context.Context, provider source.Source) int {
 
 	published := 0
 	for _, write := range writes {
-		ref, err := applyWrite(ctx, writer, write)
+		ref, err := s.applyWrite(ctx, writer, write)
 
 		switch {
 		case err == nil:
-			// Only OpHighlightCreate ever returns a ref: the provider's id for
-			// something that did not exist until this write. Recording it is
+			// OpHighlightCreate and OpHighlightUpdateLocation are the two
+			// operations that return a ref: the provider's id for something
+			// that did not exist (or exists anew, replacing what did) until
+			// this write. Recording it is
 			// what lets a later delete of the same element find it upstream.
 			if ref != "" && write.ElementID.Valid {
 				if err := s.store.SetExternalRef(write.ElementID.Int64, ref); err != nil {
@@ -397,7 +416,7 @@ func (s *Syncer) drainWrites(ctx context.Context, provider source.Source) int {
 // applyWrite dispatches one queued change to the provider. The returned
 // string is only ever non-empty for OpHighlightCreate, which is the one
 // operation whose result the caller needs back.
-func applyWrite(ctx context.Context, writer source.Writer, write store.PendingWrite) (string, error) {
+func (s *Syncer) applyWrite(ctx context.Context, writer source.Writer, write store.PendingWrite) (string, error) {
 	switch write.Operation {
 	case store.OpArchive:
 		return "", writer.SetArchived(ctx, write.ExternalID, store.PayloadBool(write.Payload))
@@ -411,6 +430,17 @@ func applyWrite(ctx context.Context, writer source.Writer, write store.PendingWr
 		return "", writer.DeleteHighlight(ctx, write.ExternalID)
 	case store.OpHighlightCreate:
 		return writer.CreateHighlight(ctx, write.ExternalID, write.Payload)
+	case store.OpHighlightUpdateLocation:
+		if !write.ElementID.Valid {
+			// Nothing to resolve the document from; drop it rather than
+			// fail forever on a row that can never be completed.
+			return "", nil
+		}
+		documentExternalID, err := s.store.DocumentExternalID(write.ElementID.Int64)
+		if err != nil {
+			return "", err
+		}
+		return writer.UpdateHighlightLocation(ctx, write.ExternalID, documentExternalID, write.Payload)
 	default:
 		// Unknown operations are dropped rather than retried: the row was
 		// written by a version of increader that understood it, and no future

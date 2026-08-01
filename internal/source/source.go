@@ -95,6 +95,22 @@ type Writer interface {
 	// record it — a later delete of the same local extract needs it to remove
 	// the right thing upstream.
 	CreateHighlight(ctx context.Context, documentExternalID, quote string) (string, error)
+
+	// UpdateHighlightLocation gives an existing annotation — identified by
+	// its own external id, the same one DeleteHighlight takes — a location
+	// in the provider's own rendering of documentExternalID. It returns the
+	// annotation's id afterward, which the caller must record in place of
+	// the old one: some providers (wallabag confirmed; its own annotation
+	// update form accepts nothing but a comment field, no way to attach a
+	// location after creation) can only do this by replacing the annotation
+	// outright, so the id is free to change even though the text does not.
+	//
+	// This exists for one situation: an annotation was pushed before the
+	// provider had any way to locate it in place, or the location that was
+	// sent turned out not to resolve, and Reconcile discovers that gap from
+	// the provider's own report of the annotation (Highlight.HasLocation)
+	// rather than from anything local.
+	UpdateHighlightLocation(ctx context.Context, highlightExternalID, documentExternalID, quote string) (string, error)
 }
 
 // Document is one importable piece of content, normalised across providers.
@@ -152,6 +168,15 @@ type Highlight struct {
 
 	// Note is the reader's comment on the passage, usually empty.
 	Note string
+
+	// HasLocation reports whether the provider already has this highlight
+	// anchored somewhere in its own rendering of the document — wallabag's
+	// XPath ranges, or whatever the equivalent turns out to be for a future
+	// provider. A highlight increader pushed before that anchor existed, or
+	// whose provider never captures one at all, reports false; Reconcile
+	// uses that to queue giving it one, rather than leaving it permanently
+	// unable to be drawn as a highlight in the provider's own reader.
+	HasLocation bool
 
 	CreatedAt time.Time
 	UpdatedAt time.Time

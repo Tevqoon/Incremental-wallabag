@@ -17,10 +17,11 @@ import (
 // writingSource is a provider that records what was published to it and can be
 // told to fail.
 type writingSource struct {
-	archived          map[string]bool
-	tags              map[string][]string
-	deletedHighlights []string
-	createdHighlights []string // "entryID:quote", in call order
+	archived            map[string]bool
+	tags                map[string][]string
+	deletedHighlights   []string
+	createdHighlights   []string // "entryID:quote", in call order
+	relocatedHighlights []string // "oldID->newID:entryID:quote", in call order
 
 	// nextHighlightID is handed out as the id of each created highlight,
 	// standing in for wallabag assigning a real one.
@@ -90,6 +91,17 @@ func (w *writingSource) CreateHighlight(_ context.Context, entryID, quote string
 	w.createdHighlights = append(w.createdHighlights, entryID+":"+quote)
 	w.nextHighlightID++
 	return strconv.Itoa(w.nextHighlightID), nil
+}
+
+func (w *writingSource) UpdateHighlightLocation(_ context.Context, oldID, entryID, quote string) (string, error) {
+	w.calls++
+	if w.failWith != nil {
+		return "", w.failWith
+	}
+	w.nextHighlightID++
+	newID := strconv.Itoa(w.nextHighlightID)
+	w.relocatedHighlights = append(w.relocatedHighlights, oldID+"->"+newID+":"+entryID+":"+quote)
+	return newID, nil
 }
 
 // readOnlySource cannot write, which must be handled rather than assumed away.
@@ -268,6 +280,53 @@ func TestReconcileFlagsDeletedHighlights(t *testing.T) {
 		if extract.MissingUpstream != want {
 			t.Errorf("extract %s: MissingUpstream = %v, want %v", extract.ExternalRef, extract.MissingUpstream, want)
 		}
+	}
+}
+
+// TestReconcileRelocatesAndDrainsLocationlessHighlights covers the gap
+// shipping ranges after highlights already existed left behind: Reconcile
+// must notice a highlight the provider reports with no location
+// (Highlight.HasLocation false), queue a replacement, and push it out
+// immediately — same as backfilling a missed push, so whoever triggers a
+// manual sync actually sees the result instead of just queuing it.
+func TestReconcileRelocatesAndDrainsLocationlessHighlights(t *testing.T) {
+	db, logger := testSetup(t)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "77", Title: "An article", UpdatedAt: time.Now(), Highlights: []source.Highlight{
+			{ExternalID: "h1", Quote: "Pushed before ranges existed.", HasLocation: false},
+		}},
+	}, 0, time.Now()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	provider := newWritingSource()
+	provider.listing = []source.Document{
+		{ExternalID: "77", Title: "An article", UpdatedAt: time.Now(), Highlights: []source.Highlight{
+			{ExternalID: "h1", Quote: "Pushed before ranges existed.", HasLocation: false},
+		}},
+	}
+
+	if err := New(db, logger, provider).Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	if len(provider.relocatedHighlights) != 1 {
+		t.Fatalf("relocated highlights = %v, want exactly one pushed immediately", provider.relocatedHighlights)
+	}
+	if provider.relocatedHighlights[0] != "h1->1:77:Pushed before ranges existed." {
+		t.Errorf("relocated = %q, want the old id replaced against entry 77 with the same quote", provider.relocatedHighlights[0])
+	}
+
+	extracts, err := db.Extracts(store.ExtractFilter{Origin: store.OriginImport})
+	if err != nil {
+		t.Fatalf("Extracts: %v", err)
+	}
+	if len(extracts) != 1 {
+		t.Fatalf("got %d imported extracts, want 1", len(extracts))
+	}
+	if extracts[0].ExternalRef != "1" {
+		t.Errorf("ExternalRef = %q, want the new id from the replacement", extracts[0].ExternalRef)
 	}
 }
 

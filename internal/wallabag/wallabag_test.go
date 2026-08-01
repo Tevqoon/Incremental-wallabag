@@ -397,6 +397,176 @@ func TestCreateHighlight(t *testing.T) {
 // roughly 1000 bytes with a 500, well short of the 10000-character validator
 // wallabag's own source declares. Without this, any extract longer than that
 // would retry against the outbox forever and never reach wallabag.
+// TestCreateHighlightComputesRanges is the end-to-end wiring: given the
+// entry's own content, CreateHighlight must actually locate the quote in it
+// and send a populated ranges array, not the empty one this sent
+// unconditionally before ranges existed at all.
+func TestCreateHighlightComputesRanges(t *testing.T) {
+	var body map[string]any
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /oauth/v2/token", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(tokenResponse{AccessToken: "tok", ExpiresIn: 3600})
+	})
+	mux.HandleFunc("GET /api/entries/42.json", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(Entry{
+			ID:      42,
+			Content: "<p>Before text.</p><p>The quick brown fox jumps over the lazy dog.</p>",
+		})
+	})
+	mux.HandleFunc("POST /api/annotations/42.json", func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&body)
+		json.NewEncoder(w).Encode(map[string]any{"id": 555})
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := testClient(t, server.URL)
+	adapter := NewSource(client)
+
+	if _, err := adapter.CreateHighlight(context.Background(), "42", "quick brown fox"); err != nil {
+		t.Fatalf("CreateHighlight: %v", err)
+	}
+
+	ranges, _ := body["ranges"].([]any)
+	if len(ranges) != 1 {
+		t.Fatalf("ranges = %v, want exactly one located range", body["ranges"])
+	}
+	got, _ := ranges[0].(map[string]any)
+	if got["start"] != "/p[2]" || got["end"] != "/p[2]" {
+		t.Errorf("range = %v, want the second paragraph", got)
+	}
+	if got["startOffset"] != "4" || got["endOffset"] != "19" {
+		t.Errorf("offsets = start=%v end=%v, want start=4 end=19", got["startOffset"], got["endOffset"])
+	}
+}
+
+// TestCreateHighlightFallsBackWhenContentUnavailable is the other half: a
+// failure to fetch the entry's content, or to locate the quote inside it,
+// must not fail the whole push — the annotation still needs to exist even
+// without something for wallabag's own reader to draw a highlight around.
+func TestCreateHighlightFallsBackWhenContentUnavailable(t *testing.T) {
+	var body map[string]any
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /oauth/v2/token", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(tokenResponse{AccessToken: "tok", ExpiresIn: 3600})
+	})
+	mux.HandleFunc("GET /api/entries/42.json", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	})
+	mux.HandleFunc("POST /api/annotations/42.json", func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&body)
+		json.NewEncoder(w).Encode(map[string]any{"id": 555})
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := testClient(t, server.URL)
+	adapter := NewSource(client)
+
+	if _, err := adapter.CreateHighlight(context.Background(), "42", "a passage"); err != nil {
+		t.Fatalf("CreateHighlight: %v, want it to succeed despite the content fetch failing", err)
+	}
+
+	ranges, ok := body["ranges"].([]any)
+	if !ok || len(ranges) != 0 {
+		t.Errorf("ranges = %v, want an empty array, not an error or omission", body["ranges"])
+	}
+}
+
+// TestUpdateHighlightLocationReplacesTheAnnotation is the mechanism behind
+// giving an already-pushed highlight a location it never had: wallabag's own
+// annotation update form accepts nothing but a comment field (confirmed
+// against EditAnnotationType's source — no quote, no ranges), so the only
+// way to attach one is to create a new annotation and remove the old one,
+// not to PUT an update to it.
+func TestUpdateHighlightLocationReplacesTheAnnotation(t *testing.T) {
+	var (
+		createdBody map[string]any
+		deletedPath string
+	)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /oauth/v2/token", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(tokenResponse{AccessToken: "tok", ExpiresIn: 3600})
+	})
+	mux.HandleFunc("GET /api/entries/42.json", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(Entry{ID: 42, Content: "<p>a passage worth relocating</p>"})
+	})
+	mux.HandleFunc("POST /api/annotations/42.json", func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&createdBody)
+		json.NewEncoder(w).Encode(map[string]any{"id": 999})
+	})
+	mux.HandleFunc("DELETE /api/annotations/111.json", func(w http.ResponseWriter, r *http.Request) {
+		deletedPath = r.URL.Path
+		json.NewEncoder(w).Encode(map[string]any{"id": 111})
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := testClient(t, server.URL)
+	adapter := NewSource(client)
+
+	newID, err := adapter.UpdateHighlightLocation(context.Background(), "111", "42", "passage worth relocating")
+	if err != nil {
+		t.Fatalf("UpdateHighlightLocation: %v", err)
+	}
+	if newID != "999" {
+		t.Errorf("newID = %q, want the id of the freshly created replacement", newID)
+	}
+	if createdBody["quote"] != "passage worth relocating" {
+		t.Errorf("quote sent to create = %v, want the passage", createdBody["quote"])
+	}
+	ranges, _ := createdBody["ranges"].([]any)
+	if len(ranges) != 1 {
+		t.Errorf("ranges sent to create = %v, want a located range computed from the entry's content", createdBody["ranges"])
+	}
+	if deletedPath != "/api/annotations/111.json" {
+		t.Errorf("deleted path = %q, want the old annotation removed", deletedPath)
+	}
+}
+
+// TestUpdateHighlightLocationSurvivesAFailedCleanup: if removing the old
+// annotation fails after the new one was already created, that must not be
+// reported as an error. The caller's outbox would otherwise retry by calling
+// this again with the same old id, creating another replacement on every
+// attempt until the delete eventually succeeds — manufacturing more
+// duplicates than the one stray annotation a failed cleanup already leaves
+// behind.
+func TestUpdateHighlightLocationSurvivesAFailedCleanup(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /oauth/v2/token", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(tokenResponse{AccessToken: "tok", ExpiresIn: 3600})
+	})
+	mux.HandleFunc("GET /api/entries/42.json", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(Entry{ID: 42, Content: "<p>a passage</p>"})
+	})
+	mux.HandleFunc("POST /api/annotations/42.json", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"id": 999})
+	})
+	mux.HandleFunc("DELETE /api/annotations/111.json", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := testClient(t, server.URL)
+	adapter := NewSource(client)
+
+	newID, err := adapter.UpdateHighlightLocation(context.Background(), "111", "42", "a passage")
+	if err != nil {
+		t.Fatalf("UpdateHighlightLocation: %v, want no error despite the cleanup delete failing", err)
+	}
+	if newID != "999" {
+		t.Errorf("newID = %q, want the replacement's id returned regardless", newID)
+	}
+}
+
 func TestCreateHighlightTruncatesLongQuotes(t *testing.T) {
 	var body map[string]any
 

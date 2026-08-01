@@ -154,11 +154,12 @@ func toDocument(entry Entry) source.Document {
 	highlights := make([]source.Highlight, 0, len(entry.Annotations))
 	for _, annotation := range entry.Annotations {
 		highlights = append(highlights, source.Highlight{
-			ExternalID: strconv.Itoa(annotation.ID),
-			Quote:      annotation.Quote,
-			Note:       annotation.Text,
-			CreatedAt:  annotation.CreatedAt.Time,
-			UpdatedAt:  annotation.UpdatedAt.Time,
+			ExternalID:  strconv.Itoa(annotation.ID),
+			Quote:       annotation.Quote,
+			Note:        annotation.Text,
+			HasLocation: len(annotation.Ranges) > 0,
+			CreatedAt:   annotation.CreatedAt.Time,
+			UpdatedAt:   annotation.UpdatedAt.Time,
 		})
 	}
 

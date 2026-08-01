@@ -8,12 +8,13 @@ import (
 
 // Operations increader can push back to a provider.
 const (
-	OpArchive         = "archive"
-	OpStar            = "star"
-	OpTagAdd          = "tag_add"
-	OpTagRemove       = "tag_remove"
-	OpHighlightDelete = "highlight_delete"
-	OpHighlightCreate = "highlight_create"
+	OpArchive                 = "archive"
+	OpStar                    = "star"
+	OpTagAdd                  = "tag_add"
+	OpTagRemove               = "tag_remove"
+	OpHighlightDelete         = "highlight_delete"
+	OpHighlightCreate         = "highlight_create"
+	OpHighlightUpdateLocation = "highlight_update_location"
 )
 
 // maxWriteAttempts caps retries so a write that can never succeed stops
@@ -140,6 +141,24 @@ func (s *Store) SetExternalRef(elementID int64, ref string) error {
 		return fmt.Errorf("store: set external ref on element %d: %w", elementID, err)
 	}
 	return nil
+}
+
+// DocumentExternalID returns the source's own id for the document an element
+// belongs to. Used to resolve OpHighlightUpdateLocation writes, whose own
+// external_id column holds the annotation's id rather than the document's —
+// the same convention OpHighlightDelete uses — so the document id it also
+// needs has to come from somewhere else.
+func (s *Store) DocumentExternalID(elementID int64) (string, error) {
+	var externalID string
+	err := s.db.QueryRow(`
+		SELECT d.external_id FROM elements e
+		JOIN documents d ON d.id = e.document_id
+		WHERE e.id = ?`, elementID,
+	).Scan(&externalID)
+	if err != nil {
+		return "", fmt.Errorf("store: document external id for element %d: %w", elementID, err)
+	}
+	return externalID, nil
 }
 
 // PendingWrites returns queued writes for a source, oldest first.

@@ -847,6 +847,97 @@ func (s *Store) BackfillHighlightPushes(sourceName string) (queued int, err erro
 	return queued, err
 }
 
+// QueueLocationUpdates queues an OpHighlightUpdateLocation write for every
+// local extract whose external_ref appears in locationless — annotations a
+// full listing reports as still having no location for the provider's own
+// reader to draw them at (Highlight.HasLocation false), almost always
+// because they were pushed before increader computed one at all. Whether the
+// extract came from an import or a manual push does not matter: both are,
+// from this point on, indistinguishable — just an extract with a real
+// annotation behind it that the provider cannot currently render.
+//
+// Idempotent: an extract that already has one queued is left alone rather
+// than duplicated, the same guarantee BackfillHighlightPushes gives its own
+// operation, and what makes this safe to run from Reconcile on every pass.
+func (s *Store) QueueLocationUpdates(sourceName string, locationless []string) (queued int, err error) {
+	if len(locationless) == 0 {
+		return 0, nil
+	}
+	err = s.inTransaction(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`CREATE TEMP TABLE locationless_refs (external_ref TEXT PRIMARY KEY)`); err != nil {
+			return fmt.Errorf("store: create temp table: %w", err)
+		}
+		defer tx.Exec(`DROP TABLE locationless_refs`)
+
+		insert, err := tx.Prepare(`INSERT OR IGNORE INTO locationless_refs VALUES (?)`)
+		if err != nil {
+			return fmt.Errorf("store: prepare temp insert: %w", err)
+		}
+		defer insert.Close()
+		for _, ref := range locationless {
+			if _, err := insert.Exec(ref); err != nil {
+				return fmt.Errorf("store: populate temp table: %w", err)
+			}
+		}
+
+		type candidate struct {
+			id            int64
+			quote, oldRef string
+		}
+
+		// Collected into a slice and the Rows closed before any INSERT
+		// below, matching BackfillHighlightPushes: a write attempted while
+		// this SELECT is still open would wait for the connection the loop
+		// itself is holding, with the pool capped at one.
+		candidates, err := func() ([]candidate, error) {
+			rows, err := tx.Query(`
+				SELECT e.id, e.quote, e.external_ref
+				FROM elements e
+				JOIN documents d ON d.id = e.document_id
+				WHERE d.source = ?
+				  AND e.external_ref IN (SELECT external_ref FROM locationless_refs)
+				  AND NOT EXISTS (
+				      SELECT 1 FROM pending_writes pw
+				      WHERE pw.element_id = e.id AND pw.operation = ?
+				  )`,
+				sourceName, OpHighlightUpdateLocation)
+			if err != nil {
+				return nil, fmt.Errorf("store: find extracts needing a location: %w", err)
+			}
+			defer rows.Close()
+
+			var found []candidate
+			for rows.Next() {
+				var c candidate
+				if err := rows.Scan(&c.id, &c.quote, &c.oldRef); err != nil {
+					return nil, fmt.Errorf("store: scan location-update candidate: %w", err)
+				}
+				found = append(found, c)
+			}
+			return found, rows.Err()
+		}()
+		if err != nil {
+			return err
+		}
+
+		for _, c := range candidates {
+			// external_id here is the annotation's own id, the same
+			// convention OpHighlightDelete uses — not the document's, the
+			// way OpHighlightCreate needs it, since this replaces something
+			// that already exists rather than making something new.
+			if _, err := tx.Exec(`
+				INSERT INTO pending_writes (source, external_id, operation, payload, element_id, created_at)
+				VALUES (?, ?, ?, ?, ?, ?)`,
+				sourceName, c.oldRef, OpHighlightUpdateLocation, c.quote, c.id, formatTime(time.Now())); err != nil {
+				return fmt.Errorf("store: queue location update: %w", err)
+			}
+			queued++
+		}
+		return nil
+	})
+	return queued, err
+}
+
 // DeleteExtract permanently removes an extract or item, and everything under
 // it — its own extracts, clozes, and export ledger rows — via the schema's
 // ON DELETE CASCADE. Refuses a root element: deleting a whole article is a
