@@ -377,9 +377,10 @@ func (s *Server) handleBacklog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 0 is valid — it is the "today" preset, for undoing a backlog.
 	days, err := strconv.Atoi(r.FormValue("days"))
-	if err != nil || days < 1 {
-		http.Error(w, "days must be a positive integer", http.StatusBadRequest)
+	if err != nil || days < 0 {
+		http.Error(w, "days must not be negative", http.StatusBadRequest)
 		return
 	}
 

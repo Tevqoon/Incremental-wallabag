@@ -738,16 +738,37 @@ func TestBacklogCapturesReadBlock(t *testing.T) {
 }
 
 // TestBacklogRejectsInvalidDays guards against silently accepting nonsense —
-// a negative or zero day count has no sensible due date to produce.
+// a negative day count has no sensible due date to produce. Zero is not in
+// this list: it is the "today" preset, for undoing a backlog.
 func TestBacklogRejectsInvalidDays(t *testing.T) {
 	server, _, _ := newTestServer(t, true)
 
-	for _, bad := range []string{"-5", "0", "high"} {
+	for _, bad := range []string{"-5", "high"} {
 		if response := post(t, server, "/elements/1/backlog", url.Values{
 			"days": {bad},
 		}); response.Code != http.StatusBadRequest {
 			t.Errorf("days %q: status = %d, want 400", bad, response.Code)
 		}
+	}
+}
+
+// TestBacklogZeroDaysUnschedulesToToday is the reschedule control's "today"
+// option: after backlogging something out and changing your mind, days=0
+// brings it right back into today's queue instead of leaving no way back
+// except grading it.
+func TestBacklogZeroDaysUnschedulesToToday(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	post(t, server, "/elements/1/backlog", url.Values{"days": {"30"}})
+	post(t, server, "/elements/1/backlog", url.Values{"days": {"0"}})
+
+	element, err := db.ElementByID(1)
+	if err != nil {
+		t.Fatalf("ElementByID: %v", err)
+	}
+	today := time.Now().Format("2006-01-02")
+	if element.Schedule.DueOn.Format("2006-01-02") != today {
+		t.Errorf("due_on = %s, want today (%s)", element.Schedule.DueOn, today)
 	}
 }
 

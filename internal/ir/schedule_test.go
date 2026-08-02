@@ -585,6 +585,23 @@ func TestBacklogSetsIntervalAndDueDate(t *testing.T) {
 	}
 }
 
+// TestBacklogZeroDaysIsToday: 0 is the "today" preset, for undoing an
+// earlier backlog — it must land exactly on today, not tomorrow or some
+// rounding artifact, since it is meant to put the element back in reach
+// immediately.
+func TestBacklogZeroDaysIsToday(t *testing.T) {
+	schedule := Schedule{State: StateReading, IntervalDays: 30, AFactor: 2.4, Reps: 3, Priority: 0.3}
+
+	after := Backlog(schedule, 0, today)
+
+	if after.IntervalDays != 0 {
+		t.Errorf("interval = %.1f, want 0", after.IntervalDays)
+	}
+	if !after.DueOn.Equal(Day(today)) {
+		t.Errorf("due = %v, want today (%v)", after.DueOn, Day(today))
+	}
+}
+
 // TestBacklogAppliesToFreshAndGradedElementsAlike: unlike the slider it
 // replaced, a backlog button has no default resting position that could be
 // mistaken for indifference, so it needs no special case for an element that

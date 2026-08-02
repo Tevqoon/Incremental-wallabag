@@ -161,13 +161,15 @@ type BacklogPreset struct {
 	Label string
 }
 
-// BacklogPresets are the choices on the schedule panel, from "barely wait"
-// to "basically shelved" — a fixed menu rather than a continuous slider.
-// A slider's resting position looked identical to a deliberate choice, so a
-// stray drag near the import default silently changed nothing, and a drag
-// away from it jumped by whatever a priority curve implied at that pixel
-// rather than a duration anyone actually asked for.
+// BacklogPresets are the choices on the schedule panel, from "today" (undo
+// a backlog — bring it back into today's queue right now) to "basically
+// shelved" — a fixed menu rather than a continuous slider. A slider's
+// resting position looked identical to a deliberate choice, so a stray drag
+// near the import default silently changed nothing, and a drag away from it
+// jumped by whatever a priority curve implied at that pixel rather than a
+// duration anyone actually asked for.
 var BacklogPresets = []BacklogPreset{
+	{Days: 0, Label: "today"},
 	{Days: 1, Label: "1d"},
 	{Days: 7, Label: "7d"},
 	{Days: 30, Label: "1mo"},
