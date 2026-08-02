@@ -13,7 +13,7 @@ func TestIntervalsGrowByAFactor(t *testing.T) {
 	// A-Factor progression is visible.
 	schedule := Schedule{Priority: 1.0}
 
-	want := []float64{1, 2, 4, 8, 16, 32}
+	want := []float64{30, 60, 120, 240}
 	for repetition, wantInterval := range want {
 		schedule = Next(schedule, GradeNext, today)
 
@@ -30,15 +30,29 @@ func TestIntervalsGrowByAFactor(t *testing.T) {
 	}
 }
 
-func TestFirstRepetitionIsOneDay(t *testing.T) {
+// TestFirstRepetitionIsAMonth: with no history to grow from, Next needs a
+// baseline distinct from Sooner's flat one-day floor, or the two read as the
+// same decision on a topic's very first grade — see firstInterval.
+func TestFirstRepetitionIsAMonth(t *testing.T) {
 	schedule := Next(Schedule{Priority: 1.0}, GradeNext, today)
+
+	if !closeEnough(schedule.IntervalDays, 30) {
+		t.Errorf("interval = %.2f, want 30", schedule.IntervalDays)
+	}
+	want := Day(today).AddDate(0, 0, 30)
+	if !schedule.DueOn.Equal(want) {
+		t.Errorf("due = %v, want %v", schedule.DueOn, want)
+	}
+}
+
+// TestSoonerStaysAFlatDayOnAFreshTopic guards the split TestFirstRepetitionIsAMonth
+// depends on: Sooner never grows past a day just because there is no history
+// yet to halve.
+func TestSoonerStaysAFlatDayOnAFreshTopic(t *testing.T) {
+	schedule := Next(Schedule{Priority: 1.0}, GradeSooner, today)
 
 	if !closeEnough(schedule.IntervalDays, 1) {
 		t.Errorf("interval = %.2f, want 1", schedule.IntervalDays)
-	}
-	want := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
-	if !schedule.DueOn.Equal(want) {
-		t.Errorf("due = %v, want %v", schedule.DueOn, want)
 	}
 }
 

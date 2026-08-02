@@ -65,12 +65,16 @@ const (
 
 // Scheduling constants.
 const (
-	// firstInterval is how long a topic waits after its first pass.
-	firstInterval = 1.0
+	// firstInterval is how long a topic waits after its first pass, before
+	// there is any history to grow from. Kept well clear of Sooner's floor
+	// (always minInterval, one day) so the two buttons read as genuinely
+	// different decisions on a topic's very first grade, rather than both
+	// landing on "tomorrow".
+	firstInterval = 30.0
 
 	// defaultAFactor is the initial interval multiplier. Each repetition
 	// multiplies the interval by the A-Factor, so 2.0 means intervals double:
-	// 1, 2, 4, 8 days and so on.
+	// 30, 60, 120, 240 days and so on, from firstInterval.
 	defaultAFactor = 2.0
 
 	// The A-Factor is clamped. Below ~1.2 a topic barely moves and clogs the
