@@ -138,10 +138,11 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 		"defer":  previews[ir.GradeDefer].Interval,
 	}
 
-	title := element.Title
-	if title == "" {
-		title = document.Title
-	}
+	// The page heading is always the article's own title, not the extract's
+	// stored title: that field is a truncated echo of the passage, which is
+	// already right there in the body below — showing it again as the
+	// heading just repeats it.
+	title := document.Title
 
 	s.render(w, "reader.html", readerData{
 		Title:    title,
