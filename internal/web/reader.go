@@ -66,7 +66,7 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	article, marks, err := s.parseArticle(r.Context(), element)
+	article, marks, imageURLs, err := s.parseArticle(r.Context(), element)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -154,6 +154,7 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 		ArticleHTML: template.HTML(article.Render(ir.RenderOptions{
 			Marks:     marks,
 			ReadPoint: element.ReadBlock,
+			ImageURLs: imageURLs,
 		})),
 		Extracts:     children,
 		Clozes:       clozes,
@@ -227,7 +228,7 @@ func (s *Server) handleExtract(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	article, marks, err := s.parseArticle(r.Context(), parent)
+	article, marks, imageURLs, err := s.parseArticle(r.Context(), parent)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -303,6 +304,7 @@ func (s *Server) handleExtract(w http.ResponseWriter, r *http.Request) {
 	s.writeArticleFragment(w, parent.ID, article.Render(ir.RenderOptions{
 		Marks:     marks,
 		ReadPoint: parent.ReadBlock,
+		ImageURLs: imageURLs,
 	}))
 }
 

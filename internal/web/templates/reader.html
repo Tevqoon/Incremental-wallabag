@@ -184,6 +184,29 @@
     </div>
   </footer>
 </article>
+
+<!-- Self-hosted, like htmx — no CDN dependency, and no per-view leak to one
+     either. Vendored as the single-file SVG-output build specifically: it
+     needs no separate web font files, unlike the CHTML build, so this script
+     tag is the whole dependency.
+
+     Left at its default delimiters ($$...$$, \(...\), \[...\]) rather than
+     also enabling bare $...$: this reader regularly shows financial articles
+     where a lone $ is a currency sign, not a math delimiter, and MathJax
+     itself defaults to leaving single dollars alone for exactly that
+     ambiguity. -->
+<script src="/static/mathjax-tex-svg.js" defer></script>
+<script>
+  // An extract taken from this article re-renders #article in place (see
+  // writeArticleFragment) without a full page load, which is the one case
+  // MathJax's own automatic on-load typesetting never sees.
+  document.body.addEventListener("htmx:afterSwap", function () {
+    var article = document.getElementById("article");
+    if (article && window.MathJax && window.MathJax.typesetPromise) {
+      window.MathJax.typesetPromise([article]);
+    }
+  });
+</script>
 {{end}}
 
 <!-- Its own named template purely for reuse — the previews come from

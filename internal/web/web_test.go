@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -171,6 +173,17 @@ func TestReaderEmitsBlockIndices(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("reader output is missing %s — the browser cannot address blocks without it", want)
 		}
+	}
+}
+
+// TestReaderLoadsMathJax: self-hosted, like every other script this app
+// loads — see the comment beside the script tag in reader.html.
+func TestReaderLoadsMathJax(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	body := get(t, server, "/read/1").Body.String()
+	if !strings.Contains(body, `<script src="/static/mathjax-tex-svg.js" defer></script>`) {
+		t.Error("reader page does not load MathJax")
 	}
 }
 
@@ -939,10 +952,197 @@ func TestSanitizerStripsScripts(t *testing.T) {
 	}
 }
 
+// roundTripFunc adapts a plain function to http.RoundTripper, so a test can
+// stand in for imageClient's transport without a real network call — and,
+// just as importantly, without going through dialPublicOnly, which would
+// refuse an httptest.Server's loopback address regardless of what it serves.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// withFakeImageClient swaps imageClient for the duration of a test, counting
+// requests per URL and answering canned responses. It restores the original
+// client on cleanup, since imageClient is package state shared by every test.
+func withFakeImageClient(t *testing.T, responses map[string]*http.Response) *map[string]int {
+	t.Helper()
+	fetches := map[string]int{}
+
+	original := imageClient
+	imageClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		fetches[r.URL.String()]++
+		if response, ok := responses[r.URL.String()]; ok {
+			return response, nil
+		}
+		return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader(""))}, nil
+	})}
+	t.Cleanup(func() { imageClient = original })
+
+	return &fetches
+}
+
+func imageResponse(contentType, body string) *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": {contentType}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
+
+var localImageSrc = regexp.MustCompile(`src="(/documents/\d+/images/\d+)"`)
+
+// TestArticleImagesAreFetchedAndServedLocally is the point of the whole
+// cache: an article's own page never leaks the original image host to a
+// browser, and the image is actually reachable from where the page says it
+// is.
+func TestArticleImagesAreFetchedAndServedLocally(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+	fetches := withFakeImageClient(t, map[string]*http.Response{
+		"http://images.test/cat.png": imageResponse("image/png", "fake-png-bytes"),
+	})
+
+	if err := db.SetDocumentContent(1,
+		`<p>Before.</p><img src="http://images.test/cat.png" alt="A cat"><p>After.</p>`,
+	); err != nil {
+		t.Fatalf("SetDocumentContent: %v", err)
+	}
+
+	body := get(t, server, "/read/1").Body.String()
+	if strings.Contains(body, "images.test") {
+		t.Errorf("rendered page leaked the original image host:\n%s", body)
+	}
+	if !strings.Contains(body, `alt="A cat"`) {
+		t.Errorf("rendered page is missing the image:\n%s", body)
+	}
+
+	match := localImageSrc.FindStringSubmatch(body)
+	if match == nil {
+		t.Fatalf("no local image URL found in:\n%s", body)
+	}
+
+	image := get(t, server, match[1])
+	if image.Code != http.StatusOK {
+		t.Fatalf("%s: status = %d, want 200", match[1], image.Code)
+	}
+	if got := image.Body.String(); got != "fake-png-bytes" {
+		t.Errorf("%s: body = %q, want %q", match[1], got, "fake-png-bytes")
+	}
+	if got := image.Header().Get("Content-Type"); got != "image/png" {
+		t.Errorf("%s: Content-Type = %q, want image/png", match[1], got)
+	}
+	if !strings.Contains(image.Header().Get("Cache-Control"), "immutable") {
+		t.Errorf("%s: Cache-Control = %q, want a long-lived, immutable value",
+			match[1], image.Header().Get("Cache-Control"))
+	}
+
+	// A second read must not fetch the image again — that is the entire
+	// point of caching it.
+	get(t, server, "/read/1")
+	if got := (*fetches)["http://images.test/cat.png"]; got != 1 {
+		t.Errorf("image was fetched %d times, want exactly 1", got)
+	}
+}
+
+// TestFailedImageFetchIsCachedTooAndOmitted: a broken image link must not
+// break the page, and must not be retried on every single render either —
+// see store.DocumentImage.OK.
+func TestFailedImageFetchIsCachedTooAndOmitted(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+	fetches := withFakeImageClient(t, map[string]*http.Response{
+		// deliberately no entry for the URL below — every request 404s
+	})
+
+	if err := db.SetDocumentContent(1,
+		`<p>Before.</p><img src="http://images.test/gone.png" alt="Gone"><p>After.</p>`,
+	); err != nil {
+		t.Fatalf("SetDocumentContent: %v", err)
+	}
+
+	body := get(t, server, "/read/1").Body.String()
+	if strings.Contains(body, "<img") {
+		t.Errorf("a failed image fetch still rendered an <img>:\n%s", body)
+	}
+	if !strings.Contains(body, "Before.") || !strings.Contains(body, "After.") {
+		t.Errorf("a failed image fetch broke the rest of the page:\n%s", body)
+	}
+
+	get(t, server, "/read/1")
+	if got := (*fetches)["http://images.test/gone.png"]; got != 1 {
+		t.Errorf("a failed fetch was retried %d times, want exactly 1", got)
+	}
+}
+
+// TestArticleImageWithDisallowedContentTypeIsRejected: a URL that answers
+// with something other than an image — a redirect chain ending on an HTML
+// login page is the realistic case — must not be cached and served back as
+// if it were one.
+func TestArticleImageWithDisallowedContentTypeIsRejected(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+	withFakeImageClient(t, map[string]*http.Response{
+		"http://images.test/not-an-image": imageResponse("text/html", "<html>nope</html>"),
+	})
+
+	if err := db.SetDocumentContent(1,
+		`<img src="http://images.test/not-an-image" alt="Nope">`,
+	); err != nil {
+		t.Fatalf("SetDocumentContent: %v", err)
+	}
+
+	body := get(t, server, "/read/1").Body.String()
+	if strings.Contains(body, "<img") {
+		t.Errorf("a non-image response was rendered as an image:\n%s", body)
+	}
+}
+
+// TestIsDisallowedHost guards the SSRF check dialPublicOnly applies to every
+// image fetch and every redirect it follows. An article is untrusted
+// content; this is what stops it from turning increader into a probe
+// against its own Tailscale network or its own host.
+func TestIsDisallowedHost(t *testing.T) {
+	tests := []struct {
+		name string
+		ip   string
+		want bool
+	}{
+		{"loopback v4", "127.0.0.1", true},
+		{"loopback v6", "::1", true},
+		{"private RFC 1918", "192.168.1.1", true},
+		{"private RFC 1918 10/8", "10.0.0.5", true},
+		{"link-local", "169.254.1.1", true},
+		{"unspecified", "0.0.0.0", true},
+		{"tailscale / CGNAT range", "100.64.0.1", true},
+		{"tailscale / CGNAT range, high end", "100.127.255.254", true},
+		{"a real public address", "93.184.216.34", false},
+		{"just outside the CGNAT range", "100.63.255.255", false},
+		{"just past the CGNAT range", "100.128.0.0", false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ip := net.ParseIP(test.ip)
+			if ip == nil {
+				t.Fatalf("test premise is wrong: %q does not parse as an IP", test.ip)
+			}
+			if got := isDisallowedHost(ip); got != test.want {
+				t.Errorf("isDisallowedHost(%s) = %v, want %v", test.ip, got, test.want)
+			}
+		})
+	}
+}
+
+// TestFetchImageRejectsNonHTTPSchemes guards against an article's <img src>
+// pointing at something other than the web — file:// most importantly, which
+// would otherwise let an article read the server's own filesystem.
+func TestFetchImageRejectsNonHTTPSchemes(t *testing.T) {
+	for _, scheme := range []string{"file:///etc/passwd", "ftp://example.com/x", "javascript:alert(1)"} {
+		if _, _, err := fetchImage(context.Background(), scheme); err == nil {
+			t.Errorf("fetchImage(%q) succeeded, want an error", scheme)
+		}
+	}
+}
+
 func TestStaticAssetsAreServed(t *testing.T) {
 	server, _, _ := newTestServer(t, true)
 
-	for _, path := range []string{"/static/htmx.min.js", "/static/app.js", "/static/app.css"} {
+	for _, path := range []string{"/static/htmx.min.js", "/static/app.js", "/static/app.css", "/static/mathjax-tex-svg.js"} {
 		response := get(t, server, path)
 		if response.Code != http.StatusOK {
 			t.Errorf("%s: status = %d, want 200", path, response.Code)

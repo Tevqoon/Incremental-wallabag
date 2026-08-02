@@ -167,6 +167,12 @@ h1 { font-size: 1.5rem; line-height: 1.25; margin: 0 0 0.35rem; }
 
 #article img { max-width: 100%; height: auto; }
 
+/* One image, centred, no caption — see ir.Image. A figcaption next to it in
+   the source becomes its own ordinary block, not a child of this element, so
+   nothing caption-specific belongs here. */
+#article .article-image { text-align: center; }
+#article .article-image img { border-radius: 3px; }
+
 #article a { color: var(--accent); }
 
 /* Blocks that were list items before the reader flattened the article. */

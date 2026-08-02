@@ -124,6 +124,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /next", s.handleNext)
 	mux.HandleFunc("GET /library", s.handleLibrary)
 	mux.HandleFunc("DELETE /documents/{id}", s.handleDeleteDocument)
+	mux.HandleFunc("GET /documents/{id}/images/{imageID}", s.handleDocumentImage)
 	mux.HandleFunc("GET /extracts", s.handleExtracts)
 	mux.HandleFunc("GET /read/{id}", s.handleRead)
 
@@ -408,22 +409,23 @@ func (s *Server) importHighlights(element store.Element, sanitizedHTML string, h
 	return nil
 }
 
-// parseArticle sanitises, parses and returns an element's article together with
-// the marks for extracts already taken from it.
-func (s *Server) parseArticle(ctx context.Context, element store.Element) (*ir.Article, []ir.Mark, error) {
+// parseArticle sanitises, parses and returns an element's article together
+// with the marks for extracts already taken from it, and a resolved local
+// URL for each image it contains — see resolveImages.
+func (s *Server) parseArticle(ctx context.Context, element store.Element) (*ir.Article, []ir.Mark, map[string]string, error) {
 	sanitized, err := s.articleHTML(ctx, element)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	article, err := ir.ParseArticle(sanitized)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	children, err := s.store.ChildrenOf(element.ID)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	marks := make([]ir.Mark, 0, len(children))
@@ -433,7 +435,9 @@ func (s *Server) parseArticle(ctx context.Context, element store.Element) (*ir.A
 		}
 	}
 
-	return article, marks, nil
+	imageURLs := s.resolveImages(ctx, element.DocumentID, article.Images())
+
+	return article, marks, imageURLs, nil
 }
 
 // templateFuncs are the helpers available inside templates.

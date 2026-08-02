@@ -658,6 +658,84 @@ func TestExtractsSort(t *testing.T) {
 	assertOrder(t, "oldest", []int64{soon, far, mid})
 }
 
+// TestDocumentImageCacheRoundTrip covers both outcomes an image fetch can
+// have — see DocumentImage.OK — and that re-saving the same (document, url)
+// pair updates in place rather than accumulating duplicate rows, since a
+// re-fetched or corrected image should replace what was cached before.
+func TestDocumentImageCacheRoundTrip(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
+		ExternalID: "1", Title: "Has pictures", UpdatedAt: now,
+	}}, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	if _, found, err := db.CachedImage(1, "https://example.com/cat.png"); err != nil {
+		t.Fatalf("CachedImage before any save: %v", err)
+	} else if found {
+		t.Fatalf("CachedImage before any save: found = true, want false")
+	}
+
+	id, err := db.SaveDocumentImage(1, "https://example.com/cat.png", "image/png", []byte("bytes"), true, now)
+	if err != nil {
+		t.Fatalf("SaveDocumentImage: %v", err)
+	}
+
+	byURL, found, err := db.CachedImage(1, "https://example.com/cat.png")
+	if err != nil || !found {
+		t.Fatalf("CachedImage after save: found=%v err=%v", found, err)
+	}
+	if byURL.ID != id || byURL.ContentType != "image/png" || string(byURL.Data) != "bytes" || !byURL.OK {
+		t.Errorf("CachedImage after save = %+v", byURL)
+	}
+
+	byID, err := db.DocumentImageByID(id)
+	if err != nil {
+		t.Fatalf("DocumentImageByID: %v", err)
+	}
+	if byID.ID != byURL.ID || byID.URL != byURL.URL || byID.ContentType != byURL.ContentType ||
+		string(byID.Data) != string(byURL.Data) || byID.OK != byURL.OK {
+		t.Errorf("DocumentImageByID = %+v, want %+v", byID, byURL)
+	}
+
+	// A failed fetch is cached too, with no data, so it is not retried on
+	// every render — see resolveImages in the web package.
+	failedID, err := db.SaveDocumentImage(1, "https://example.com/broken.png", "", nil, false, now)
+	if err != nil {
+		t.Fatalf("SaveDocumentImage (failure): %v", err)
+	}
+	failed, found, err := db.CachedImage(1, "https://example.com/broken.png")
+	if err != nil || !found {
+		t.Fatalf("CachedImage (failure): found=%v err=%v", found, err)
+	}
+	if failed.OK || failed.ID != failedID {
+		t.Errorf("CachedImage (failure) = %+v, want OK=false, ID=%d", failed, failedID)
+	}
+
+	// Re-saving the same (document, url) updates the existing row rather
+	// than inserting a second one for it.
+	updatedID, err := db.SaveDocumentImage(1, "https://example.com/cat.png", "image/webp", []byte("new-bytes"), true, now)
+	if err != nil {
+		t.Fatalf("SaveDocumentImage (update): %v", err)
+	}
+	if updatedID != id {
+		t.Errorf("re-saving the same URL got a new id %d, want the original %d", updatedID, id)
+	}
+	updated, _, err := db.CachedImage(1, "https://example.com/cat.png")
+	if err != nil {
+		t.Fatalf("CachedImage after update: %v", err)
+	}
+	if updated.ContentType != "image/webp" || string(updated.Data) != "new-bytes" {
+		t.Errorf("CachedImage after update = %+v, want the new content", updated)
+	}
+
+	if _, err := db.DocumentImageByID(999); !errors.Is(err, ErrNotFound) {
+		t.Errorf("DocumentImageByID(999) = %v, want ErrNotFound", err)
+	}
+}
+
 // TestQueueInterleavesArticlesAndExtracts guards the tie-break. Everything
 // starts at the same default priority, so ordering by id alone would put every
 // article ahead of every extract and you would never reach an extract until the

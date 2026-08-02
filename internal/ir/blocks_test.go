@@ -306,3 +306,126 @@ func TestParseArticleHandlesEmptyInput(t *testing.T) {
 		}
 	}
 }
+
+func TestImageCollection(t *testing.T) {
+	tests := []struct {
+		name string
+		html string
+		want []Image
+	}{
+		{
+			name: "a bare image between paragraphs trails the one before it",
+			html: `<p>First.</p><img src="a.png" alt="A"><p>Second.</p>`,
+			want: []Image{{AfterBlock: 0, Src: "a.png", Alt: "A"}},
+		},
+		{
+			name: "an image before the first block has no block to trail",
+			html: `<img src="a.png" alt="A"><p>First.</p>`,
+			want: []Image{{AfterBlock: -1, Src: "a.png", Alt: "A"}},
+		},
+		{
+			name: "a figure with a caption: the image precedes its own caption block",
+			html: `<p>First.</p><figure><img src="a.png" alt="A"><figcaption>Caption.</figcaption></figure>`,
+			want: []Image{{AfterBlock: 0, Src: "a.png", Alt: "A"}},
+		},
+		{
+			name: "a captionless figure between paragraphs",
+			html: `<p>First.</p><figure><img src="a.png" alt="A"></figure><p>Second.</p>`,
+			want: []Image{{AfterBlock: 0, Src: "a.png", Alt: "A"}},
+		},
+		{
+			name: "several images in document order",
+			html: `<img src="a.png"><p>First.</p><img src="b.png"><img src="c.png">`,
+			want: []Image{
+				{AfterBlock: -1, Src: "a.png"},
+				{AfterBlock: 0, Src: "b.png"},
+				{AfterBlock: 0, Src: "c.png"},
+			},
+		},
+		{
+			name: "no images",
+			html: `<p>Just text.</p>`,
+			want: nil,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			article := mustParse(t, test.html)
+			got := article.Images()
+			if len(got) != len(test.want) {
+				t.Fatalf("Images() = %+v, want %+v", got, test.want)
+			}
+			for i := range test.want {
+				if got[i] != test.want[i] {
+					t.Errorf("image %d = %+v, want %+v", i, got[i], test.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestImagesAreNotBlocks: a figure caption still becomes its own addressable
+// block — captions are readable text — but the image beside it must never
+// silently turn into one too, or an extract's block/offset addressing would
+// disagree with itself between renders.
+func TestImagesAreNotBlocks(t *testing.T) {
+	article := mustParse(t, `<figure><img src="a.png"><figcaption>Caption.</figcaption></figure>`)
+
+	blocks := article.Blocks()
+	if len(blocks) != 1 || blocks[0].Text != "Caption." {
+		t.Fatalf("Blocks() = %+v, want exactly one block, the caption", blocks)
+	}
+}
+
+// TestRenderSkipsUnresolvedImages: an image with no entry in ImageURLs is
+// omitted entirely rather than rendered with its original address — falling
+// back would defeat the point of resolving images server-side in the first
+// place, see RenderOptions.ImageURLs.
+func TestRenderSkipsUnresolvedImages(t *testing.T) {
+	article := mustParse(t, `<p>First.</p><img src="a.png" alt="A">`)
+
+	out := article.Render(RenderOptions{ReadPoint: NoReadPoint})
+	if strings.Contains(out, "<img") {
+		t.Errorf("an unresolved image was rendered anyway:\n%s", out)
+	}
+}
+
+// TestRenderEmitsResolvedImages checks both that a resolved image renders at
+// all, and that it lands after the block it trailed rather than at some
+// arbitrary position.
+func TestRenderEmitsResolvedImages(t *testing.T) {
+	article := mustParse(t, `<p>First.</p><img src="a.png" alt="A caption"><p>Second.</p>`)
+
+	out := article.Render(RenderOptions{
+		ReadPoint: NoReadPoint,
+		ImageURLs: map[string]string{"a.png": "/documents/1/images/1"},
+	})
+
+	firstEnd := strings.Index(out, `data-b="0">First.</p>`)
+	imgAt := strings.Index(out, `<img src="/documents/1/images/1" alt="A caption"`)
+	secondAt := strings.Index(out, `data-b="1">Second.`)
+	if firstEnd == -1 || imgAt == -1 || secondAt == -1 {
+		t.Fatalf("render did not contain the expected pieces:\n%s", out)
+	}
+	if !(firstEnd < imgAt && imgAt < secondAt) {
+		t.Errorf("image did not land between the two blocks it sits between:\n%s", out)
+	}
+}
+
+// TestRenderEscapesImageAttributes: alt text and a resolved src both come
+// from outside increader (the article, and this package's own caller,
+// respectively), so both are re-escaped here rather than trusted — the same
+// defence-in-depth openTag already applies to link hrefs.
+func TestRenderEscapesImageAttributes(t *testing.T) {
+	article := mustParse(t, `<img src="a.png" alt="&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;">`)
+
+	out := article.Render(RenderOptions{
+		ReadPoint: NoReadPoint,
+		ImageURLs: map[string]string{"a.png": `x" onerror="alert(1)`},
+	})
+
+	if strings.Contains(out, "<script>") || strings.Contains(out, `onerror="alert`) {
+		t.Errorf("image attributes were not escaped:\n%s", out)
+	}
+}

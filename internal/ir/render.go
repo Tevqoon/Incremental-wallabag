@@ -32,10 +32,19 @@ type RenderOptions struct {
 	// read point on return rather than only scrolling to it, and being able to
 	// see the boundary between read and unread is most of its value.
 	ReadPoint int
+
+	// ImageURLs resolves an Image's original Src to somewhere safe to load it
+	// from — this package has no I/O, so it never fetches or rewrites a URL
+	// itself; the caller resolves every image up front and hands back this
+	// map. An image whose Src has no entry here is skipped entirely rather
+	// than rendered with its original URL, which would defeat the point of
+	// resolving it in the first place — see the web package's image cache.
+	ImageURLs map[string]string
 }
 
 // Render produces the reader view: every block as a top-level element carrying
-// its index in a data-b attribute, with existing extracts wrapped in <mark>.
+// its index in a data-b attribute, with existing extracts wrapped in <mark>,
+// and any images interleaved at the position they held in the article.
 //
 // The data-b attributes are the contract with the browser. Client-side, a
 // selection is reported as the enclosing block's data-b plus a character offset
@@ -43,8 +52,13 @@ type RenderOptions struct {
 // exactly the same enumeration. Nothing else needs to agree between the two.
 func (a *Article) Render(options RenderOptions) string {
 	windows := a.windowsByBlock(options.Marks)
+	imagesAfter := a.imagesByBlock()
 
 	var out strings.Builder
+	for _, image := range imagesAfter[-1] {
+		renderImage(image, options.ImageURLs, &out)
+	}
+
 	for _, block := range a.blocks {
 		tag, class := renderTag(block.node)
 
@@ -66,8 +80,38 @@ func (a *Article) Render(options RenderOptions) string {
 		}
 
 		out.WriteString("</" + tag + ">")
+
+		for _, image := range imagesAfter[block.Index] {
+			renderImage(image, options.ImageURLs, &out)
+		}
 	}
 	return out.String()
+}
+
+// imagesByBlock groups the article's images by the block they trail, so
+// Render can look up "what comes right after block N" (or before the first
+// block, for -1) in one map access per position instead of scanning the
+// whole list at every block.
+func (a *Article) imagesByBlock() map[int][]Image {
+	byBlock := make(map[int][]Image, len(a.images))
+	for _, image := range a.images {
+		byBlock[image.AfterBlock] = append(byBlock[image.AfterBlock], image)
+	}
+	return byBlock
+}
+
+// renderImage writes one image, if it resolved to somewhere safe to load —
+// see RenderOptions.ImageURLs. An unresolved image is skipped rather than
+// rendered with its original URL: falling back would defeat the point of
+// resolving it server-side in the first place.
+func renderImage(image Image, resolved map[string]string, out *strings.Builder) {
+	src, ok := resolved[image.Src]
+	if !ok || src == "" {
+		return
+	}
+	out.WriteString(`<figure class="article-image"><img src="` + html.EscapeString(src) + `" alt="`)
+	out.WriteString(html.EscapeString(image.Alt))
+	out.WriteString(`" loading="lazy"></figure>`)
 }
 
 // window is a highlighted span within a single block.

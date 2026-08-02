@@ -56,6 +56,22 @@ type Block struct {
 	node *html.Node
 }
 
+// Image is a decorative picture found in the article, positioned relative to
+// the block sequence but not part of it.
+//
+// It carries no text and cannot be selected, highlighted or extracted — an
+// image is not addressable the way a Block is, it only has somewhere to
+// render. Src is deliberately the *original* URL from the sanitised HTML,
+// unresolved: this package has no I/O, so turning it into something a
+// browser should actually load is the caller's job — see RenderOptions.
+type Image struct {
+	// AfterBlock is the index of the block this image follows in document
+	// order, or -1 if it appears before the article's first block.
+	AfterBlock int
+	Src        string
+	Alt        string
+}
+
 // Article is a parsed, addressable article.
 //
 // Construct it from the *sanitised* HTML, never the raw source. Sanitising
@@ -66,6 +82,7 @@ type Block struct {
 type Article struct {
 	root   *html.Node
 	blocks []Block
+	images []Image
 }
 
 // ParseArticle parses sanitised article HTML and enumerates its blocks.
@@ -76,19 +93,32 @@ func ParseArticle(sanitizedHTML string) (*Article, error) {
 	}
 
 	article := &Article{root: root}
-	collectBlocks(root, &article.blocks)
+	collectBlocks(root, &article.blocks, &article.images)
 	return article, nil
 }
 
 // collectBlocks walks the tree in document order, emitting one block per
 // "leaf block" element: one that is a block tag and contains no block tag.
+// Alongside that, every <img> anywhere in the tree is collected too, tagged
+// with the block it trails — see Image.
 //
 // It reports whether the subtree produced any block, which is what lets a
 // parent skip emitting itself when its children already covered the text.
-func collectBlocks(node *html.Node, out *[]Block) bool {
+func collectBlocks(node *html.Node, out *[]Block, images *[]Image) bool {
 	emitted := false
 	for child := node.FirstChild; child != nil; child = child.NextSibling {
-		if child.Type == html.ElementNode && collectBlocks(child, out) {
+		if child.Type != html.ElementNode {
+			continue
+		}
+		if child.DataAtom == atom.Img {
+			*images = append(*images, Image{
+				AfterBlock: len(*out) - 1,
+				Src:        attr(child, "src"),
+				Alt:        attr(child, "alt"),
+			})
+			continue
+		}
+		if collectBlocks(child, out, images) {
 			emitted = true
 		}
 	}
@@ -111,8 +141,22 @@ func collectBlocks(node *html.Node, out *[]Block) bool {
 	return true
 }
 
+// attr reads one attribute's value, or "" if the node does not carry it.
+func attr(node *html.Node, key string) string {
+	for _, attribute := range node.Attr {
+		if attribute.Key == key {
+			return attribute.Val
+		}
+	}
+	return ""
+}
+
 // Blocks returns the article's blocks in document order.
 func (a *Article) Blocks() []Block { return a.blocks }
+
+// Images returns the article's images, in document order, unresolved — see
+// Image.
+func (a *Article) Images() []Image { return a.images }
 
 // textContent concatenates every descendant text node, exactly as the DOM
 // property of the same name does.
