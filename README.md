@@ -1,3 +1,6 @@
+# SLOP WARNING
+This is vibecoded slop solving a particular problem of mine. Should be fine since it's mostly an alternative frontend, but still.
+
 # increader
 
 A self-hosted incremental reader for [wallabag](https://wallabag.org), in the
