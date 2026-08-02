@@ -229,6 +229,11 @@ func (s *Server) archiveUpstream(element store.Element, archived bool) error {
 // The counterpart to suspending, and also how an archived article is pulled
 // back in for re-reading — archived material arrives suspended, so there is
 // only one mechanism to understand.
+//
+// Defaults to landing back on the reader, same as pressing the button there
+// does, but honours redirect the same way handleBacklog does — the library's
+// "queue it" sends its own current URL, so unsuspending a row from a filtered
+// list stays on that list instead of jumping into the article.
 func (s *Server) handleUnsuspend(w http.ResponseWriter, r *http.Request) {
 	id, err := elementID(r)
 	if err != nil {
@@ -257,7 +262,7 @@ func (s *Server) handleUnsuspend(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	s.redirect(w, r, "/read/"+strconv.FormatInt(id, 10))
+	s.redirect(w, r, redirectTarget(r, "/read/"+strconv.FormatInt(id, 10)))
 }
 
 // handleStar toggles wallabag's favourite flag on an article.
@@ -518,7 +523,7 @@ func (s *Server) handleLibrary(w http.ResponseWriter, r *http.Request) {
 		Tag:   query.Get("tag"),
 	}
 	switch filter.State {
-	case "", "unread", "starred", "archived", "annotated", "missing", "scheduled":
+	case "", "unread", "starred", "archived", "annotated", "missing", "scheduled", "suspended", "done":
 	default:
 		http.Error(w, "unknown state filter", http.StatusBadRequest)
 		return

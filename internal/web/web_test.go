@@ -1677,6 +1677,47 @@ func TestSuspendAndUnsuspend(t *testing.T) {
 	}
 }
 
+// TestUnsuspendRedirectsToGivenTarget is what lets the library's "queue it"
+// button stay on whatever filtered list it was clicked from instead of
+// jumping into the reader — the same redirect mechanism handleBacklog offers,
+// applied to unsuspending too.
+func TestUnsuspendRedirectsToGivenTarget(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if err := db.Suspend(1, time.Now()); err != nil {
+		t.Fatalf("seed suspend: %v", err)
+	}
+
+	response := post(t, server, "/elements/1/unsuspend", url.Values{
+		"redirect": {"/library?state=suspended"},
+	})
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", response.Code)
+	}
+	if got := response.Header().Get("Location"); got != "/library?state=suspended" {
+		t.Errorf("Location = %q, want /library?state=suspended", got)
+	}
+}
+
+// TestUnsuspendDefaultsToTheReader: with no redirect given — the reader's own
+// "put back in the queue" button never sends one — unsuspending lands back on
+// the article, same as before redirect existed.
+func TestUnsuspendDefaultsToTheReader(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if err := db.Suspend(1, time.Now()); err != nil {
+		t.Fatalf("seed suspend: %v", err)
+	}
+
+	response := post(t, server, "/elements/1/unsuspend", nil)
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", response.Code)
+	}
+	if got := response.Header().Get("Location"); got != "/read/1" {
+		t.Errorf("Location = %q, want /read/1", got)
+	}
+}
+
 // TestArchivedArticleIsNotQueuedButIsReadable is the whole point of syncing
 // wallabag's archive flag.
 func TestArchivedArticleIsNotQueuedButIsReadable(t *testing.T) {
@@ -2102,6 +2143,58 @@ func TestLibraryScheduledFilterFindsGradedArticles(t *testing.T) {
 	near := strings.Index(body, "Backlogged not as far")
 	if far == -1 || near == -1 || far > near {
 		t.Error("scheduled filter is not sorted furthest due date first")
+	}
+}
+
+// TestLibrarySuspendedAndDoneFilters: "suspended" is the parked backlog worth
+// going back through — most of it archived somewhere else and never touched
+// here — while "done" is what has actually been worked through and graded in
+// increader. An article archived upstream but not yet opened here should show
+// up as suspended, not done; only grading it moves it across.
+func TestLibrarySuspendedAndDoneFilters(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "2", Title: "Archived elsewhere, untouched here", IsArchived: true, UpdatedAt: time.Now()},
+		{ExternalID: "3", Title: "Never archived", UpdatedAt: time.Now()},
+	}, 0, time.Now()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Element 1 is the still-unread article newTestServer seeds; grade it
+	// Done to land it in the "done" bucket.
+	if response := post(t, server, "/elements/1/grade", url.Values{"grade": {"done"}}); response.Code != http.StatusSeeOther {
+		t.Fatalf("grade done: status = %d", response.Code)
+	}
+
+	suspended := get(t, server, "/library?state=suspended").Body.String()
+	if !strings.Contains(suspended, "Archived elsewhere, untouched here") {
+		t.Errorf("suspended filter is missing the freshly imported archive:\n%s", suspended)
+	}
+	if strings.Contains(suspended, "Never archived") {
+		t.Error("suspended filter included an article still in circulation")
+	}
+	if strings.Contains(suspended, "A test article") {
+		t.Error("suspended filter included an article graded done, not suspended")
+	}
+
+	done := get(t, server, "/library?state=done").Body.String()
+	if !strings.Contains(done, "A test article") {
+		t.Errorf("done filter is missing the article graded done:\n%s", done)
+	}
+	if strings.Contains(done, "Archived elsewhere, untouched here") {
+		t.Error("done filter included a suspended article that was never graded here")
+	}
+
+	counts, err := db.CountByState("wallabag", time.Now())
+	if err != nil {
+		t.Fatalf("CountByState: %v", err)
+	}
+	if counts["suspended"] != 1 {
+		t.Errorf("suspended count = %d, want 1", counts["suspended"])
+	}
+	if counts["done"] != 1 {
+		t.Errorf("done count = %d, want 1", counts["done"])
 	}
 }
 
