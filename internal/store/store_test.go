@@ -649,6 +649,115 @@ func TestQueueInterleavesProportionallyByCount(t *testing.T) {
 	}
 }
 
+// TestQueueRankIsStableAcrossRemovals guards the actual bug report: grading
+// one extract away used to shrink the denominator for every other extract's
+// fair-interleave fraction, which could jump an unrelated, untouched extract
+// across an article that never moved — reordering the queue for a reason
+// that had nothing to do with that extract. queue_rank is assigned once, on
+// first becoming due, and reading the queue again must not disturb it.
+func TestQueueRankIsStableAcrossRemovals(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	highlights := make([]source.Highlight, 0, 7)
+	for i := 1; i <= 7; i++ {
+		highlights = append(highlights, source.Highlight{
+			ExternalID: "h" + strconv.Itoa(i),
+			Quote:      "Highlight " + strconv.Itoa(i),
+			UpdatedAt:  now,
+		})
+	}
+	documents := []source.Document{
+		{ExternalID: "1", Title: "Article 1", UpdatedAt: now},
+		{ExternalID: "2", Title: "Article 2", UpdatedAt: now},
+		{ExternalID: "3", Title: "Annotated article", UpdatedAt: now, Highlights: highlights, IsArchived: true},
+	}
+	if _, err := db.UpsertDocuments("wallabag", documents, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	before, err := db.Queue(now, 30)
+	if err != nil {
+		t.Fatalf("Queue: %v", err)
+	}
+	if len(before) != 9 {
+		t.Fatalf("got %d queued, want 9 (2 articles + 7 highlights)", len(before))
+	}
+
+	// Record, for every extract, whether each article was ahead of or behind
+	// it — the relationship the fix must preserve.
+	type relation struct {
+		articleID, extractID int64
+		extractFirst         bool
+	}
+	var articleIDs []int64
+	for _, item := range before {
+		if item.IsRoot() {
+			articleIDs = append(articleIDs, item.ID)
+		}
+	}
+	order := func(queue []QueueItem) map[int64]int {
+		positions := make(map[int64]int, len(queue))
+		for i, item := range queue {
+			positions[item.ID] = i
+		}
+		return positions
+	}
+	beforePositions := order(before)
+	var relations []relation
+	for _, item := range before {
+		if item.IsRoot() {
+			continue
+		}
+		for _, articleID := range articleIDs {
+			relations = append(relations, relation{
+				articleID: articleID, extractID: item.ID,
+				extractFirst: beforePositions[item.ID] < beforePositions[articleID],
+			})
+		}
+	}
+
+	// Grade away the first-ranked extract — the one furthest toward the
+	// front — exactly like pressing "Next" on the top item in the queue.
+	var firstExtract Element
+	for _, item := range before {
+		if !item.IsRoot() {
+			firstExtract = item.Element
+			break
+		}
+	}
+	graded := ir.Next(firstExtract.Schedule, ir.GradeNext, now)
+	if err := db.SaveSchedule(firstExtract.ID, graded, now); err != nil {
+		t.Fatalf("SaveSchedule: %v", err)
+	}
+
+	after, err := db.Queue(now, 30)
+	if err != nil {
+		t.Fatalf("Queue (after grading): %v", err)
+	}
+	if len(after) != 8 {
+		t.Fatalf("got %d queued after grading, want 8", len(after))
+	}
+	for _, item := range after {
+		if item.ID == firstExtract.ID {
+			t.Fatalf("graded extract %d is still in the queue", firstExtract.ID)
+		}
+	}
+
+	afterPositions := order(after)
+	for _, rel := range relations {
+		if rel.extractID == firstExtract.ID {
+			continue // the one element that is supposed to be gone
+		}
+		nowExtractFirst := afterPositions[rel.extractID] < afterPositions[rel.articleID]
+		if nowExtractFirst != rel.extractFirst {
+			t.Errorf("extract %d vs article %d: was extractFirst=%v, now extractFirst=%v — "+
+				"an untouched extract crossed an article just from a different extract leaving the queue",
+				rel.extractID, rel.articleID, rel.extractFirst, nowExtractFirst)
+		}
+	}
+}
+
 // TestWriteIsQueuedWithTheLocalChange is the guarantee the outbox exists for:
 // the local state and the intent to publish it commit together, so they cannot
 // disagree.

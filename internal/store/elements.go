@@ -174,52 +174,33 @@ func (n nullableElement) apply(element *Element) {
 
 // Queue returns the elements due on the given day, most important first.
 //
-// This is the whole scheduling read path: one ordered query. Because topics and
-// items live in the same table, articles and extracts interleave with no
-// merging step — which is exactly SuperMemo's behaviour and the reason the
-// schema unifies them.
+// This is the whole scheduling read path. Because topics and items live in
+// the same table, articles and extracts interleave with no merging step —
+// which is exactly SuperMemo's behaviour and the reason the schema unifies
+// them.
 //
-// Within the day, root articles (parent_id NULL) and everything taken from one
-// — extracts and clozes alike — are interleaved fairly rather than sorted into
-// two blocks: each row gets a fractional position — (rank within its group -
-// 0.5) / size of that group, both among what's due today — and rows are merged
-// by that position. This spreads the rarer group evenly through the more
-// common one in proportion to whatever is actually due, instead of a fixed
-// ratio that would either flood the queue with extracts when few are due or
-// bury them when many are. Priority (and, tied on that, due date, then a hash)
-// only decides rank inside a group — see importedPriority for why that still
-// keeps an imported backlog from swamping the front of that group's rank
-// order.
-//
-// The hash is a multiplicative scramble of the id rather than the id itself.
-// Within one group, items sharing a priority — a batch of highlights imported
-// together, say — would otherwise sort by insertion order, which groups the
-// oldest imports first. The hash scatters them while staying deterministic, so
-// the queue does not reshuffle itself between page loads.
+// The ordering itself lives in queue_rank, a column rather than a computed
+// value — see assignQueueRanks for why. Here it is just one more ORDER BY
+// term, alongside priority, due date and a hash as tie-breaks for whatever
+// (rarely) shares a rank.
 //
 // Anything buried today sorts behind everything else still due, so working
 // through the rest of the queue brings it back around rather than losing it for
 // the day.
 func (s *Store) Queue(day time.Time, limit int) ([]QueueItem, error) {
+	if err := s.assignQueueRanks(day); err != nil {
+		return nil, err
+	}
+
 	rows, err := s.db.Query(`
-		WITH due AS (
-			SELECT `+elementColumns+`, d.title AS doc_title, d.url AS doc_url,
-			       d.reading_time AS doc_reading_time,
-			       ROW_NUMBER() OVER (
-			           PARTITION BY (e.parent_id IS NULL)
-			           ORDER BY e.priority ASC, e.due_on ASC,
-			                    (e.id * 2654435761) % 1000003 ASC
-			       ) AS kind_rank,
-			       COUNT(*) OVER (PARTITION BY (e.parent_id IS NULL)) AS kind_count
-			FROM elements e
-			JOIN documents d ON d.id = e.document_id
-			WHERE e.state NOT IN ('done', 'dismissed', 'suspended')
-			  AND (e.due_on IS NULL OR e.due_on <= ?)
-		)
-		SELECT * FROM due
-		ORDER BY (CASE WHEN buried_on = ? THEN 1 ELSE 0 END) ASC,
-		         (CAST(kind_rank AS REAL) - 0.5) / kind_count ASC,
-		         priority ASC, due_on ASC, (id * 2654435761) % 1000003 ASC
+		SELECT `+elementColumns+`, d.title, d.url, d.reading_time
+		FROM elements e
+		JOIN documents d ON d.id = e.document_id
+		WHERE e.state NOT IN ('done', 'dismissed', 'suspended')
+		  AND (e.due_on IS NULL OR e.due_on <= ?)
+		ORDER BY (CASE WHEN e.buried_on = ? THEN 1 ELSE 0 END) ASC,
+		         e.queue_rank ASC, e.priority ASC, e.due_on ASC,
+		         (e.id * 2654435761) % 1000003 ASC
 		LIMIT ?`,
 		day.Format(dateFormat), day.Format(dateFormat), limit,
 	)
@@ -231,16 +212,11 @@ func (s *Store) Queue(day time.Time, limit int) ([]QueueItem, error) {
 	var queue []QueueItem
 	for rows.Next() {
 		var (
-			item                QueueItem
-			nullable            nullableElement
-			kindRank, kindCount float64
+			item     QueueItem
+			nullable nullableElement
 		)
-		// The trailing two destinations discard the window-function columns
-		// (kind_rank, kind_count) added by the CTE for the ORDER BY — they
-		// exist only to compute the interleave position, not to be read back.
 		targets := append(scanTargets(&item.Element, &nullable),
-			&item.DocumentTitle, &item.DocumentURL, &item.ReadingTime,
-			&kindRank, &kindCount)
+			&item.DocumentTitle, &item.DocumentURL, &item.ReadingTime)
 
 		if err := rows.Scan(targets...); err != nil {
 			return nil, fmt.Errorf("store: scan queue row: %w", err)
@@ -249,6 +225,54 @@ func (s *Store) Queue(day time.Time, limit int) ([]QueueItem, error) {
 		queue = append(queue, item)
 	}
 	return queue, rows.Err()
+}
+
+// assignQueueRanks fills in queue_rank for any due, non-terminal element that
+// does not have one yet — an element newly due since the last read, or one
+// whose schedule just changed and had its rank cleared (see SaveSchedule).
+//
+// This is the whole fairness mechanism, and it only ever runs for additions.
+// Each unranked row gets a fractional position — (rank within its group -
+// 0.5) / size of that group, root articles and everything taken from one
+// being the two groups, both counted among what's due today — which spreads
+// the rarer group evenly through the more common one in proportion to
+// whatever is actually due. Crucially, the candidate rank is computed over
+// the *whole* due population, ranked and unranked together, but only ever
+// written to rows that were NULL: an element that already has a rank keeps
+// it untouched, no matter how the population around it changes. That is what
+// stops grading one element from reshuffling everything else — the previous,
+// fully-recomputed version of this query shrank every remaining element's
+// denominator on every single grade, which could visibly jump an unrelated
+// item across another for no reason connected to it.
+//
+// The hash is a multiplicative scramble of the id rather than the id itself.
+// Within one group, items sharing a priority — a batch of highlights
+// imported together, say — would otherwise rank by insertion order, which
+// groups the oldest imports first.
+func (s *Store) assignQueueRanks(day time.Time) error {
+	_, err := s.db.Exec(`
+		UPDATE elements
+		SET queue_rank = ranked.candidate_rank
+		FROM (
+			SELECT e.id AS id,
+			       (CAST(ROW_NUMBER() OVER (
+			           PARTITION BY (e.parent_id IS NULL)
+			           ORDER BY e.priority ASC, e.due_on ASC,
+			                    (e.id * 2654435761) % 1000003 ASC
+			       ) AS REAL) - 0.5)
+			       / COUNT(*) OVER (PARTITION BY (e.parent_id IS NULL)) AS candidate_rank
+			FROM elements e
+			WHERE e.state NOT IN ('done', 'dismissed', 'suspended')
+			  AND (e.due_on IS NULL OR e.due_on <= ?)
+		) AS ranked
+		WHERE elements.id = ranked.id
+		  AND elements.queue_rank IS NULL`,
+		day.Format(dateFormat),
+	)
+	if err != nil {
+		return fmt.Errorf("store: assign queue ranks: %w", err)
+	}
+	return nil
 }
 
 // ElementByID reads one element.
@@ -398,6 +422,12 @@ func (s *Store) CreateExtract(extract NewExtract, now time.Time) (int64, error) 
 }
 
 // SaveSchedule writes back an element's scheduling state after grading.
+//
+// queue_rank is cleared, not carried over: a due date earned by this grade
+// (or a backlog button — see Backlog) is a new position in time, and the
+// rank belongs to whatever is due when it gets there, not a leftover from
+// wherever it happened to sit before. assignQueueRanks fills it back in the
+// next time this element is actually due and read.
 func (s *Store) SaveSchedule(id int64, schedule ir.Schedule, now time.Time) error {
 	var dueOn any
 	if !schedule.DueOn.IsZero() {
@@ -407,7 +437,7 @@ func (s *Store) SaveSchedule(id int64, schedule ir.Schedule, now time.Time) erro
 	_, err := s.db.Exec(`
 		UPDATE elements SET
 		    state = ?, due_on = ?, interval_days = ?, afactor = ?, reps = ?,
-		    priority = ?, updated_at = ?
+		    priority = ?, queue_rank = NULL, updated_at = ?
 		WHERE id = ?`,
 		string(schedule.State), dueOn, schedule.IntervalDays, schedule.AFactor,
 		schedule.Reps, schedule.Priority, formatTime(now), id,
@@ -421,7 +451,7 @@ func (s *Store) SaveSchedule(id int64, schedule ir.Schedule, now time.Time) erro
 // SetPriority changes an element's priority without otherwise rescheduling it.
 func (s *Store) SetPriority(id int64, priority float64, now time.Time) error {
 	_, err := s.db.Exec(
-		`UPDATE elements SET priority = ?, updated_at = ? WHERE id = ?`,
+		`UPDATE elements SET priority = ?, queue_rank = NULL, updated_at = ? WHERE id = ?`,
 		priority, formatTime(now), id,
 	)
 	if err != nil {
@@ -591,7 +621,7 @@ func rootTopicID(tx *sql.Tx, documentID int64) (int64, error) {
 func suspendIfActive(tx *sql.Tx, id int64, now time.Time) error {
 	_, err := tx.Exec(`
 		UPDATE elements
-		SET state = ?, due_on = NULL, updated_at = ?
+		SET state = ?, due_on = NULL, queue_rank = NULL, updated_at = ?
 		WHERE id = ? AND state IN (?, ?)`,
 		string(ir.StateSuspended), formatTime(now), id,
 		string(ir.StateNew), string(ir.StateReading),
@@ -698,7 +728,7 @@ func (s *Store) AnchorExtract(id int64, position ir.Range, quote, contentHTML st
 // its interval and repetition count and resumes where it left off.
 func (s *Store) Suspend(id int64, now time.Time) error {
 	_, err := s.db.Exec(
-		`UPDATE elements SET state = ?, due_on = NULL, updated_at = ? WHERE id = ?`,
+		`UPDATE elements SET state = ?, due_on = NULL, queue_rank = NULL, updated_at = ? WHERE id = ?`,
 		string(ir.StateSuspended), formatTime(now), id,
 	)
 	if err != nil {
@@ -710,7 +740,7 @@ func (s *Store) Suspend(id int64, now time.Time) error {
 // Unsuspend returns an element to the queue, due today.
 func (s *Store) Unsuspend(id int64, today time.Time, now time.Time) error {
 	_, err := s.db.Exec(
-		`UPDATE elements SET state = ?, due_on = ?, updated_at = ? WHERE id = ?`,
+		`UPDATE elements SET state = ?, due_on = ?, queue_rank = NULL, updated_at = ? WHERE id = ?`,
 		string(ir.StateReading), today.Format(dateFormat), formatTime(now), id,
 	)
 	if err != nil {

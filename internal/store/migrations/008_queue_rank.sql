@@ -1,0 +1,12 @@
+-- The fair interleave (see Store.Queue) used to recompute fresh on every
+-- read from whatever was still due at that moment. That made it unstable:
+-- grading one element shrank the denominator for every other element of its
+-- kind, which could visibly jump an unrelated, untouched item across
+-- another — reordering the queue for no reason connected to that item.
+--
+-- queue_rank is assigned once, the first time an element becomes eligible
+-- for the queue, and left alone after that. Recomputing it (see
+-- assignQueueRanks) only ever fills in rows where it is still NULL — an
+-- addition to the pool, never a removal from it — so the rest of the queue
+-- stays exactly where the reader left it.
+ALTER TABLE elements ADD COLUMN queue_rank REAL;
