@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -1915,7 +1916,9 @@ func TestExtractsPageOffersRescheduling(t *testing.T) {
 }
 
 // TestDoneArchivesUpstream is what the reader asked for: finishing an article
-// here finishes it in wallabag, so the two views stop drifting.
+// here finishes it in wallabag, so the two views stop drifting. Done also
+// pushes a "done" tag upstream — Dismiss does not, since that is abandoning
+// the article unread rather than actually working through it.
 func TestDoneArchivesUpstream(t *testing.T) {
 	for _, grade := range []string{"done", "dismiss"} {
 		t.Run(grade, func(t *testing.T) {
@@ -1936,13 +1939,128 @@ func TestDoneArchivesUpstream(t *testing.T) {
 			if err != nil {
 				t.Fatalf("PendingWrites: %v", err)
 			}
-			if len(writes) != 1 || writes[0].Operation != store.OpArchive {
-				t.Fatalf("queued %+v, want one archive write", writes)
+
+			var archives, tagAdds int
+			for _, write := range writes {
+				switch write.Operation {
+				case store.OpArchive:
+					archives++
+					if !store.PayloadBool(write.Payload) {
+						t.Error("the queued write does not say archived")
+					}
+				case store.OpTagAdd:
+					tagAdds++
+					if write.Payload != "done" {
+						t.Errorf("queued tag = %q, want %q", write.Payload, "done")
+					}
+				}
 			}
-			if !store.PayloadBool(writes[0].Payload) {
-				t.Error("the queued write does not say archived")
+			if archives != 1 {
+				t.Fatalf("queued %+v, want exactly one archive write", writes)
+			}
+
+			wantTagAdds := 0
+			if grade == "done" {
+				wantTagAdds = 1
+			}
+			if tagAdds != wantTagAdds {
+				t.Errorf("queued %+v, want %d tag_add write(s)", writes, wantTagAdds)
+			}
+
+			tags, _ := db.TagsOf(document.ID)
+			hasDoneTag := slices.Contains(tags, "done")
+			if grade == "done" && !hasDoneTag {
+				t.Error("the article was not tagged done locally")
+			}
+			if grade == "dismiss" && hasDoneTag {
+				t.Error("dismissing tagged the article done")
 			}
 		})
+	}
+}
+
+// TestUnsuspendClearsDoneTag: bringing a finished article back into
+// circulation should not leave a stale "done" tag behind, either locally or
+// as a queued write upstream.
+func TestUnsuspendClearsDoneTag(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	post(t, server, "/elements/1/grade", url.Values{"grade": {"done"}})
+
+	document, _ := db.DocumentByID(1)
+	tags, _ := db.TagsOf(document.ID)
+	if !slices.Contains(tags, "done") {
+		t.Fatalf("seed: article was not tagged done, tags = %v", tags)
+	}
+
+	if response := post(t, server, "/elements/1/unsuspend", nil); response.Code != http.StatusSeeOther {
+		t.Fatalf("unsuspend: status = %d", response.Code)
+	}
+
+	tags, _ = db.TagsOf(document.ID)
+	if slices.Contains(tags, "done") {
+		t.Error("unsuspending left the done tag attached")
+	}
+
+	writes, _ := db.PendingWrites("wallabag", 10)
+	var sawTagRemove bool
+	for _, write := range writes {
+		if write.Operation == store.OpTagRemove && write.Payload == "done" {
+			sawTagRemove = true
+		}
+	}
+	if !sawTagRemove {
+		t.Errorf("queued writes = %+v, want a tag_remove for \"done\"", writes)
+	}
+}
+
+// TestUnsuspendWithoutDoneTagQueuesNothingExtra: an article suspended
+// straight from a wallabag archive import was never graded Done here, so
+// unsuspending it must not queue a pointless tag_remove for a tag it never
+// had.
+func TestUnsuspendWithoutDoneTagQueuesNothingExtra(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
+		ExternalID: "2", Title: "Archived elsewhere, never graded here", IsArchived: true, UpdatedAt: time.Now(),
+	}}, 0, time.Now()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if response := post(t, server, "/elements/2/unsuspend", nil); response.Code != http.StatusSeeOther {
+		t.Fatalf("unsuspend: status = %d", response.Code)
+	}
+
+	writes, _ := db.PendingWrites("wallabag", 10)
+	for _, write := range writes {
+		if write.Operation == store.OpTagRemove {
+			t.Errorf("queued a tag_remove for an article that was never tagged done: %+v", write)
+		}
+	}
+}
+
+// TestRegradingAwayFromDoneClearsTheTag: the reader can still open a Done
+// article directly and grade it again — Next, say — which puts it back in
+// circulation. The done tag would then be a lie if it stayed, so regrading
+// away from Done clears it the same way unsuspending does.
+func TestRegradingAwayFromDoneClearsTheTag(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	post(t, server, "/elements/1/grade", url.Values{"grade": {"done"}})
+
+	document, _ := db.DocumentByID(1)
+	tags, _ := db.TagsOf(document.ID)
+	if !slices.Contains(tags, "done") {
+		t.Fatalf("seed: article was not tagged done, tags = %v", tags)
+	}
+
+	if response := post(t, server, "/elements/1/grade", url.Values{"grade": {"next"}}); response.Code != http.StatusSeeOther {
+		t.Fatalf("regrade: status = %d", response.Code)
+	}
+
+	tags, _ = db.TagsOf(document.ID)
+	if slices.Contains(tags, "done") {
+		t.Error("regrading away from done left the tag attached")
 	}
 }
 
