@@ -187,6 +187,31 @@ func TestReaderLoadsMathJax(t *testing.T) {
 	}
 }
 
+// TestMathJaxExtensionsAreVendoredToo guards a real bug: tex-svg.js is not
+// fully self-contained on its own. It lazy-loads a handful of less common
+// TeX packages (\enclose, \cancel, mhchem, ...) at runtime, resolved
+// relative to wherever tex-svg.js was loaded from, and a browser refuses to
+// execute a missing one — its 404 page comes back as text/html, which fails
+// strict MIME-type checking. Vendoring only mathjax-tex-svg.js looks correct
+// until an article happens to use one of those packages, and that equation
+// silently fails to render instead. See static/README.md.
+func TestMathJaxExtensionsAreVendoredToo(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	// \enclose is the one that actually broke in production; the rest are
+	// checked too since any of them failing is the same bug.
+	for _, extension := range []string{"enclose", "cancel", "mhchem", "physics", "color"} {
+		path := "/static/input/tex/extensions/" + extension + ".js"
+		response := get(t, server, path)
+		if response.Code != http.StatusOK {
+			t.Errorf("%s: status = %d, want 200", path, response.Code)
+		}
+		if ct := response.Header().Get("Content-Type"); !strings.Contains(ct, "javascript") {
+			t.Errorf("%s: Content-Type = %q, want a JavaScript type", path, ct)
+		}
+	}
+}
+
 // TestExtractRoundTrip is the core workflow: highlight a passage, get an
 // extract that appears marked in the parent and enters the queue on its own.
 func TestExtractRoundTrip(t *testing.T) {

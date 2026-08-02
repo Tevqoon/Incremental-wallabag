@@ -187,8 +187,11 @@
 
 <!-- Self-hosted, like htmx — no CDN dependency, and no per-view leak to one
      either. Vendored as the single-file SVG-output build specifically: it
-     needs no separate web font files, unlike the CHTML build, so this script
-     tag is the whole dependency.
+     needs no separate web font files, unlike the CHTML build. It does still
+     lazy-load a handful of less common TeX packages (\enclose, \cancel,
+     mhchem, ...) from static/input/tex/extensions/ the first time an article
+     actually uses one, so that directory has to ship too — see static/README
+     if this ever needs updating.
 
      Left at its default delimiters ($$...$$, \(...\), \[...\]) rather than
      also enabling bare $...$: this reader regularly shows financial articles
