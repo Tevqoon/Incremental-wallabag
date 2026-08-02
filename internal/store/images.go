@@ -17,6 +17,16 @@ type DocumentImage struct {
 	ContentType string
 	Data        []byte
 
+	// Width and Height are the image's pixel dimensions, measured from its
+	// header when it was fetched — see migrations/011_image_dimensions.sql.
+	// Either one being 0 means "unknown", not "zero pixels": that is what a
+	// row written before that migration has, and it is also what a format
+	// the fetcher's decoder does not recognise (SVG, AVIF) gets. Callers
+	// must treat 0 that way — see ir.RenderOptions and renderImage, which
+	// fall back to emitting no width/height attributes at all rather than
+	// writing zeros into the HTML.
+	Width, Height int
+
 	// OK is false for a cached failure: the fetch was attempted and did not
 	// succeed, recorded so it is not retried on every render of the article.
 	OK bool
@@ -27,7 +37,7 @@ type DocumentImage struct {
 // cached failure (OK false, found true) — only the former is worth fetching.
 func (s *Store) CachedImage(documentID int64, url string) (DocumentImage, bool, error) {
 	image, found, err := s.imageByQuery(
-		`SELECT id, document_id, url, content_type, data, ok
+		`SELECT id, document_id, url, content_type, data, width, height, ok
 		 FROM document_images WHERE document_id = ? AND url = ?`,
 		documentID, url,
 	)
@@ -41,7 +51,7 @@ func (s *Store) CachedImage(documentID int64, url string) (DocumentImage, bool, 
 // back over HTTP.
 func (s *Store) DocumentImageByID(id int64) (DocumentImage, error) {
 	image, found, err := s.imageByQuery(
-		`SELECT id, document_id, url, content_type, data, ok
+		`SELECT id, document_id, url, content_type, data, width, height, ok
 		 FROM document_images WHERE id = ?`,
 		id,
 	)
@@ -60,7 +70,8 @@ func (s *Store) imageByQuery(query string, args ...any) (DocumentImage, bool, er
 		ok    int
 	)
 	err := s.db.QueryRow(query, args...).Scan(
-		&image.ID, &image.DocumentID, &image.URL, &image.ContentType, &image.Data, &ok,
+		&image.ID, &image.DocumentID, &image.URL, &image.ContentType, &image.Data,
+		&image.Width, &image.Height, &ok,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return DocumentImage{}, false, nil
@@ -76,7 +87,11 @@ func (s *Store) imageByQuery(query string, args ...any) (DocumentImage, bool, er
 // DocumentImage.OK), and returns the row's id — which becomes the local URL
 // an article's <img src> is rewritten to point at instead of the original
 // host.
-func (s *Store) SaveDocumentImage(documentID int64, url, contentType string, data []byte, ok bool, now time.Time) (int64, error) {
+//
+// width and height are the caller's best measurement of the image's pixel
+// size — 0 for either means "unknown, treat as before this existed" — see
+// DocumentImage.Width.
+func (s *Store) SaveDocumentImage(documentID int64, url, contentType string, data []byte, ok bool, width, height int, now time.Time) (int64, error) {
 	okValue := 0
 	if ok {
 		okValue = 1
@@ -90,14 +105,16 @@ func (s *Store) SaveDocumentImage(documentID int64, url, contentType string, dat
 	}
 
 	_, err := s.db.Exec(`
-		INSERT INTO document_images (document_id, url, content_type, data, ok, fetched_at)
-		VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO document_images (document_id, url, content_type, data, width, height, ok, fetched_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (document_id, url) DO UPDATE SET
 		    content_type = excluded.content_type,
 		    data = excluded.data,
+		    width = excluded.width,
+		    height = excluded.height,
 		    ok = excluded.ok,
 		    fetched_at = excluded.fetched_at`,
-		documentID, url, contentType, data, okValue, formatTime(now),
+		documentID, url, contentType, data, width, height, okValue, formatTime(now),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("store: save image %q for document %d: %w", url, documentID, err)
@@ -113,4 +130,25 @@ func (s *Store) SaveDocumentImage(documentID int64, url, contentType string, dat
 		return 0, fmt.Errorf("store: read back image %q for document %d: %w", url, documentID, err)
 	}
 	return id, nil
+}
+
+// SetDocumentImageDimensions records a size measured after the row was
+// already cached — see resolveOneImage's backfill path in the web package,
+// for a row cached before migrations/011_image_dimensions.sql existed and
+// so never got a measurement.
+//
+// This is deliberately its own statement rather than a call back through
+// SaveDocumentImage: that upsert rewrites content_type, data, ok and
+// fetched_at along with the row it touches, and fetched_at in particular
+// must keep meaning "when the bytes were fetched" — reusing it here would
+// make a plain later measurement look like a brand new fetch that never
+// happened.
+func (s *Store) SetDocumentImageDimensions(id int64, width, height int) error {
+	if _, err := s.db.Exec(
+		`UPDATE document_images SET width = ?, height = ? WHERE id = ?`,
+		width, height, id,
+	); err != nil {
+		return fmt.Errorf("store: set dimensions for image %d: %w", id, err)
+	}
+	return nil
 }

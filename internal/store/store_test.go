@@ -678,7 +678,7 @@ func TestDocumentImageCacheRoundTrip(t *testing.T) {
 		t.Fatalf("CachedImage before any save: found = true, want false")
 	}
 
-	id, err := db.SaveDocumentImage(1, "https://example.com/cat.png", "image/png", []byte("bytes"), true, now)
+	id, err := db.SaveDocumentImage(1, "https://example.com/cat.png", "image/png", []byte("bytes"), true, 800, 600, now)
 	if err != nil {
 		t.Fatalf("SaveDocumentImage: %v", err)
 	}
@@ -690,19 +690,25 @@ func TestDocumentImageCacheRoundTrip(t *testing.T) {
 	if byURL.ID != id || byURL.ContentType != "image/png" || string(byURL.Data) != "bytes" || !byURL.OK {
 		t.Errorf("CachedImage after save = %+v", byURL)
 	}
+	if byURL.Width != 800 || byURL.Height != 600 {
+		t.Errorf("CachedImage after save: dimensions = %dx%d, want 800x600", byURL.Width, byURL.Height)
+	}
 
 	byID, err := db.DocumentImageByID(id)
 	if err != nil {
 		t.Fatalf("DocumentImageByID: %v", err)
 	}
 	if byID.ID != byURL.ID || byID.URL != byURL.URL || byID.ContentType != byURL.ContentType ||
-		string(byID.Data) != string(byURL.Data) || byID.OK != byURL.OK {
+		string(byID.Data) != string(byURL.Data) || byID.OK != byURL.OK ||
+		byID.Width != byURL.Width || byID.Height != byURL.Height {
 		t.Errorf("DocumentImageByID = %+v, want %+v", byID, byURL)
 	}
 
 	// A failed fetch is cached too, with no data, so it is not retried on
-	// every render — see resolveImages in the web package.
-	failedID, err := db.SaveDocumentImage(1, "https://example.com/broken.png", "", nil, false, now)
+	// every render — see resolveImages in the web package. It has nothing to
+	// measure either, so its dimensions are the same "unknown" 0 as anything
+	// else never measured.
+	failedID, err := db.SaveDocumentImage(1, "https://example.com/broken.png", "", nil, false, 0, 0, now)
 	if err != nil {
 		t.Fatalf("SaveDocumentImage (failure): %v", err)
 	}
@@ -713,10 +719,15 @@ func TestDocumentImageCacheRoundTrip(t *testing.T) {
 	if failed.OK || failed.ID != failedID {
 		t.Errorf("CachedImage (failure) = %+v, want OK=false, ID=%d", failed, failedID)
 	}
+	if failed.Width != 0 || failed.Height != 0 {
+		t.Errorf("CachedImage (failure): dimensions = %dx%d, want 0x0", failed.Width, failed.Height)
+	}
 
 	// Re-saving the same (document, url) updates the existing row rather
-	// than inserting a second one for it.
-	updatedID, err := db.SaveDocumentImage(1, "https://example.com/cat.png", "image/webp", []byte("new-bytes"), true, now)
+	// than inserting a second one for it — dimensions included, as a
+	// re-fetch of a previously-unmeasurable image should be able to correct
+	// them from 0 to a real size.
+	updatedID, err := db.SaveDocumentImage(1, "https://example.com/cat.png", "image/webp", []byte("new-bytes"), true, 400, 300, now)
 	if err != nil {
 		t.Fatalf("SaveDocumentImage (update): %v", err)
 	}
@@ -730,9 +741,98 @@ func TestDocumentImageCacheRoundTrip(t *testing.T) {
 	if updated.ContentType != "image/webp" || string(updated.Data) != "new-bytes" {
 		t.Errorf("CachedImage after update = %+v, want the new content", updated)
 	}
+	if updated.Width != 400 || updated.Height != 300 {
+		t.Errorf("CachedImage after update: dimensions = %dx%d, want 400x300", updated.Width, updated.Height)
+	}
 
 	if _, err := db.DocumentImageByID(999); !errors.Is(err, ErrNotFound) {
 		t.Errorf("DocumentImageByID(999) = %v, want ErrNotFound", err)
+	}
+}
+
+// TestDocumentImageDimensionsDefaultToUnknown covers migrations/011_image_dimensions.sql's
+// central promise: a row written before that migration existed has no
+// measurement to give, and reading it back must report that as 0, the same
+// "unknown" value the rest of the stack already treats specially (see
+// DocumentImage.Width) — not fail, and not synthesize a fake size. This
+// inserts a row the way pre-011 code would have — leaving width and height
+// out entirely — so the migration's column defaults are what supply the
+// zeros, exactly as they would for a database upgraded from before this
+// migration existed.
+func TestDocumentImageDimensionsDefaultToUnknown(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
+		ExternalID: "1", Title: "Predates dimension tracking", UpdatedAt: now,
+	}}, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	if _, err := db.db.Exec(
+		`INSERT INTO document_images (document_id, url, content_type, data, ok, fetched_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		1, "https://example.com/old.png", "image/png", []byte("bytes"), 1, formatTime(now),
+	); err != nil {
+		t.Fatalf("insert pre-migration-style row: %v", err)
+	}
+
+	image, found, err := db.CachedImage(1, "https://example.com/old.png")
+	if err != nil {
+		t.Fatalf("CachedImage: %v", err)
+	}
+	if !found {
+		t.Fatal("CachedImage: found = false, want true")
+	}
+	if image.Width != 0 || image.Height != 0 {
+		t.Errorf("dimensions of a row with none recorded = %dx%d, want 0x0 (unknown)", image.Width, image.Height)
+	}
+}
+
+// TestSetDocumentImageDimensionsPreservesEverythingElse guards the reason
+// SetDocumentImageDimensions exists as its own statement instead of a call
+// back through SaveDocumentImage: a later measurement of already-cached
+// bytes is not a new fetch, so it must touch width and height only, leaving
+// content_type, data and — most importantly — fetched_at exactly as they
+// were. Resetting fetched_at here would make a plain measurement look like
+// a brand new fetch that never actually happened.
+func TestSetDocumentImageDimensionsPreservesEverythingElse(t *testing.T) {
+	db := testStore(t)
+	fetchedAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
+		ExternalID: "1", Title: "Has a legacy image", UpdatedAt: fetchedAt,
+	}}, 0, fetchedAt); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	id, err := db.SaveDocumentImage(1, "https://example.com/old.png", "image/png",
+		[]byte("bytes"), true, 0, 0, fetchedAt)
+	if err != nil {
+		t.Fatalf("SaveDocumentImage: %v", err)
+	}
+
+	if err := db.SetDocumentImageDimensions(id, 20, 10); err != nil {
+		t.Fatalf("SetDocumentImageDimensions: %v", err)
+	}
+
+	image, found, err := db.CachedImage(1, "https://example.com/old.png")
+	if err != nil || !found {
+		t.Fatalf("CachedImage: found=%v err=%v", found, err)
+	}
+	if image.Width != 20 || image.Height != 10 {
+		t.Errorf("dimensions = %dx%d, want 20x10", image.Width, image.Height)
+	}
+	if string(image.Data) != "bytes" || image.ContentType != "image/png" || !image.OK {
+		t.Errorf("SetDocumentImageDimensions touched something other than the dimensions: %+v", image)
+	}
+
+	var storedFetchedAt string
+	if err := db.db.QueryRow(`SELECT fetched_at FROM document_images WHERE id = ?`, id).Scan(&storedFetchedAt); err != nil {
+		t.Fatalf("read fetched_at: %v", err)
+	}
+	if want := fetchedAt.UTC().Format(timeFormat); storedFetchedAt != want {
+		t.Errorf("fetched_at = %q, want unchanged at %q", storedFetchedAt, want)
 	}
 }
 

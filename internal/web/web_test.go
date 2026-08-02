@@ -1,8 +1,11 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"image"
+	"image/png"
 	"io"
 	"log/slog"
 	"net"
@@ -1064,6 +1067,182 @@ func TestArticleImagesAreFetchedAndServedLocally(t *testing.T) {
 	get(t, server, "/read/1")
 	if got := (*fetches)["http://images.test/cat.png"]; got != 1 {
 		t.Errorf("image was fetched %d times, want exactly 1", got)
+	}
+}
+
+// TestArticleImageDimensionsAreMeasuredAndRendered covers the whole point of
+// migrations/011_image_dimensions.sql end to end: a real, decodable image
+// fetched through the normal path ends up with width/height attributes in
+// the rendered page, not just recorded in the database.
+func TestArticleImageDimensionsAreMeasuredAndRendered(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	var pngBytes bytes.Buffer
+	if err := png.Encode(&pngBytes, image.NewRGBA(image.Rect(0, 0, 12, 8))); err != nil {
+		t.Fatalf("encode test png: %v", err)
+	}
+	withFakeImageClient(t, map[string]*http.Response{
+		"http://images.test/cat.png": imageResponse("image/png", pngBytes.String()),
+	})
+
+	if err := db.SetDocumentContent(1,
+		`<p>Before.</p><img src="http://images.test/cat.png" alt="A cat"><p>After.</p>`,
+	); err != nil {
+		t.Fatalf("SetDocumentContent: %v", err)
+	}
+
+	body := get(t, server, "/read/1").Body.String()
+	if !strings.Contains(body, `width="12" height="8"`) {
+		t.Errorf("rendered page is missing the measured dimensions:\n%s", body)
+	}
+}
+
+// TestCachedImageDimensionsAreBackfilledOnNextOpen guards the migration path
+// that matters for every image ever cached before migrations/011_image_dimensions.sql
+// existed: nothing in this codebase re-fetches an image once it is cached,
+// so if resolveOneImage did not measure such a row from its already-stored
+// bytes, it would carry width=0/height=0 forever and the fragment-swap
+// layout jump this whole feature exists to fix would never actually be
+// fixed for any article that predates the migration.
+func TestCachedImageDimensionsAreBackfilledOnNextOpen(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	var pngBytes bytes.Buffer
+	if err := png.Encode(&pngBytes, image.NewRGBA(image.Rect(0, 0, 20, 10))); err != nil {
+		t.Fatalf("encode test png: %v", err)
+	}
+
+	// Simulates a row cached before dimension tracking existed: OK, real
+	// bytes, width/height still 0 — exactly what migrations/011's column
+	// defaults leave behind for a pre-existing row.
+	imageID, err := db.SaveDocumentImage(1, "http://images.test/legacy.png", "image/png",
+		pngBytes.Bytes(), true, 0, 0, time.Now())
+	if err != nil {
+		t.Fatalf("SaveDocumentImage: %v", err)
+	}
+
+	// No response registered for this URL at all: a network fetch here
+	// would 404, so the dimensions showing up in the rendered page below can
+	// only have come from the cached bytes, not a re-fetch.
+	fetches := withFakeImageClient(t, map[string]*http.Response{})
+
+	if err := db.SetDocumentContent(1,
+		`<img src="http://images.test/legacy.png" alt="Legacy">`,
+	); err != nil {
+		t.Fatalf("SetDocumentContent: %v", err)
+	}
+
+	body := get(t, server, "/read/1").Body.String()
+	if !strings.Contains(body, `width="20" height="10"`) {
+		t.Errorf("rendered page is missing the backfilled dimensions:\n%s", body)
+	}
+	if got := (*fetches)["http://images.test/legacy.png"]; got != 0 {
+		t.Errorf("a cached image was fetched over the network %d times, want 0", got)
+	}
+
+	// And it must be persisted, not just measured for this one render — a
+	// second open should not repeat the decode.
+	persisted, found, err := db.CachedImage(1, "http://images.test/legacy.png")
+	if err != nil || !found {
+		t.Fatalf("CachedImage after backfill: found=%v err=%v", found, err)
+	}
+	if persisted.ID != imageID {
+		t.Fatalf("test premise is wrong: got image id %d, want %d", persisted.ID, imageID)
+	}
+	if persisted.Width != 20 || persisted.Height != 10 {
+		t.Errorf("persisted dimensions = %dx%d, want 20x10 (backfill did not save)", persisted.Width, persisted.Height)
+	}
+}
+
+// TestResolveImagesFetchesConcurrentlyWithinABudget guards the fix for a page
+// that used to hang for minutes on an image-heavy article: every image was
+// fetched sequentially, synchronously, inside the request. If that
+// regressed, fetching imageCount artificially slow images would take close
+// to imageCount * perFetchDelay; a bounded worker pool takes close to
+// ceil(imageCount/imageResolveConcurrency) * perFetchDelay instead. The
+// threshold below sits well between the two so the test is not flaky under
+// ordinary scheduling jitter.
+func TestResolveImagesFetchesConcurrentlyWithinABudget(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	const imageCount = 15
+	const perFetchDelay = 150 * time.Millisecond
+
+	responses := make(map[string]*http.Response, imageCount)
+	var body strings.Builder
+	body.WriteString("<p>Before.</p>")
+	for i := range imageCount {
+		src := fmt.Sprintf("http://images.test/%d.png", i)
+		responses[src] = imageResponse("image/png", "bytes")
+		body.WriteString(fmt.Sprintf(`<img src="%s" alt="img %d">`, src, i))
+	}
+	body.WriteString("<p>After.</p>")
+
+	original := imageClient
+	imageClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		// Simulates a slow origin. The point of this test is that
+		// imageResolveConcurrency of these run at once instead of one after
+		// another.
+		time.Sleep(perFetchDelay)
+		if response, ok := responses[r.URL.String()]; ok {
+			return response, nil
+		}
+		return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader(""))}, nil
+	})}
+	t.Cleanup(func() { imageClient = original })
+
+	if err := db.SetDocumentContent(1, body.String()); err != nil {
+		t.Fatalf("SetDocumentContent: %v", err)
+	}
+
+	started := time.Now()
+	response := get(t, server, "/read/1")
+	elapsed := time.Since(started)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.Code)
+	}
+
+	sequential := imageCount * perFetchDelay
+	if elapsed >= sequential/2 {
+		t.Errorf("resolving %d images took %v, want well under the sequential bound of %v — "+
+			"images do not appear to be fetched concurrently", imageCount, elapsed, sequential)
+	}
+
+	rendered := response.Body.String()
+	if got := strings.Count(rendered, `class="article-image"`); got != imageCount {
+		t.Errorf("rendered %d of %d images", got, imageCount)
+	}
+}
+
+// TestResolveImagesIsRaceFreeUnderConcurrentSaves exercises the same
+// concurrent path under `go test -race`: many distinct images resolving at
+// once must not trip the race detector on the shared results map or on
+// SaveDocumentImage's underlying SQLite connection — see saveMu in
+// fetchAndCacheImage.
+func TestResolveImagesIsRaceFreeUnderConcurrentSaves(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	const imageCount = 20
+	responses := make(map[string]*http.Response, imageCount)
+	var body strings.Builder
+	for i := range imageCount {
+		src := fmt.Sprintf("http://images.test/%d.png", i)
+		responses[src] = imageResponse("image/png", "bytes")
+		body.WriteString(fmt.Sprintf(`<img src="%s" alt="img %d">`, src, i))
+	}
+	withFakeImageClient(t, responses)
+
+	if err := db.SetDocumentContent(1, body.String()); err != nil {
+		t.Fatalf("SetDocumentContent: %v", err)
+	}
+
+	response := get(t, server, "/read/1")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.Code)
+	}
+	if got := strings.Count(response.Body.String(), `class="article-image"`); got != imageCount {
+		t.Errorf("rendered %d of %d images", got, imageCount)
 	}
 }
 

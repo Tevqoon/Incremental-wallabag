@@ -1,0 +1,35 @@
+-- A freshly rendered article fragment (see Server.writeArticleFragment,
+-- called when a highlight is taken) swaps in brand-new <img> elements that
+-- have never been decoded. With no width or height attribute, such an
+-- element has zero height in the browser's layout until its bytes finish
+-- decoding — so at the instant of the swap every image in the article
+-- collapses to zero height at once, the document shrinks, the browser
+-- clamps scrollY, and the viewport visibly jumps. It then keeps jumping as
+-- each image re-expands on its own schedule as it finishes decoding. The
+-- standard fix is to declare the image's intrinsic size up front, which lets
+-- the browser reserve its box before a single byte of the image itself has
+-- arrived — see app.css's #article img rule, which already assumes
+-- width/height will be present to do this correctly, and ir.RenderOptions,
+-- which is what supplies them.
+--
+-- The server already downloads every image in full to cache it (see
+-- migrations/009_document_images.sql); reading its header costs nothing
+-- extra worth worrying about — image.DecodeConfig, not a full decode — so
+-- there is no reason not to remember what it reports.
+--
+-- Existing rows get 0/0 from the column defaults below, since nothing
+-- measured them at the time. That must read everywhere downstream as
+-- "unknown", never as "zero pixels": the store, the web package's resolver,
+-- and ir.renderImage all treat width=0 or height=0 as "no size information",
+-- and fall back to emitting no width/height attributes at all — today's
+-- behaviour, unchanged, for exactly the images this migration cannot
+-- retroactively measure.
+--
+-- Nothing in this codebase re-fetches an image once it is cached, so these
+-- rows are never getting a fresh fetch to be measured on. Instead they get
+-- measured from the bytes already sitting in their own data column, the
+-- next time the article is opened — see resolveOneImage's backfill path in
+-- the web package — and the result is written back so it is a one-time
+-- cost per image, not paid again on every subsequent open.
+ALTER TABLE document_images ADD COLUMN width  INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE document_images ADD COLUMN height INTEGER NOT NULL DEFAULT 0;

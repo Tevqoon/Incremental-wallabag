@@ -412,7 +412,7 @@ func (s *Server) importHighlights(element store.Element, sanitizedHTML string, h
 // parseArticle sanitises, parses and returns an element's article together
 // with the marks for extracts already taken from it, and a resolved local
 // URL for each image it contains — see resolveImages.
-func (s *Server) parseArticle(ctx context.Context, element store.Element) (*ir.Article, []ir.Mark, map[string]string, error) {
+func (s *Server) parseArticle(ctx context.Context, element store.Element) (*ir.Article, []ir.Mark, map[string]ir.ResolvedImage, error) {
 	sanitized, err := s.articleHTML(ctx, element)
 	if err != nil {
 		return nil, nil, nil, err

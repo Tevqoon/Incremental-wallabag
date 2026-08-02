@@ -1,6 +1,7 @@
 package ir
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -399,7 +400,7 @@ func TestRenderEmitsResolvedImages(t *testing.T) {
 
 	out := article.Render(RenderOptions{
 		ReadPoint: NoReadPoint,
-		ImageURLs: map[string]string{"a.png": "/documents/1/images/1"},
+		ImageURLs: map[string]ResolvedImage{"a.png": {URL: "/documents/1/images/1"}},
 	})
 
 	firstEnd := strings.Index(out, `data-b="0">First.</p>`)
@@ -413,6 +414,55 @@ func TestRenderEmitsResolvedImages(t *testing.T) {
 	}
 }
 
+// TestRenderEmitsSizeAttributesOnlyWhenBothAreKnown: width and height must
+// appear together, so the browser can reserve the image's box before its
+// bytes decode (see migrations/011_image_dimensions.sql and app.css's
+// #article img rule), and must be absent — not written as "0" — when either
+// dimension is unknown, since a literal 0x0 box would be worse than no
+// hint at all.
+func TestRenderEmitsSizeAttributesOnlyWhenBothAreKnown(t *testing.T) {
+	tests := []struct {
+		name          string
+		width, height int
+		wantAttrs     bool
+	}{
+		{"both known", 800, 600, true},
+		{"width unknown", 0, 600, false},
+		{"height unknown", 800, 0, false},
+		{"both unknown", 0, 0, false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			article := mustParse(t, `<img src="a.png" alt="A">`)
+
+			out := article.Render(RenderOptions{
+				ReadPoint: NoReadPoint,
+				ImageURLs: map[string]ResolvedImage{
+					"a.png": {URL: "/documents/1/images/1", Width: test.width, Height: test.height},
+				},
+			})
+
+			hasWidth := strings.Contains(out, `width="`)
+			hasHeight := strings.Contains(out, `height="`)
+			if hasWidth != test.wantAttrs || hasHeight != test.wantAttrs {
+				t.Errorf("Render() = %q, want width/height attrs present = %v", out, test.wantAttrs)
+			}
+			if test.wantAttrs {
+				want := `width="` + strconv.Itoa(test.width) + `" height="` + strconv.Itoa(test.height) + `"`
+				if !strings.Contains(out, want) {
+					t.Errorf("Render() = %q, want to contain %q", out, want)
+				}
+			}
+			// loading="lazy" is only safe once the box is reserved, so the two
+			// must always travel together — see renderImage.
+			if !strings.Contains(out, `loading="lazy"`) {
+				t.Errorf("Render() = %q, missing loading=\"lazy\"", out)
+			}
+		})
+	}
+}
+
 // TestRenderEscapesImageAttributes: alt text and a resolved src both come
 // from outside increader (the article, and this package's own caller,
 // respectively), so both are re-escaped here rather than trusted — the same
@@ -422,7 +472,7 @@ func TestRenderEscapesImageAttributes(t *testing.T) {
 
 	out := article.Render(RenderOptions{
 		ReadPoint: NoReadPoint,
-		ImageURLs: map[string]string{"a.png": `x" onerror="alert(1)`},
+		ImageURLs: map[string]ResolvedImage{"a.png": {URL: `x" onerror="alert(1)`}},
 	})
 
 	if strings.Contains(out, "<script>") || strings.Contains(out, `onerror="alert`) {

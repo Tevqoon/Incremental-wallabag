@@ -34,12 +34,21 @@ type RenderOptions struct {
 	ReadPoint int
 
 	// ImageURLs resolves an Image's original Src to somewhere safe to load it
-	// from — this package has no I/O, so it never fetches or rewrites a URL
-	// itself; the caller resolves every image up front and hands back this
-	// map. An image whose Src has no entry here is skipped entirely rather
-	// than rendered with its original URL, which would defeat the point of
-	// resolving it in the first place — see the web package's image cache.
-	ImageURLs map[string]string
+	// from, plus its intrinsic size if known — this package has no I/O, so it
+	// never fetches, measures or rewrites a URL itself; the caller resolves
+	// every image up front and hands back this map. An image whose Src has no
+	// entry here is skipped entirely rather than rendered with its original
+	// URL, which would defeat the point of resolving it in the first place —
+	// see the web package's image cache.
+	ImageURLs map[string]ResolvedImage
+}
+
+// ResolvedImage is somewhere safe to load an image from, plus its intrinsic
+// pixel size if it is known. Width or Height being 0 means "unknown" — see
+// renderImage, which omits both attributes rather than emit a bogus zero.
+type ResolvedImage struct {
+	URL           string
+	Width, Height int
 }
 
 // Render produces the reader view: every block as a top-level element carrying
@@ -104,14 +113,25 @@ func (a *Article) imagesByBlock() map[int][]Image {
 // see RenderOptions.ImageURLs. An unresolved image is skipped rather than
 // rendered with its original URL: falling back would defeat the point of
 // resolving it server-side in the first place.
-func renderImage(image Image, resolved map[string]string, out *strings.Builder) {
-	src, ok := resolved[image.Src]
-	if !ok || src == "" {
+//
+// width and height are emitted together, or not at all: they are what lets
+// the browser reserve the image's box before its bytes arrive, and
+// loading="lazy" is only safe with that box reserved — an unreserved lazy
+// image is exactly what makes every image on the page collapse to zero
+// height in a batch swap (see migrations/011_image_dimensions.sql). Drop the
+// dimensions without also dropping loading="lazy" and that bug comes back.
+func renderImage(image Image, resolved map[string]ResolvedImage, out *strings.Builder) {
+	target, ok := resolved[image.Src]
+	if !ok || target.URL == "" {
 		return
 	}
-	out.WriteString(`<figure class="article-image"><img src="` + html.EscapeString(src) + `" alt="`)
+	out.WriteString(`<figure class="article-image"><img src="` + html.EscapeString(target.URL) + `" alt="`)
 	out.WriteString(html.EscapeString(image.Alt))
-	out.WriteString(`" loading="lazy"></figure>`)
+	out.WriteString(`"`)
+	if target.Width > 0 && target.Height > 0 {
+		out.WriteString(` width="` + strconv.Itoa(target.Width) + `" height="` + strconv.Itoa(target.Height) + `"`)
+	}
+	out.WriteString(` loading="lazy"></figure>`)
 }
 
 // window is a highlighted span within a single block.
