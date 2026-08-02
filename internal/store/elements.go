@@ -180,7 +180,13 @@ func (n nullableElement) apply(element *Element) {
 //
 // Anything buried today sorts behind everything else still due, so working
 // through the rest of the queue brings it back around rather than losing it for
-// the day.
+// the day. Within that bucket, whichever was buried longest ago comes back
+// first — a round robin, keyed on buried_at rather than queue_rank, so
+// burying the same element again always sends it to the very back of the
+// line again rather than leaving it wherever it already was. Without this,
+// once everything due had been buried once, the bucket's internal order
+// collapsed back to queue_rank and every later "skip" replayed the exact
+// same sequence from the top, forever.
 func (s *Store) Queue(day time.Time, limit int) ([]QueueItem, error) {
 	if err := s.assignQueueRanks(day); err != nil {
 		return nil, err
@@ -193,10 +199,11 @@ func (s *Store) Queue(day time.Time, limit int) ([]QueueItem, error) {
 		WHERE e.state NOT IN ('done', 'dismissed', 'suspended')
 		  AND (e.due_on IS NULL OR e.due_on <= ?)
 		ORDER BY (CASE WHEN e.buried_on = ? THEN 1 ELSE 0 END) ASC,
+		         (CASE WHEN e.buried_on = ? THEN e.buried_at END) ASC,
 		         e.queue_rank ASC, e.priority ASC, e.due_on ASC,
 		         (e.id * 2654435761) % 1000003 ASC
 		LIMIT ?`,
-		day.Format(dateFormat), day.Format(dateFormat), limit,
+		day.Format(dateFormat), day.Format(dateFormat), day.Format(dateFormat), limit,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("store: read queue: %w", err)
@@ -454,15 +461,20 @@ func (s *Store) SetPriority(id int64, priority float64, now time.Time) error {
 	return nil
 }
 
-// Bury moves an element to the end of today's queue.
+// Bury moves an element to the end of today's queue — or further, if it is
+// already there; see Queue.
 //
 // Distinct from every other grade in leaving the schedule alone: it changes
-// position within a day, not which day. Recording the date rather than a flag
-// means it expires by itself — tomorrow the value no longer matches today.
-func (s *Store) Bury(id int64, today time.Time) error {
+// position within a day, not which day. buried_on records the date rather
+// than a flag so it expires by itself — tomorrow the value no longer matches
+// today. buried_at is the actual moment, always overwritten, so burying an
+// element that is already buried today moves it again rather than doing
+// nothing: it is what turns a single skip into a real round robin instead of
+// a one-shot deferral.
+func (s *Store) Bury(id int64, now time.Time) error {
 	_, err := s.db.Exec(
-		`UPDATE elements SET buried_on = ? WHERE id = ?`,
-		today.Format(dateFormat), id,
+		`UPDATE elements SET buried_on = ?, buried_at = ? WHERE id = ?`,
+		now.Format(dateFormat), formatTime(now), id,
 	)
 	if err != nil {
 		return fmt.Errorf("store: bury element %d: %w", id, err)

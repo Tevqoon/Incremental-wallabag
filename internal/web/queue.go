@@ -114,9 +114,11 @@ func (s *Server) handleGrade(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Burying changes where an element sits within today rather than which day
-	// it is due, so it bypasses the scheduler entirely.
+	// it is due, so it bypasses the scheduler entirely. The real clock, not
+	// s.today()'s truncated date: repeated burying is ordered by the moment
+	// each one happened, not just which calendar day — see Store.Bury.
 	if grade == ir.GradeBury {
-		if err := s.store.Bury(id, s.today()); err != nil {
+		if err := s.store.Bury(id, time.Now()); err != nil {
 			s.fail(w, err)
 			return
 		}

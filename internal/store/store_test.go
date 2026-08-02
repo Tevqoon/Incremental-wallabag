@@ -1379,6 +1379,72 @@ func TestBurySinksWithinTodayAndClearsItself(t *testing.T) {
 	}
 }
 
+// TestRepeatedBuryIsARoundRobinNotAFixedCycle guards the actual bug: once
+// every due element had been buried once, the buried bucket's internal order
+// collapsed back to plain queue_rank, so every further "skip" replayed the
+// exact same sequence from the top forever — pressing Later could never
+// actually get anywhere new. buried_at fixes that by ordering the bucket on
+// when each element was (most recently) buried, not queue_rank.
+func TestRepeatedBuryIsARoundRobinNotAFixedCycle(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	documents := []source.Document{}
+	for i := 1; i <= 4; i++ {
+		documents = append(documents, source.Document{
+			ExternalID: strconv.Itoa(i), Title: "Article " + strconv.Itoa(i), UpdatedAt: now,
+		})
+	}
+	if _, err := db.UpsertDocuments("wallabag", documents, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	first, err := db.Queue(now, 10)
+	if err != nil || len(first) != 4 {
+		t.Fatalf("Queue: got %d elements, err %v", len(first), err)
+	}
+	e0, e1, e2, e3 := first[0].ID, first[1].ID, first[2].ID, first[3].ID
+
+	// Bury the first two, in order, each at a distinct later moment.
+	if err := db.Bury(e0, now.Add(1*time.Second)); err != nil {
+		t.Fatalf("Bury e0: %v", err)
+	}
+	if err := db.Bury(e1, now.Add(2*time.Second)); err != nil {
+		t.Fatalf("Bury e1: %v", err)
+	}
+
+	assertOrder := func(t *testing.T, want []int64) {
+		t.Helper()
+		got, err := db.Queue(now, 10)
+		if err != nil {
+			t.Fatalf("Queue: %v", err)
+		}
+		gotIDs := make([]int64, len(got))
+		for i, item := range got {
+			gotIDs[i] = item.ID
+		}
+		same := len(gotIDs) == len(want)
+		for i := range want {
+			if same && gotIDs[i] != want[i] {
+				same = false
+			}
+		}
+		if !same {
+			t.Fatalf("queue order = %v, want %v", gotIDs, want)
+		}
+	}
+	assertOrder(t, []int64{e2, e3, e0, e1})
+
+	// Bury e0 again — it is already in today's buried bucket, so a naive
+	// implementation (comparing only the date) would leave it exactly where
+	// it was. It must instead jump past e1, which has not been touched
+	// since: a second skip has to actually go somewhere.
+	if err := db.Bury(e0, now.Add(3*time.Second)); err != nil {
+		t.Fatalf("Bury e0 again: %v", err)
+	}
+	assertOrder(t, []int64{e2, e3, e1, e0})
+}
+
 func indexOfElement(items []QueueItem, id int64) int {
 	for i, item := range items {
 		if item.ID == id {
