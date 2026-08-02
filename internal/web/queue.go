@@ -1,8 +1,6 @@
 package web
 
 import (
-	"bytes"
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -363,13 +361,15 @@ func (s *Server) tagTarget(w http.ResponseWriter, r *http.Request) (int64, store
 
 // handleBacklog puts an element off by a fixed number of days, immediately —
 // the explicit counterpart to grading it, for the schedule panel's preset
-// buttons. See ir.Backlog and ir.BacklogOptions.
+// buttons and for the reschedule control on the extracts and library pages.
+// See ir.Backlog and ir.BacklogOptions.
 //
-// Answers with the schedule buttons re-rendered, not 204: Sooner, Next and
-// Defer grow from whatever interval this just set (ir.Next reads it off the
-// schedule same as always), so leaving the buttons stale would let them
-// silently disagree with what grading is about to do. The reader.html
-// template targets this response at #schedule-buttons.
+// Behaves exactly like a grade: it is a complete decision about this element,
+// so it redirects rather than staying put and swapping something in place —
+// on the reader page, that means on to whatever is next, same as pressing
+// Next or Sooner would. A list page instead sends its own current URL as
+// redirect, so rescheduling a row from there returns to that row's list
+// rather than dropping into the reading queue.
 func (s *Server) handleBacklog(w http.ResponseWriter, r *http.Request) {
 	id, err := elementID(r)
 	if err != nil {
@@ -389,35 +389,36 @@ func (s *Server) handleBacklog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Same as handleGrade: the reader tracks scroll position alongside a
+	// backlog button click too, since putting an element off usually happens
+	// mid-read, not only at the top of the page.
+	if block, err := strconv.Atoi(r.FormValue("block")); err == nil && block >= 0 {
+		if err := s.store.SetReadBlock(id, block); err != nil {
+			s.fail(w, err)
+			return
+		}
+	}
+
 	element.Schedule = ir.Backlog(element.Schedule, days, s.today())
 	if err := s.store.SaveSchedule(id, element.Schedule, time.Now()); err != nil {
 		s.fail(w, err)
 		return
 	}
 
-	// Same call handleRead makes: the previews come from the scheduler
-	// itself, so this fragment cannot promise an interval grading would not
-	// actually produce.
-	previews := ir.Previews(element.Schedule, s.today())
-	data := readerData{
-		Element: element,
-		Intervals: map[string]string{
-			"next":   previews[ir.GradeNext].Interval,
-			"sooner": previews[ir.GradeSooner].Interval,
-		},
-		// The fragment being re-rendered is the whole schedule-buttons row,
-		// presets included — without this they would vanish from the page
-		// the moment one of them is clicked.
-		Backlog: ir.BacklogOptions(element.ID),
-	}
+	s.redirect(w, r, redirectTarget(r, "/next"))
+}
 
-	var buffer bytes.Buffer
-	if err := s.pages["reader.html"].ExecuteTemplate(&buffer, "schedule-buttons", data); err != nil {
-		s.fail(w, fmt.Errorf("web: render schedule buttons: %w", err))
-		return
+// redirectTarget reads where a POST wants to land afterwards, falling back
+// to def if none was given. Only ever a path on this site: an absolute URL
+// or a protocol-relative one (//host/…) would send the browser somewhere
+// this handler never intended, so both are rejected in favour of the
+// default rather than trusted as given.
+func redirectTarget(r *http.Request, def string) string {
+	target := r.FormValue("redirect")
+	if target == "" || !strings.HasPrefix(target, "/") || strings.HasPrefix(target, "//") {
+		return def
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	buffer.WriteTo(w)
+	return target
 }
 
 // handleProgress records how far through a topic the reader has scrolled.

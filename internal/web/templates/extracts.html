@@ -42,6 +42,26 @@
             {{end}}
             {{if not .HasRange}}<span title="not located in the article text">unanchored</span>{{end}}
             <span title="priority: lower is more important">p{{percent .Schedule.Priority}}</span>
+            <span title="scheduled">{{date .Schedule.DueOn}}</span>
+            {{if or (eq (printf "%s" .Schedule.State) "new") (eq (printf "%s" .Schedule.State) "reading")}}
+              <!-- Same control and endpoint as the reader's own backlog
+                   buttons (see ir.BacklogOptions) — just a dropdown here
+                   instead of a row of buttons, since a list of these is
+                   repeated once per row. redirect sends the reader back to
+                   this exact list (filters and search included) rather than
+                   into the reading queue, which is what the same control on
+                   the reader page does instead. -->
+              <select class="reschedule"
+                      hx-post="/elements/{{.ID}}/backlog"
+                      hx-trigger="change"
+                      hx-vals="js:{days: event.target.value, redirect: window.location.pathname + window.location.search}"
+                      title="Reschedule">
+                <option value="" selected disabled>reschedule…</option>
+                {{range backlogOptions .ID}}
+                  <option value="{{.Days}}">{{.Label}}</option>
+                {{end}}
+              </select>
+            {{end}}
             <span class="source">from <a href="/read/{{.ParentID}}">{{.DocumentTitle}}</a></span>
             <!-- Removes just this row in place: hx-target/hx-swap point at the
                  <li> itself, and swap_only=1 tells the handler to answer with

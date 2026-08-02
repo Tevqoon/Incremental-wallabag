@@ -157,13 +157,7 @@ func (n nullableElement) apply(element *Element) {
 		}
 	}
 
-	if n.dueOn.Valid && n.dueOn.String != "" {
-		// Parsed in the local zone, which main pins to the configured
-		// timezone at startup so that "today" means the reader's today.
-		if parsed, err := time.ParseInLocation(dateFormat, n.dueOn.String, time.Local); err == nil {
-			element.Schedule.DueOn = parsed
-		}
-	}
+	element.Schedule.DueOn = parseDate(n.dueOn)
 
 	if n.buriedOn.Valid {
 		element.BuriedOn = n.buriedOn.String

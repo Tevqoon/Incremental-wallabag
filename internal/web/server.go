@@ -458,4 +458,9 @@ var templateFuncs = template.FuncMap{
 		}
 		return strconv.Itoa(int(interval+0.5)) + "d"
 	},
+
+	// backlogOptions exposes the same fuzzed presets the reader's schedule
+	// panel uses, so a list row's reschedule control offers exactly the same
+	// choices — see ir.BacklogOptions.
+	"backlogOptions": ir.BacklogOptions,
 }

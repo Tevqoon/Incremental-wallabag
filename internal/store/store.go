@@ -176,6 +176,21 @@ func parseTime(value sql.NullString) time.Time {
 	return parsed
 }
 
+// parseDate reads a YYYY-MM-DD date back — due_on, always — in the local
+// zone, which main pins to the configured timezone at startup so that
+// "today" means the reader's today. NULL and unparseable values map to the
+// zero time.
+func parseDate(value sql.NullString) time.Time {
+	if !value.Valid || value.String == "" {
+		return time.Time{}
+	}
+	parsed, err := time.ParseInLocation(dateFormat, value.String, time.Local)
+	if err != nil {
+		return time.Time{}
+	}
+	return parsed
+}
+
 // IsDuplicate reports whether an error is a unique-constraint violation.
 //
 // Used where a duplicate is an expected outcome rather than a failure — most

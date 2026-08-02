@@ -291,7 +291,7 @@ mark.extract {
 .grade-groups {
   display: flex;
   flex-wrap: wrap;
-  gap: 1.5rem;
+  gap: 1.1rem;
   align-items: flex-end;
 }
 
@@ -331,11 +331,17 @@ button:hover, .button:hover { border-color: var(--accent); color: var(--accent);
 }
 /* Sooner, the backlog presets, and Next all live in one row now: the
    presets are just another point on the same "how soon" spectrum grading
-   already moves along, not a separate decision. They wrap rather than
-   overflowing, and don't need the wider min-width the interval-labelled
-   Sooner/Next buttons carry, since a preset button is just its label. */
-.schedule-buttons { flex-wrap: wrap; }
-.schedule-buttons .preset { min-width: 3.2rem; }
+   already moves along, not a separate decision. Nine buttons is a lot for
+   one row, so the presets are deliberately tighter than Sooner/Next — no
+   flex-column, no reserved space for a second line, since a preset button
+   is just its label — to give the whole footer the best chance of fitting
+   on one line before it has to wrap. */
+.schedule-buttons { flex-wrap: wrap; gap: 0.3rem; }
+.schedule-buttons .preset {
+  display: inline-block;
+  min-width: 2.6rem;
+  padding: 0.4rem 0.5rem;
+}
 
 .grade-buttons button small {
   font-size: 0.65rem;
@@ -369,7 +375,6 @@ button.danger:hover { border-color: var(--danger); color: var(--danger); }
 @media (max-width: 34rem) {
   .grade-groups { gap: 1rem; }
   .grade-buttons button { min-width: 3.9rem; padding: 0.45rem 0.5rem; }
-  .schedule-buttons .preset { min-width: 3.2rem; }
 }
 
 /* ---- Library search --------------------------------------------------- */
@@ -462,6 +467,21 @@ button.tiny {
   font-size: 0.65rem;
   padding: 0.15rem 0.4rem;
 }
+
+/* The list-row counterpart to the reader's backlog buttons (see
+   ir.BacklogOptions) — a dropdown rather than a row of buttons, since a list
+   repeats this once per item and a whole button row would dominate the row
+   it is meant to be a small part of. */
+select.reschedule {
+  font: 600 0.65rem/1 system-ui, sans-serif;
+  padding: 0.1rem 0.3rem;
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+select.reschedule:hover { border-color: var(--accent); color: var(--accent); }
 
 /* ---- Tags and star ---------------------------------------------------- */
 

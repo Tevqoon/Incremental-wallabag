@@ -664,12 +664,14 @@ func TestBacklogPutsAnElementOff(t *testing.T) {
 
 	before, _ := db.ElementByID(1)
 
+	// Behaves like a grade: it is a complete decision, so it redirects on to
+	// the next item rather than staying on the page.
 	response := post(t, server, "/elements/1/backlog", url.Values{"days": {"30"}})
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", response.Code)
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", response.Code)
 	}
-	if !strings.Contains(response.Body.String(), `id="schedule-buttons"`) {
-		t.Errorf("response body does not contain the refreshed schedule buttons: %s", response.Body.String())
+	if got := response.Header().Get("Location"); got != "/next" {
+		t.Errorf("Location = %q, want /next (the default with no redirect field)", got)
 	}
 
 	element, _ := db.ElementByID(1)
@@ -683,6 +685,55 @@ func TestBacklogPutsAnElementOff(t *testing.T) {
 	if element.Schedule.State != before.Schedule.State {
 		t.Errorf("state = %q, want unchanged at %q — backlogging is not grading it",
 			element.Schedule.State, before.Schedule.State)
+	}
+}
+
+// TestBacklogRedirectsToGivenTarget is what lets the extracts and library
+// pages offer rescheduling without dropping the reader into the reading
+// queue: their reschedule control sends its own current URL back as
+// redirect, and this is what honours it.
+func TestBacklogRedirectsToGivenTarget(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	response := post(t, server, "/elements/1/backlog", url.Values{
+		"days": {"7"}, "redirect": {"/library?state=unread"},
+	})
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", response.Code)
+	}
+	if got := response.Header().Get("Location"); got != "/library?state=unread" {
+		t.Errorf("Location = %q, want /library?state=unread", got)
+	}
+}
+
+// TestBacklogRejectsUnsafeRedirectTargets: redirect is meant for this site's
+// own pages only, never an absolute or protocol-relative URL some other
+// origin supplied — those fall back to the ordinary default instead of being
+// trusted as given.
+func TestBacklogRejectsUnsafeRedirectTargets(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	for _, bad := range []string{"https://evil.example/", "//evil.example/", "not-a-path"} {
+		response := post(t, server, "/elements/1/backlog", url.Values{
+			"days": {"7"}, "redirect": {bad},
+		})
+		if got := response.Header().Get("Location"); got != "/next" {
+			t.Errorf("redirect %q: Location = %q, want the /next fallback", bad, got)
+		}
+	}
+}
+
+// TestBacklogCapturesReadBlock: putting an element off usually happens
+// mid-read, not only from the very top, so the same scroll position grading
+// records is recorded here too.
+func TestBacklogCapturesReadBlock(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	post(t, server, "/elements/1/backlog", url.Values{"days": {"7"}, "block": {"3"}})
+
+	element, _ := db.ElementByID(1)
+	if element.ReadBlock != 3 {
+		t.Errorf("ReadBlock = %d, want 3", element.ReadBlock)
 	}
 }
 
@@ -721,8 +772,8 @@ func TestBacklogAppliesToArticlesAndExtractsAlike(t *testing.T) {
 		before, _ := db.ElementByID(id)
 
 		response := post(t, server, fmt.Sprintf("/elements/%d/backlog", id), url.Values{"days": {"7"}})
-		if response.Code != http.StatusOK {
-			t.Fatalf("element %d: status = %d, want 200", id, response.Code)
+		if response.Code != http.StatusSeeOther {
+			t.Fatalf("element %d: status = %d, want 303", id, response.Code)
 		}
 
 		element, _ := db.ElementByID(id)
@@ -736,16 +787,19 @@ func TestBacklogAppliesToArticlesAndExtractsAlike(t *testing.T) {
 	}
 }
 
-// TestBacklogUpdatesSchedulePreview: Sooner, Next and Defer grow from
-// whatever interval a backlog button just set — the same rule Previews
-// always follows, that a button can never promise something grading would
-// not actually do.
+// TestBacklogUpdatesSchedulePreview: Sooner and Next grow from whatever
+// interval a backlog button just set — the same rule Previews always
+// follows, that a button can never promise something grading would not
+// actually do. Checked by reading the page back afterwards, since backlog
+// itself now redirects rather than returning a fragment to inspect.
 func TestBacklogUpdatesSchedulePreview(t *testing.T) {
 	server, _, _ := newTestServer(t, true)
 
-	response := post(t, server, "/elements/1/backlog", url.Values{"days": {"30"}})
-	if strings.Contains(response.Body.String(), "Next<small>1d</small>") {
-		t.Errorf("schedule preview still shows the unbacklogged 1d default: %s", response.Body.String())
+	post(t, server, "/elements/1/backlog", url.Values{"days": {"30"}})
+
+	body := get(t, server, "/read/1").Body.String()
+	if strings.Contains(body, "Next<small>1d</small>") {
+		t.Errorf("schedule preview still shows the unbacklogged 1d default: %s", body)
 	}
 }
 
@@ -1103,6 +1157,33 @@ func TestLibraryListsAndSearches(t *testing.T) {
 	}
 }
 
+// TestLibraryOffersRescheduling mirrors TestExtractsPageOffersRescheduling
+// for whole articles: the library is where a reader notices something is
+// scheduled further out (or sooner) than they'd like just as often as the
+// extracts page is.
+func TestLibraryOffersRescheduling(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	body := get(t, server, "/library").Body.String()
+	if !strings.Contains(body, `hx-post="/elements/1/backlog"`) {
+		t.Errorf("no reschedule control for the unread article:\n%s", body)
+	}
+
+	// Archived material (wallabag's own "already read") has nothing left to
+	// reschedule, same reasoning as a finished extract.
+	if err := db.SaveSchedule(1, ir.Schedule{State: ir.StateSuspended}, time.Now()); err != nil {
+		t.Fatalf("SaveSchedule: %v", err)
+	}
+	body = get(t, server, "/library").Body.String()
+	if strings.Contains(body, `hx-post="/elements/1/backlog"`) {
+		t.Error("a suspended article still offers rescheduling")
+	}
+	// It gets the unsuspend button instead.
+	if !strings.Contains(body, `hx-post="/elements/1/unsuspend"`) {
+		t.Error("a suspended article lost its \"queue it\" button")
+	}
+}
+
 // TestReadPointSurvivesGrading is the mid-read pause: stopping records where
 // you stopped, and returning shows it rather than silently scrolling.
 func TestReadPointSurvivesGrading(t *testing.T) {
@@ -1282,6 +1363,49 @@ func TestExtractsPage(t *testing.T) {
 
 	if response := get(t, server, "/extracts?origin=bogus"); response.Code != http.StatusBadRequest {
 		t.Errorf("unknown origin filter: status = %d, want 400", response.Code)
+	}
+}
+
+// TestExtractsPageOffersRescheduling: browsing the harvest is also where a
+// reader notices something is scheduled further out (or sooner) than they'd
+// like, so the same backlog presets the reader page offers are available
+// here too — see ir.BacklogOptions.
+func TestExtractsPageOffersRescheduling(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	extractID, err := db.CreateExtract(store.NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "A passage.",
+		ContentHTML: "<p>A passage.</p>", Priority: 0.6,
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+
+	body := get(t, server, "/extracts").Body.String()
+	if !strings.Contains(body, time.Now().Format("2 Jan 2006")) {
+		t.Errorf("no due-date status shown for a due-today extract:\n%s", body)
+	}
+	if !strings.Contains(body, `hx-post="/elements/`+itoa(extractID)+`/backlog"`) {
+		t.Errorf("no reschedule control for the ungraded extract:\n%s", body)
+	}
+	if !strings.Contains(body, "reschedule…") {
+		t.Error("reschedule control is missing its placeholder option")
+	}
+	// redirect sends the reader back to this list, not into the reading
+	// queue — the reader page's own backlog buttons have no such field and
+	// fall back to /next instead.
+	if !strings.Contains(body, "redirect: window.location.pathname") {
+		t.Error("reschedule control does not send the reader back to this page")
+	}
+
+	// Finished material has nothing left to reschedule: its due date does
+	// not matter once grading has excluded it from the queue for good.
+	if err := db.SaveSchedule(extractID, ir.Schedule{State: ir.StateDone}, time.Now()); err != nil {
+		t.Fatalf("SaveSchedule: %v", err)
+	}
+	body = get(t, server, "/extracts").Body.String()
+	if strings.Contains(body, `hx-post="/elements/`+itoa(extractID)+`/backlog"`) {
+		t.Error("a finished extract still offers rescheduling")
 	}
 }
 

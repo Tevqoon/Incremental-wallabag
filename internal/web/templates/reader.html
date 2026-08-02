@@ -186,8 +186,7 @@
 </article>
 {{end}}
 
-<!-- Its own named template so handleGrade and handleBacklog can both
-     re-render just this afterwards: the previews still come from
+<!-- Its own named template purely for reuse — the previews come from
      ir.Previews, the same scheduler call handleRead makes, never a parallel
      client-side estimate that could drift from what grading would actually
      do.
@@ -195,9 +194,12 @@
      Sooner, the backlog presets, and Next live in one row: growing the
      interval automatically (Next) and overriding it manually (a preset) are
      the same decision — "how soon does this come back" — not two separate
-     ones, and grading afterwards grows from wherever a preset left it. Each
-     preset's label already has its fuzz applied — see ir.BacklogOptions —
-     so what a button says is exactly the date clicking it sets. -->
+     ones. Each preset's label already has its fuzz applied — see
+     ir.BacklogOptions — so what a button says is exactly the date clicking
+     it sets. A preset behaves exactly like a grade too: it redirects to the
+     next item (see handleBacklog) rather than staying on the page, since
+     picking one is a complete decision about this element, same as Sooner or
+     Next is. -->
 {{define "schedule-buttons"}}
 <div id="schedule-buttons" class="grade-buttons schedule-buttons">
   <button hx-post="/elements/{{.Element.ID}}/grade"
@@ -208,9 +210,7 @@
   {{range .Backlog}}
     <button class="preset"
             hx-post="/elements/{{$.Element.ID}}/backlog"
-            hx-vals="js:{days: {{.Days}}}"
-            hx-target="#schedule-buttons"
-            hx-swap="outerHTML"
+            hx-vals="js:{days: {{.Days}}, block: topBlock()}"
             title="Put this off; back in {{.Label}}">
       {{.Label}}
     </button>

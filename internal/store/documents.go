@@ -352,6 +352,7 @@ type LibraryEntry struct {
 	Document
 	RootElementID int64
 	State         string
+	DueOn         time.Time
 	ExtractCount  int
 }
 
@@ -387,7 +388,7 @@ func (s *Store) SearchDocuments(filter LibraryFilter) ([]LibraryEntry, error) {
 		       d.language, d.has_content, d.is_archived, d.is_starred,
 		       d.reading_time, d.published_at, d.source_updated_at,
 		       d.missing_upstream,
-		       root.id, root.state,
+		       root.id, root.state, root.due_on,
 		       (SELECT COUNT(*) FROM elements child WHERE child.parent_id = root.id)
 		FROM documents d
 		JOIN elements root ON root.document_id = d.id AND root.parent_id IS NULL
@@ -422,19 +423,21 @@ func (s *Store) SearchDocuments(filter LibraryFilter) ([]LibraryEntry, error) {
 			entry     LibraryEntry
 			published sql.NullString
 			updated   sql.NullString
+			dueOn     sql.NullString
 		)
 		err := rows.Scan(
 			&entry.ID, &entry.Source, &entry.ExternalID, &entry.URL, &entry.Title,
 			&entry.Author, &entry.Language, &entry.HasContent,
 			&entry.IsArchived, &entry.IsStarred, &entry.ReadingTime,
 			&published, &updated, &entry.MissingUpstream,
-			&entry.RootElementID, &entry.State, &entry.ExtractCount,
+			&entry.RootElementID, &entry.State, &dueOn, &entry.ExtractCount,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("store: scan library row: %w", err)
 		}
 		entry.PublishedAt = parseTime(published)
 		entry.SourceUpdatedAt = parseTime(updated)
+		entry.DueOn = parseDate(dueOn)
 		entries = append(entries, entry)
 	}
 	if err := rows.Err(); err != nil {

@@ -47,6 +47,26 @@
             {{if eq .State "suspended"}}
               <button class="tiny" hx-post="/elements/{{.RootElementID}}/unsuspend">queue it</button>
             {{end}}
+            {{if or (eq .State "new") (eq .State "reading")}}
+              <span title="scheduled">{{date .DueOn}}</span>
+              <!-- Same control and endpoint as the reader's own backlog
+                   buttons (see ir.BacklogOptions) — just a dropdown here
+                   instead of a row of buttons, since a list of these is
+                   repeated once per row. redirect sends the reader back to
+                   this exact list (filters, search and tag included) rather
+                   than into the reading queue, which is what the same
+                   control on the reader page does instead. -->
+              <select class="reschedule"
+                      hx-post="/elements/{{.RootElementID}}/backlog"
+                      hx-trigger="change"
+                      hx-vals="js:{days: event.target.value, redirect: window.location.pathname + window.location.search}"
+                      title="Reschedule">
+                <option value="" selected disabled>reschedule…</option>
+                {{range backlogOptions .RootElementID}}
+                  <option value="{{.Days}}">{{.Label}}</option>
+                {{end}}
+              </select>
+            {{end}}
             {{if .Author}}<span>{{.Author}}</span>{{end}}
             {{if .ReadingTime}}<span>{{.ReadingTime}} min</span>{{end}}
             {{range .Tags}}<a class="tag" href="/library?tag={{.}}">{{.}}</a>{{end}}
