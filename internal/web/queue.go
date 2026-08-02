@@ -515,18 +515,18 @@ func (s *Server) handleLibrary(w http.ResponseWriter, r *http.Request) {
 		Tag:   query.Get("tag"),
 	}
 	switch filter.State {
-	case "", "unread", "starred", "archived", "annotated", "missing":
+	case "", "unread", "starred", "archived", "annotated", "missing", "scheduled":
 	default:
 		http.Error(w, "unknown state filter", http.StatusBadRequest)
 		return
 	}
 
-	entries, err := s.store.SearchDocuments(filter)
+	entries, err := s.store.SearchDocuments(filter, s.today())
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
-	counts, err := s.store.CountByState("wallabag")
+	counts, err := s.store.CountByState("wallabag", s.today())
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -598,6 +598,7 @@ type extractsData struct {
 	Origin      string
 	WithClozes  bool
 	MissingOnly bool
+	Sort        string
 	Imported    int
 	Manual      int
 	Missing     int
@@ -617,10 +618,17 @@ func (s *Server) handleExtracts(w http.ResponseWriter, r *http.Request) {
 		Origin:      query.Get("origin"),
 		WithClozes:  query.Get("clozes") == "1",
 		MissingOnly: query.Get("missing") == "1",
+		Sort:        query.Get("sort"),
 		Query:       strings.TrimSpace(query.Get("q")),
 	}
 	if filter.Origin != "" && filter.Origin != store.OriginImport && filter.Origin != store.OriginManual {
 		http.Error(w, "unknown origin filter", http.StatusBadRequest)
+		return
+	}
+	switch filter.Sort {
+	case "", "due", "priority", "oldest":
+	default:
+		http.Error(w, "unknown sort", http.StatusBadRequest)
 		return
 	}
 
@@ -652,6 +660,7 @@ func (s *Server) handleExtracts(w http.ResponseWriter, r *http.Request) {
 		Origin:      filter.Origin,
 		WithClozes:  filter.WithClozes,
 		MissingOnly: filter.MissingOnly,
+		Sort:        filter.Sort,
 		Imported:    imported,
 		Manual:      manual,
 		Missing:     missing,

@@ -360,10 +360,18 @@ type LibraryEntry struct {
 type LibraryFilter struct {
 	Query string
 
-	// State is "", "unread", "starred", "archived", "annotated" or "missing" —
-	// the first four are the same divisions wallabag's own sidebar offers, so
-	// the two read the same way. "missing" is increader's own: documents the
-	// last reconciliation could not find upstream any more.
+	// State is "", "unread", "starred", "archived", "annotated", "missing" or
+	// "scheduled" — the first four are the same divisions wallabag's own
+	// sidebar offers, so the two read the same way. The rest are increader's
+	// own: "missing" is documents the last reconciliation could not find
+	// upstream any more; "scheduled" is articles due later than today,
+	// sorted furthest out first. That is a due date, not a state — Backlog
+	// deliberately leaves state alone (it is not a grade), so a
+	// never-graded article pushed out by a preset button is "scheduled"
+	// too, same as one grown out by ordinary reading. Distinct from
+	// "archived" (wallabag's own "already read", due_on cleared) and from a
+	// still-untouched import (due today, not later) — so a reader can spot
+	// something they pushed out further than they meant to.
 	State string
 
 	// Tag restricts to documents carrying this label.
@@ -373,8 +381,16 @@ type LibraryFilter struct {
 }
 
 // SearchDocuments lists documents matching a filter, most recently updated
-// first. An empty filter lists everything.
-func (s *Store) SearchDocuments(filter LibraryFilter) ([]LibraryEntry, error) {
+// first — except filter.State "scheduled", which sorts furthest due date
+// first instead; see LibraryFilter.State. An empty filter lists everything.
+//
+// today decides what "scheduled" means: due later than today, which is
+// exactly the articles worth checking whether they drifted out further than
+// intended. It is not needed for anything else SearchDocuments does, but
+// Queue and CountDue take the same parameter for the same reason — the
+// reader's own notion of today, not the server's — so this does too rather
+// than reading the clock itself.
+func (s *Store) SearchDocuments(filter LibraryFilter, today time.Time) ([]LibraryEntry, error) {
 	if filter.Limit <= 0 {
 		filter.Limit = 200
 	}
@@ -398,6 +414,7 @@ func (s *Store) SearchDocuments(filter LibraryFilter) ([]LibraryEntry, error) {
 		       OR (? = 'starred'   AND d.is_starred  = 1)
 		       OR (? = 'archived'  AND d.is_archived = 1)
 		       OR (? = 'missing'   AND d.missing_upstream = 1)
+		       OR (? = 'scheduled' AND root.due_on > ?)
 		       OR (? = 'annotated' AND EXISTS (
 		              SELECT 1 FROM elements child
 		              WHERE child.parent_id = root.id AND child.origin = 'import')))
@@ -405,11 +422,15 @@ func (s *Store) SearchDocuments(filter LibraryFilter) ([]LibraryEntry, error) {
 		          SELECT 1 FROM document_tags dt
 		          JOIN tags t ON t.id = dt.tag_id
 		          WHERE dt.document_id = d.id AND t.label = ?))
-		ORDER BY d.source_updated_at DESC
+		ORDER BY CASE WHEN ? = 'scheduled' THEN root.due_on END DESC,
+		         d.source_updated_at DESC
 		LIMIT ?`,
 		filter.Query, pattern, pattern, pattern,
-		filter.State, filter.State, filter.State, filter.State, filter.State, filter.State,
+		filter.State, filter.State, filter.State, filter.State, filter.State,
+		filter.State, today.Format(dateFormat),
+		filter.State,
 		filter.Tag, filter.Tag,
+		filter.State,
 		filter.Limit,
 	)
 	if err != nil {
@@ -462,7 +483,10 @@ func (s *Store) SearchDocuments(filter LibraryFilter) ([]LibraryEntry, error) {
 
 // CountByState returns the library counts behind the filter tabs — the same
 // numbers wallabag shows in its own sidebar.
-func (s *Store) CountByState(sourceName string) (map[string]int, error) {
+//
+// today decides the "scheduled" count the same way SearchDocuments does: due
+// later than today, not a state — see LibraryFilter.State.
+func (s *Store) CountByState(sourceName string, today time.Time) (map[string]int, error) {
 	counts := map[string]int{}
 	row := s.db.QueryRow(`
 		SELECT
@@ -471,11 +495,14 @@ func (s *Store) CountByState(sourceName string) (map[string]int, error) {
 		    SUM(CASE WHEN is_starred  = 1 THEN 1 ELSE 0 END),
 		    SUM(CASE WHEN is_archived = 1 THEN 1 ELSE 0 END),
 		    SUM(CASE WHEN missing_upstream = 1 THEN 1 ELSE 0 END),
-		    (SELECT COUNT(DISTINCT document_id) FROM elements WHERE origin = 'import')
-		FROM documents WHERE source = ?`, sourceName)
+		    (SELECT COUNT(DISTINCT document_id) FROM elements WHERE origin = 'import'),
+		    (SELECT COUNT(*) FROM elements root
+		     WHERE root.parent_id IS NULL AND root.due_on > ?
+		       AND root.document_id IN (SELECT id FROM documents WHERE source = ?))
+		FROM documents WHERE source = ?`, today.Format(dateFormat), sourceName, sourceName)
 
-	var all, unread, starred, archived, missing, annotated int
-	if err := row.Scan(&all, &unread, &starred, &archived, &missing, &annotated); err != nil {
+	var all, unread, starred, archived, missing, annotated, scheduled int
+	if err := row.Scan(&all, &unread, &starred, &archived, &missing, &annotated, &scheduled); err != nil {
 		return nil, fmt.Errorf("store: count documents by state: %w", err)
 	}
 	counts["all"] = all
@@ -484,5 +511,6 @@ func (s *Store) CountByState(sourceName string) (map[string]int, error) {
 	counts["archived"] = archived
 	counts["missing"] = missing
 	counts["annotated"] = annotated
+	counts["scheduled"] = scheduled
 	return counts, nil
 }

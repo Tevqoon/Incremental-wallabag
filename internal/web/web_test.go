@@ -1366,6 +1366,45 @@ func TestExtractsPage(t *testing.T) {
 	}
 }
 
+// TestExtractsPageSorts checks the sort control actually reorders the rows,
+// and that it survives into the filter tabs and search form so switching
+// tabs or searching doesn't silently reset it back to newest-first.
+func TestExtractsPageSorts(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	// articleBody is "The quick brown fox." — two non-overlapping extracts
+	// from the seeded document.
+	post(t, server, "/elements/1/extract", url.Values{
+		"start_block": {"0"}, "start_offset": {"4"},
+		"end_block": {"0"}, "end_offset": {"15"}, "quote": {"quick brown"},
+	})
+	post(t, server, "/elements/1/extract", url.Values{
+		"start_block": {"0"}, "start_offset": {"16"},
+		"end_block": {"0"}, "end_offset": {"19"}, "quote": {"fox"},
+	})
+	// Push "fox" out well past "quick brown" so a due-date sort can tell them apart.
+	if response := post(t, server, "/elements/3/backlog", url.Values{"days": {"30"}}); response.Code != http.StatusSeeOther && response.Code != http.StatusOK {
+		t.Fatalf("backlog: status = %d: %s", response.Code, response.Body.String())
+	}
+
+	body := get(t, server, "/extracts?sort=due").Body.String()
+	if strings.Index(body, "quick brown") > strings.Index(body, "fox") || !strings.Contains(body, "quick brown") {
+		t.Errorf("sort=due did not put the soonest-due extract first:\n%s", body)
+	}
+	if !strings.Contains(body, `value="due" selected`) {
+		t.Errorf("sort select did not remember sort=due:\n%s", body)
+	}
+
+	tabs := get(t, server, "/extracts?sort=due&origin=manual").Body.String()
+	if !strings.Contains(tabs, "sort=due") {
+		t.Errorf("filter tabs dropped sort=due when combined with origin:\n%s", tabs)
+	}
+
+	if response := get(t, server, "/extracts?sort=bogus"); response.Code != http.StatusBadRequest {
+		t.Errorf("unknown sort: status = %d, want 400", response.Code)
+	}
+}
+
 // TestExtractsPageOffersRescheduling: browsing the harvest is also where a
 // reader notices something is scheduled further out (or sooner) than they'd
 // like, so the same backlog presets the reader page offers are available
@@ -1600,6 +1639,44 @@ func TestLibraryFilterTabs(t *testing.T) {
 
 	if response := get(t, server, "/library?state=bogus"); response.Code != http.StatusBadRequest {
 		t.Errorf("unknown state filter: status = %d, want 400", response.Code)
+	}
+}
+
+// TestLibraryScheduledFilterFindsGradedArticles: "scheduled" is for finding
+// something pushed out further than intended — distinct from a still-fresh
+// import (never touched) and from archived (wallabag's own "already read").
+// Furthest due date first, so an outlier is the very first thing shown.
+func TestLibraryScheduledFilterFindsGradedArticles(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "2", Title: "Backlogged far out", UpdatedAt: time.Now()},
+		{ExternalID: "3", Title: "Backlogged not as far", UpdatedAt: time.Now()},
+		{ExternalID: "4", Title: "Never touched", UpdatedAt: time.Now()},
+		{ExternalID: "5", Title: "Archived on wallabag", IsArchived: true, UpdatedAt: time.Now()},
+	}, 0, time.Now()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	post(t, server, "/elements/2/backlog", url.Values{"days": {"400"}})
+	post(t, server, "/elements/3/backlog", url.Values{"days": {"10"}})
+
+	body := get(t, server, "/library?state=scheduled").Body.String()
+	if !strings.Contains(body, "Backlogged far out") || !strings.Contains(body, "Backlogged not as far") {
+		t.Errorf("scheduled filter is missing a backlogged article:\n%s", body)
+	}
+	if strings.Contains(body, "Never touched") {
+		t.Error("scheduled filter included an article that was never graded or backlogged")
+	}
+	if strings.Contains(body, "Archived on wallabag") {
+		t.Error("scheduled filter included an archived article")
+	}
+
+	// Furthest out first.
+	far := strings.Index(body, "Backlogged far out")
+	near := strings.Index(body, "Backlogged not as far")
+	if far == -1 || near == -1 || far > near {
+		t.Error("scheduled filter is not sorted furthest due date first")
 	}
 }
 

@@ -476,6 +476,75 @@ func TestHighlightsImportDuringSync(t *testing.T) {
 	}
 }
 
+// TestHighlightUnderANewRefAdoptsInsteadOfDuplicating guards the actual bug
+// report: UpdateHighlightLocation replaces an annotation by creating a new
+// one and best-effort deleting the old, and if that delete has not gone
+// through by the next full listing, the same quote is reported twice —
+// once under the ref already imported, once under a new one nothing local
+// matches yet. Checking external_ref alone would treat the second as a
+// brand new highlight and duplicate it.
+func TestHighlightUnderANewRefAdoptsInsteadOfDuplicating(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	document := source.Document{
+		ExternalID: "1", Title: "An article", UpdatedAt: now,
+		Highlights: []source.Highlight{{ExternalID: "100", Quote: "A passage worth keeping."}},
+	}
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, now); err != nil {
+		t.Fatalf("first import: %v", err)
+	}
+
+	extracts, _ := db.ChildrenOf(1)
+	if len(extracts) != 1 {
+		t.Fatalf("got %d extracts after first import, want 1", len(extracts))
+	}
+	firstID := extracts[0].ID
+
+	// A full listing now reports the annotation replaced: same quote, a
+	// newer ref (the old one, "100", is not in this listing at all — its
+	// delete just hasn't completed).
+	document.Highlights = []source.Highlight{{ExternalID: "200", Quote: "A passage worth keeping."}}
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, now); err != nil {
+		t.Fatalf("second import: %v", err)
+	}
+
+	extracts, _ = db.ChildrenOf(1)
+	if len(extracts) != 1 {
+		t.Fatalf("got %d extracts after the ref changed, want still 1 (adopted, not duplicated): %+v", len(extracts), extracts)
+	}
+	if extracts[0].ID != firstID {
+		t.Errorf("a new row was created (id %d) instead of adopting the ref onto the original (id %d)",
+			extracts[0].ID, firstID)
+	}
+	if extracts[0].ExternalRef != "200" {
+		t.Errorf("external ref = %q, want the new one, 200", extracts[0].ExternalRef)
+	}
+
+	// Flag it missing (as ReconcileMissingHighlights would once the old ref
+	// is confirmed gone), then have it show up again under yet another ref —
+	// adopting must also clear the flag, since it demonstrably is not
+	// missing if a current listing just reported it.
+	if _, _, err := db.ReconcileMissingHighlights("wallabag", nil); err != nil {
+		t.Fatalf("ReconcileMissingHighlights: %v", err)
+	}
+	if flagged, _ := db.ElementByID(firstID); !flagged.MissingUpstream {
+		t.Fatal("fixture element was not flagged missing — test setup is wrong")
+	}
+
+	document.Highlights = []source.Highlight{{ExternalID: "300", Quote: "A passage worth keeping."}}
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, now); err != nil {
+		t.Fatalf("third import: %v", err)
+	}
+	extracts, _ = db.ChildrenOf(1)
+	if len(extracts) != 1 {
+		t.Fatalf("got %d extracts after the third ref change, want still 1", len(extracts))
+	}
+	if extracts[0].MissingUpstream {
+		t.Error("adopting a new ref left the element flagged missing upstream")
+	}
+}
+
 func TestExtractsBrowse(t *testing.T) {
 	db := testStore(t)
 	now := time.Now()
@@ -521,6 +590,72 @@ func TestExtractsBrowse(t *testing.T) {
 			t.Error("a whole article was listed as an extract")
 		}
 	}
+}
+
+func TestExtractsSort(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
+		ExternalID: "1", Title: "Source article", UpdatedAt: now,
+	}}, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	// Created in this order: soon (due first, mid priority), far (due last,
+	// most important), mid (due in between, least important) — so each sort
+	// picks a different row first and the test can't pass by accident.
+	soon, err := db.CreateExtract(NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "soon", ContentHTML: "<p>soon</p>",
+		Priority: 0.5, DelayDays: 1,
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateExtract(soon): %v", err)
+	}
+	far, err := db.CreateExtract(NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "far", ContentHTML: "<p>far</p>",
+		Priority: 0.1, DelayDays: 30,
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateExtract(far): %v", err)
+	}
+	mid, err := db.CreateExtract(NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "mid", ContentHTML: "<p>mid</p>",
+		Priority: 0.9, DelayDays: 10,
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateExtract(mid): %v", err)
+	}
+
+	wantIDs := func(rows []ExtractRow) []int64 {
+		ids := make([]int64, len(rows))
+		for i, r := range rows {
+			ids[i] = r.ID
+		}
+		return ids
+	}
+	assertOrder := func(t *testing.T, sort string, want []int64) {
+		t.Helper()
+		got, err := db.Extracts(ExtractFilter{Sort: sort})
+		if err != nil {
+			t.Fatalf("Extracts(sort=%q): %v", sort, err)
+		}
+		gotIDs := wantIDs(got)
+		if len(gotIDs) != len(want) {
+			t.Fatalf("Extracts(sort=%q) = %v, want %v", sort, gotIDs, want)
+		}
+		for i := range want {
+			if gotIDs[i] != want[i] {
+				t.Errorf("Extracts(sort=%q) = %v, want %v", sort, gotIDs, want)
+				return
+			}
+		}
+	}
+
+	assertOrder(t, "", []int64{mid, far, soon})
+	assertOrder(t, "due", []int64{soon, mid, far})
+	assertOrder(t, "priority", []int64{far, soon, mid})
+	assertOrder(t, "oldest", []int64{soon, far, mid})
 }
 
 // TestQueueInterleavesArticlesAndExtracts guards the tie-break. Everything
@@ -1099,7 +1234,7 @@ func TestLibraryFilters(t *testing.T) {
 		{LibraryFilter{State: "archived", Query: "Annotated"}, 1},
 	}
 	for _, test := range tests {
-		got, err := db.SearchDocuments(test.filter)
+		got, err := db.SearchDocuments(test.filter, now)
 		if err != nil {
 			t.Fatalf("SearchDocuments(%+v): %v", test.filter, err)
 		}
@@ -1108,7 +1243,7 @@ func TestLibraryFilters(t *testing.T) {
 		}
 	}
 
-	counts, err := db.CountByState("wallabag")
+	counts, err := db.CountByState("wallabag", now)
 	if err != nil {
 		t.Fatalf("CountByState: %v", err)
 	}

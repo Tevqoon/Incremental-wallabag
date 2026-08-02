@@ -656,6 +656,37 @@ func insertHighlights(tx *sql.Tx, documentID, parentID int64, highlights []sourc
 			continue
 		}
 
+		// Not found under this exact ref — but is it the same passage under
+		// a *different*, newer one? UpdateHighlightLocation replaces an
+		// annotation by creating a new one and best-effort deleting the old,
+		// and if that delete has not gone through by the next full listing,
+		// the same quote shows up twice: once under the ref already stored
+		// here, once under the new one nothing local matches yet. Checking
+		// external_ref alone would treat the second as a brand new
+		// highlight and duplicate it. Adopting the new ref onto the row
+		// that is already here instead keeps one local row per highlight no
+		// matter how many times its upstream id churns underneath it.
+		var existingID int64
+		err = tx.QueryRow(`
+			SELECT id FROM elements
+			WHERE document_id = ? AND parent_id = ? AND quote = ?
+			LIMIT 1`,
+			documentID, parentID, highlight.Quote,
+		).Scan(&existingID)
+		switch {
+		case err == nil:
+			if _, err := tx.Exec(`
+				UPDATE elements SET external_ref = ?, missing_upstream = 0, updated_at = ?
+				WHERE id = ?`,
+				highlight.ExternalID, formatTime(now), existingID,
+			); err != nil {
+				return imported, fmt.Errorf("store: adopt new ref for highlight %s: %w", highlight.ExternalID, err)
+			}
+			continue
+		case !errors.Is(err, sql.ErrNoRows):
+			return imported, fmt.Errorf("store: check highlight quote %s: %w", highlight.ExternalID, err)
+		}
+
 		_, err = tx.Exec(`
 			INSERT INTO elements
 			    (document_id, parent_id, kind, title, content_html, quote,
@@ -1091,6 +1122,10 @@ type ExtractFilter struct {
 	// more, the extract-level counterpart to LibraryFilter's "missing" state.
 	MissingOnly bool
 
+	// Sort is "" (newest first), "due" (soonest due first, NULLs last),
+	// "priority" (most important first) or "oldest" (first-taken first).
+	Sort string
+
 	Query string
 	Limit int
 }
@@ -1107,13 +1142,27 @@ type ExtractRow struct {
 //
 // The queue answers "what should I read now" and deliberately interleaves
 // articles with extracts; this answers "what have I harvested", which is a
-// different question and needs its own ordering — newest first, because the
-// thing you just pulled out is the thing you most likely want.
+// different question and needs its own ordering — newest first by default,
+// because the thing you just pulled out is the thing you most likely want,
+// but see ExtractFilter.Sort for the other orderings the browse page offers.
 func (s *Store) Extracts(filter ExtractFilter) ([]ExtractRow, error) {
 	if filter.Limit <= 0 {
 		filter.Limit = 200
 	}
 	pattern := "%" + filter.Query + "%"
+
+	// filter.Sort selects one of a fixed set of Go string literals below, so
+	// it is safe to splice into the query directly — it never carries user
+	// input as SQL text, only as the ordinary bound ? parameters above it.
+	orderBy := "e.id DESC"
+	switch filter.Sort {
+	case "due":
+		orderBy = "(e.due_on IS NULL) ASC, e.due_on ASC, e.id DESC"
+	case "priority":
+		orderBy = "e.priority ASC, e.id DESC"
+	case "oldest":
+		orderBy = "e.id ASC"
+	}
 
 	rows, err := s.db.Query(`
 		SELECT `+elementColumns+`, d.title, d.url,
@@ -1126,7 +1175,7 @@ func (s *Store) Extracts(filter ExtractFilter) ([]ExtractRow, error) {
 		  AND (? = 0 OR e.kind = 'item')
 		  AND (? = 0 OR e.missing_upstream = 1)
 		  AND (? = '' OR e.quote LIKE ? OR d.title LIKE ?)
-		ORDER BY e.id DESC
+		ORDER BY `+orderBy+`
 		LIMIT ?`,
 		filter.Origin, filter.Origin,
 		filter.WithClozes,
