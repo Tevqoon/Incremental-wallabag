@@ -32,6 +32,15 @@ console.log('reading:', url);
 
 await page.waitForSelector('#article [data-b]');
 
+// Scrolled down before anything else, so the extract made below is not made
+// from the very top of the page: right at the top there is nothing above
+// the read point that could shift and drag the viewport with it, which
+// would make check 6 pass trivially regardless of whether the scroll
+// anchor in app.js actually works. A no-op on a short article that cannot
+// scroll this far, which is fine — check 6 still holds, just less usefully.
+await page.evaluate(() => window.scrollBy(0, 400));
+await page.waitForTimeout(100);
+
 // 1. The toolbar must start hidden. This is the bug from the screenshot:
 //    `hidden` loses to an author-level `display: flex`.
 const visibleAtRest = await page.isVisible('#selection-toolbar');
@@ -68,6 +77,8 @@ page.on('response', async r => {
   if (r.url().includes('/extract')) responses.push({ status: r.status(), body: await r.text().catch(() => '') });
 });
 
+const scrollBeforeExtract = await page.evaluate(() => window.scrollY);
+
 await page.click('#selection-toolbar button:has-text("Extract")');
 await page.waitForTimeout(1200);
 
@@ -87,13 +98,31 @@ const marks = await page.locator('#article mark.extract').count();
 console.log('5. highlights in the article:', marks);
 if (marks === 0) fail('no highlight appeared after extracting');
 
-// 6. The toolbar goes away afterwards.
+// 6. The viewport must not jump. htmx swaps #article wholesale for the
+//    outerHTML the extract response carries, and the fresh HTML settles at
+//    a different height than the old one whenever an image the server
+//    could not size (SVG, AVIF) or MathJax's async re-typeset changes
+//    things above the read point — app.js anchors the scroll position on
+//    the topmost visible block across exactly that swap to compensate.
+//    Waited well past its 2.5s settling budget (plus MathJax's own typeset,
+//    which can outlast that budget on a math-heavy article) before
+//    comparing, and a little slack is allowed on top of that for a
+//    straggler that finishes even later than that; the bug this guards
+//    against was a jump of a screen or more, not a few pixels.
+await page.waitForTimeout(1800);
+const scrollAfterExtract = await page.evaluate(() => window.scrollY);
+const scrollDrift = Math.abs(scrollAfterExtract - scrollBeforeExtract);
+console.log('6. scroll position preserved across extract:',
+            scrollBeforeExtract, '->', scrollAfterExtract, '(drift ' + scrollDrift + 'px)');
+if (scrollDrift > 40) fail('extracting moved the viewport by ' + scrollDrift + 'px');
+
+// 7. The toolbar goes away afterwards.
 await page.waitForTimeout(300);
 const stuck = await page.isVisible('#selection-toolbar');
-console.log('6. toolbar hidden after extracting:', !stuck);
+console.log('7. toolbar hidden after extracting:', !stuck);
 if (stuck) fail('the toolbar stayed on screen after use');
 
-// 7. Deleting the extract just made. This exercises hx-delete + hx-confirm
+// 8. Deleting the extract just made. This exercises hx-delete + hx-confirm
 //    together for the first time — a native confirm() dialog would otherwise
 //    hang the page forever waiting for a click nothing will send, so the
 //    dialog is auto-accepted before it appears.
@@ -111,7 +140,7 @@ await extractLink.click();
 await page.waitForSelector('#article [data-b]');
 
 const extractURL = page.url();
-console.log('7. opened the extract at', extractURL);
+console.log('8. opened the extract at', extractURL);
 
 const deleteRequests = [];
 page.on('response', r => {
@@ -134,11 +163,11 @@ const marksAfterDelete = await page.locator('#article mark.extract').count();
 console.log('   highlights remaining in the parent:', marksAfterDelete);
 if (marksAfterDelete !== 0) fail('the deleted extract\'s highlight is still shown');
 
-// 8. The grading bar. Each button must carry the interval its grade produces,
+// 9. The grading bar. Each button must carry the interval its grade produces,
 //    and clicking one must actually navigate to the next element — the whole
 //    bar is hx-post driven, so it fails the same silent way Extract did.
 const labels = await page.locator('.grade-buttons button').allInnerTexts();
-console.log('8. grade buttons:', JSON.stringify(labels));
+console.log('9. grade buttons:', JSON.stringify(labels));
 if (labels.length < 4) fail('the grading bar is missing buttons');
 if (!labels.some(l => /\d+(d|mo|y)/.test(l))) fail('no button shows an interval');
 
@@ -152,7 +181,7 @@ const graded = [];
 page.on('response', r => { if (r.url().includes('/grade')) graded.push(r.status()); });
 await page.click('.grade-buttons button:has-text("Later")');
 await page.waitForTimeout(1200);
-console.log('9. bury: request status', graded, '-> now at', page.url());
+console.log('10. bury: request status', graded, '-> now at', page.url());
 if (graded.length === 0) fail('clicking a grade button sent no request');
 if (!page.url().includes('/read/')) fail('grading did not move on to the next element');
 

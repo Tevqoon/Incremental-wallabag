@@ -199,17 +199,12 @@
      itself defaults to leaving single dollars alone for exactly that
      ambiguity. -->
 <script src="/static/mathjax-tex-svg.js" defer></script>
-<script>
-  // An extract taken from this article re-renders #article in place (see
-  // writeArticleFragment) without a full page load, which is the one case
-  // MathJax's own automatic on-load typesetting never sees.
-  document.body.addEventListener("htmx:afterSwap", function () {
-    var article = document.getElementById("article");
-    if (article && window.MathJax && window.MathJax.typesetPromise) {
-      window.MathJax.typesetPromise([article]);
-    }
-  });
-</script>
+<!-- The htmx:afterSwap re-typeset this used to do inline here (an extract
+     taken from this article re-renders #article in place without a full
+     page load, the one case MathJax's own automatic on-load typesetting
+     never sees) now lives in app.js, alongside the scroll anchor that has
+     to be coordinated with it — see "Scroll anchoring across an extract"
+     there. -->
 {{end}}
 
 <!-- Its own named template purely for reuse — the previews come from
