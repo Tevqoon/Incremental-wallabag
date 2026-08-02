@@ -139,25 +139,11 @@
   {{end}}
 
   <footer class="grades">
-    <!-- Grouped by the three decisions actually being made while reading:
-         I am finished with this, not this one right now, or come back to it
-         in N days. Each button carries the interval it would produce, taken
-         from the scheduler itself. -->
+    <!-- Grouped by the decisions actually being made while reading: I am
+         finished with this, not this one right now, or how soon it comes
+         back. Each button carries the interval it would produce, taken from
+         the scheduler itself. -->
     <div class="grade-groups">
-      <div class="grade-group">
-        <!-- iOS Safari can eat the tap that is supposed to press Extract
-             while a selection is showing (see app.js). This sidesteps the
-             problem: select and Copy as normal, then paste here — an
-             ordinary tap on an ordinary input field, nowhere near any
-             selection UI, which iOS has no reason to intercept. -->
-        <span class="grade-label">Extract</span>
-        <div class="grade-buttons paste-extract">
-          <input type="text" id="paste-extract-input" placeholder="Paste copied text"
-                 autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
-          <button type="button" hx-on:click="extractFromPaste()">Extract</button>
-        </div>
-      </div>
-
       <div class="grade-group">
         <span class="grade-label">Finished</span>
         <div class="grade-buttons">
@@ -185,28 +171,6 @@
         <span class="grade-label">Schedule</span>
         {{template "schedule-buttons" .}}
       </div>
-
-      <div class="grade-group">
-        <!-- A fixed menu rather than a slider: a slider's resting position
-             looked identical to a deliberate choice, so a stray drag near
-             the import default silently changed nothing, and a drag away
-             from it jumped by whatever a priority curve implied at that
-             pixel rather than a duration anyone actually asked for. Each
-             label already has its fuzz applied — see ir.BacklogOptions —
-             so what a button says is exactly the date clicking it sets. -->
-        <span class="grade-label">Backlog</span>
-        <div class="grade-buttons backlog-buttons">
-          {{range .Backlog}}
-            <button hx-post="/elements/{{$.Element.ID}}/backlog"
-                    hx-vals="js:{days: {{.Days}}}"
-                    hx-target="#schedule-buttons"
-                    hx-swap="outerHTML"
-                    title="Put this off; back in {{.Label}}">
-              {{.Label}}
-            </button>
-          {{end}}
-        </div>
-      </div>
     </div>
 
     <div class="grade-secondary">
@@ -222,27 +186,40 @@
 </article>
 {{end}}
 
-<!-- Its own named template so handlePriority can re-render just this after
-     the slider moves: the previews still come from ir.Previews, the same
-     scheduler call handleRead makes, never a parallel client-side estimate
-     that could drift from what grading would actually do. -->
+<!-- Its own named template so handleGrade and handleBacklog can both
+     re-render just this afterwards: the previews still come from
+     ir.Previews, the same scheduler call handleRead makes, never a parallel
+     client-side estimate that could drift from what grading would actually
+     do.
+
+     Sooner, the backlog presets, and Next live in one row: growing the
+     interval automatically (Next) and overriding it manually (a preset) are
+     the same decision — "how soon does this come back" — not two separate
+     ones, and grading afterwards grows from wherever a preset left it. Each
+     preset's label already has its fuzz applied — see ir.BacklogOptions —
+     so what a button says is exactly the date clicking it sets. -->
 {{define "schedule-buttons"}}
-<div id="schedule-buttons" class="grade-buttons">
+<div id="schedule-buttons" class="grade-buttons schedule-buttons">
   <button hx-post="/elements/{{.Element.ID}}/grade"
           hx-vals='js:{grade:"sooner", block: topBlock()}'
           title="More interesting than expected; bring it back sooner">
     Sooner<small>{{index .Intervals "sooner"}}</small>
   </button>
+  {{range .Backlog}}
+    <button class="preset"
+            hx-post="/elements/{{$.Element.ID}}/backlog"
+            hx-vals="js:{days: {{.Days}}}"
+            hx-target="#schedule-buttons"
+            hx-swap="outerHTML"
+            title="Put this off; back in {{.Label}}">
+      {{.Label}}
+    </button>
+  {{end}}
   <button class="primary"
           hx-post="/elements/{{.Element.ID}}/grade"
           hx-vals='js:{grade:"next", block: topBlock()}'
           title="Read a slice; come back on schedule">
     Next<small>{{index .Intervals "next"}}</small>
-  </button>
-  <button hx-post="/elements/{{.Element.ID}}/grade"
-          hx-vals='js:{grade:"defer", block: topBlock()}'
-          title="Not compelling; push it out, and further each time">
-    Defer<small>{{index .Intervals "defer"}}</small>
   </button>
 </div>
 {{end}}

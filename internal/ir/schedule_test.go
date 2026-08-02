@@ -42,32 +42,6 @@ func TestFirstRepetitionIsOneDay(t *testing.T) {
 	}
 }
 
-func TestLaterPushesOutAndCompounds(t *testing.T) {
-	// Postponing repeatedly must make a topic recede faster each time — that
-	// is how uninteresting material drains out of the queue without ever
-	// being explicitly abandoned.
-	schedule := Schedule{IntervalDays: 4, AFactor: 2.0, Priority: 1.0}
-
-	first := Next(schedule, GradeDefer, today)
-	if !closeEnough(first.AFactor, 2.4) {
-		t.Errorf("A-Factor after one Later = %.3f, want 2.4", first.AFactor)
-	}
-	if !closeEnough(first.IntervalDays, 9.6) {
-		t.Errorf("interval after one Later = %.3f, want 9.6", first.IntervalDays)
-	}
-
-	second := Next(first, GradeDefer, today)
-	if second.AFactor <= first.AFactor {
-		t.Errorf("A-Factor did not compound: %.3f then %.3f", first.AFactor, second.AFactor)
-	}
-
-	// And an ordinary Next afterwards inherits the raised A-Factor.
-	third := Next(second, GradeNext, today)
-	if !closeEnough(third.AFactor, second.AFactor) {
-		t.Errorf("Next changed the A-Factor: %.3f then %.3f", second.AFactor, third.AFactor)
-	}
-}
-
 func TestSoonerShortensAndSlowsGrowth(t *testing.T) {
 	schedule := Schedule{IntervalDays: 8, AFactor: 2.0, Priority: 1.0}
 
@@ -87,17 +61,8 @@ func TestSoonerShortensAndSlowsGrowth(t *testing.T) {
 }
 
 func TestAFactorIsClamped(t *testing.T) {
-	// Repeated Later must not run away to a decade.
-	schedule := Schedule{IntervalDays: 1, AFactor: maxAFactor, Priority: 1.0}
-	for i := 0; i < 20; i++ {
-		schedule = Next(schedule, GradeDefer, today)
-	}
-	if schedule.AFactor > maxAFactor {
-		t.Errorf("A-Factor = %.3f, want at most %.3f", schedule.AFactor, maxAFactor)
-	}
-
 	// Repeated Sooner must not collapse to no growth at all.
-	schedule = Schedule{IntervalDays: 100, AFactor: minAFactor, Priority: 1.0}
+	schedule := Schedule{IntervalDays: 100, AFactor: minAFactor, Priority: 1.0}
 	for i := 0; i < 20; i++ {
 		schedule = Next(schedule, GradeSooner, today)
 	}
@@ -469,7 +434,7 @@ func TestPreviewsMatchWhatNextDoes(t *testing.T) {
 	for _, schedule := range schedules {
 		previews := Previews(schedule, today)
 
-		for _, grade := range []Grade{GradeNext, GradeSooner, GradeDefer} {
+		for _, grade := range []Grade{GradeNext, GradeSooner} {
 			want := FormatInterval(Next(schedule, grade, today).IntervalDays)
 			if got := previews[grade].Interval; got != want {
 				t.Errorf("schedule %+v grade %d: preview %q, scheduler would give %q",
@@ -479,9 +444,10 @@ func TestPreviewsMatchWhatNextDoes(t *testing.T) {
 
 		// Sooner must never advertise a longer wait than Next, or the labels
 		// contradict the words on them.
-		if previews[GradeSooner].Interval == previews[GradeDefer].Interval &&
-			schedule.IntervalDays > 2 {
-			t.Errorf("schedule %+v: Sooner and Defer preview the same interval", schedule)
+		sooner := Next(schedule, GradeSooner, today).IntervalDays
+		next := Next(schedule, GradeNext, today).IntervalDays
+		if sooner > next {
+			t.Errorf("schedule %+v: Sooner (%.1f) exceeds Next (%.1f)", schedule, sooner, next)
 		}
 	}
 }
@@ -494,7 +460,7 @@ func TestPreviewsMarkTerminalGrades(t *testing.T) {
 			t.Errorf("grade %d is not marked terminal", grade)
 		}
 	}
-	for _, grade := range []Grade{GradeNext, GradeSooner, GradeDefer, GradeBury} {
+	for _, grade := range []Grade{GradeNext, GradeSooner, GradeBury} {
 		if previews[grade].Terminal {
 			t.Errorf("grade %d is wrongly marked terminal", grade)
 		}

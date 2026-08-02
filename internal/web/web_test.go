@@ -1520,7 +1520,7 @@ func TestBuryKeepsItTodayButLast(t *testing.T) {
 func TestGradeButtonsShowTheirIntervals(t *testing.T) {
 	server, db, _ := newTestServer(t, true)
 
-	// Give it some history so the three intervals differ from each other.
+	// Give it some history so the intervals differ from each other.
 	if err := db.SaveSchedule(1, ir.Schedule{
 		State: ir.StateReading, IntervalDays: 8, AFactor: 2.0, Reps: 3, Priority: 0.9,
 	}, time.Now()); err != nil {
@@ -1530,7 +1530,7 @@ func TestGradeButtonsShowTheirIntervals(t *testing.T) {
 	body := get(t, server, "/read/1").Body.String()
 
 	element, _ := db.ElementByID(1)
-	for _, grade := range []ir.Grade{ir.GradeNext, ir.GradeSooner, ir.GradeDefer} {
+	for _, grade := range []ir.Grade{ir.GradeNext, ir.GradeSooner} {
 		want := ir.FormatInterval(ir.Next(element.Schedule, grade, time.Now()).IntervalDays)
 		if !strings.Contains(body, ">"+want+"<") {
 			t.Errorf("the page does not show the interval %q for grade %d", want, grade)

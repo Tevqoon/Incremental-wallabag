@@ -135,7 +135,6 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 	intervals := map[string]string{
 		"next":   previews[ir.GradeNext].Interval,
 		"sooner": previews[ir.GradeSooner].Interval,
-		"defer":  previews[ir.GradeDefer].Interval,
 	}
 	backlog := ir.BacklogOptions(element.ID)
 

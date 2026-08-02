@@ -404,8 +404,11 @@ func (s *Server) handleBacklog(w http.ResponseWriter, r *http.Request) {
 		Intervals: map[string]string{
 			"next":   previews[ir.GradeNext].Interval,
 			"sooner": previews[ir.GradeSooner].Interval,
-			"defer":  previews[ir.GradeDefer].Interval,
 		},
+		// The fragment being re-rendered is the whole schedule-buttons row,
+		// presets included — without this they would vanish from the page
+		// the moment one of them is clicked.
+		Backlog: ir.BacklogOptions(element.ID),
 	}
 
 	var buffer bytes.Buffer
@@ -446,8 +449,6 @@ func parseGrade(value string) (ir.Grade, bool) {
 	switch value {
 	case "next":
 		return ir.GradeNext, true
-	case "defer":
-		return ir.GradeDefer, true
 	case "sooner":
 		return ir.GradeSooner, true
 	case "bury":

@@ -40,11 +40,9 @@ const (
 	// GradeNext: read a slice, extracted what mattered, stop here for now.
 	// The read point is kept and the interval grows normally. This is the
 	// everyday action — incremental reading is mostly the act of putting
-	// something down on purpose.
+	// something down on purpose. Putting off material that isn't worth this
+	// is Backlog's job now, not a grade — see the schedule-buttons template.
 	GradeNext Grade = iota
-	// GradeDefer: not compelling right now; push it out and let it drift
-	// further each time.
-	GradeDefer
 	// GradeSooner: more interesting than expected; bring it back and let it drift more slowly.
 	GradeSooner
 	// GradeDone: finished with this material.
@@ -139,10 +137,6 @@ func Next(schedule Schedule, grade Grade, today time.Time) Schedule {
 	case GradeBury:
 		// Position within today, not a change of schedule.
 		return schedule
-
-	case GradeDefer:
-		next.AFactor = clamp(next.AFactor*aFactorStep, minAFactor, maxAFactor)
-		next.IntervalDays = grow(schedule.IntervalDays, next.AFactor)
 
 	case GradeSooner:
 		next.AFactor = clamp(next.AFactor/aFactorStep, minAFactor, maxAFactor)
@@ -351,7 +345,7 @@ type Preview struct {
 func Previews(schedule Schedule, today time.Time) map[Grade]Preview {
 	previews := make(map[Grade]Preview, 4)
 
-	for _, grade := range []Grade{GradeNext, GradeSooner, GradeDefer} {
+	for _, grade := range []Grade{GradeNext, GradeSooner} {
 		next := Next(schedule, grade, today)
 		previews[grade] = Preview{Grade: grade, Interval: FormatInterval(next.IntervalDays)}
 	}
