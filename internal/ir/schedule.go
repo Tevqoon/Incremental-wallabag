@@ -161,86 +161,97 @@ func Next(schedule Schedule, grade Grade, today time.Time) Schedule {
 	return next
 }
 
-// FreshInterval is the interval an ungraded element is treated as carrying
-// before it has ever been graded: one day at priority 0.0 up to a year at
-// priority 1.0. Used both to back-fill a preview (see EffectiveSchedule, for
-// an extract or highlight) and to actually reschedule one (see Reprioritize,
-// for either).
-//
-// priorityCap only ever caps an interval a real grade already produced —
-// there is nothing to cap before the first one. Without a baseline of its
-// own, an ungraded element's interval sits at zero regardless of priority, so
-// grow's flat one-day floor is all Next, Sooner and Defer can ever preview
-// for it, and priority has nothing to visibly act on until it is graded once.
-func FreshInterval(priority float64) float64 {
-	return math.Pow(maxPriorityCap, clamp(priority, 0, 1))
+// BacklogPreset is one fixed duration offered for putting an element off.
+type BacklogPreset struct {
+	Days  int
+	Label string
 }
 
-// EffectiveSchedule is the schedule Next and Previews should actually use.
+// BacklogPresets are the choices on the schedule panel, from "barely wait"
+// to "basically shelved" — a fixed menu rather than a continuous slider.
+// A slider's resting position looked identical to a deliberate choice, so a
+// stray drag near the import default silently changed nothing, and a drag
+// away from it jumped by whatever a priority curve implied at that pixel
+// rather than a duration anyone actually asked for.
+var BacklogPresets = []BacklogPreset{
+	{Days: 1, Label: "1d"},
+	{Days: 7, Label: "7d"},
+	{Days: 30, Label: "1mo"},
+	{Days: 60, Label: "2mo"},
+	{Days: 180, Label: "6mo"},
+	{Days: 365, Label: "1y"},
+	{Days: 730, Label: "2y"},
+}
+
+// backlogFuzzDivisor sets the jitter's width relative to the preset it is
+// applied to: about an eighth of it, each direction.
+const backlogFuzzDivisor = 8
+
+// FuzzedBacklogDays nudges a preset by a deterministic, element-specific
+// amount, so that everyone who picks the same preset on the same day does
+// not land on the exact same due date. Piling a self-inflicted backlog onto
+// one future day is the same failure spreading a fresh import already
+// exists to avoid — see spreadOffset — just chosen by the reader instead of
+// created by an import.
 //
-// For anything already graded at least once, that is just s unchanged — a
-// due date earned by actually reading something is not something priority
-// second-guesses; see the clamp in Next for how priority still bounds it.
-// Root articles are excluded even when ungraded: an article's due date is
-// import's own, real and already accurate the moment Reprioritize has
-// touched it, so there is nothing left to substitute for preview purposes —
-// unlike an extract or highlight, which only ever gets a real interval once
-// graded, so FreshInterval fills in for the stored (zero) one, keeping its
-// preview honest about what priority alone would do right now.
-func (s Schedule) EffectiveSchedule(isRoot bool) Schedule {
-	if isRoot || s.State != StateNew {
-		return s
+// The jitter is proportional to the preset rather than a fixed number of
+// days: a day either way matters at the "1d" end and is invisible at the
+// "2y" end, so a fixed spread would be pointless at one end or absurd at the
+// other. It is floored at one day for every preset above the very shortest,
+// rather than truncating to zero — integer division alone would silently
+// turn it off for "7d" (7/8 rounds to 0), which is exactly the pile-up this
+// exists to prevent, and neglecting it there for the sake of a round number
+// would defeat the whole point.
+//
+// Deterministic on (elementID, preset) so the label a button shows and the
+// date clicking it actually sets always agree — see BacklogOptions.
+func FuzzedBacklogDays(elementID int64, preset BacklogPreset) int {
+	if preset.Days <= 1 {
+		return preset.Days
 	}
-	effective := s
-	effective.IntervalDays = FreshInterval(s.Priority)
-	return effective
+	spread := max(1, preset.Days/backlogFuzzDivisor)
+	width := int64(2*spread + 1)
+	// The second term varies the seed by preset, not just by element, so
+	// different presets on the same element don't all drift the same way.
+	seed := elementID*2654435761 + int64(preset.Days)*40503
+	offset := int(((seed % width) + width) % width)
+	return preset.Days + offset - spread
 }
 
-// Reprioritize changes an element's priority and, for anything ungraded,
-// immediately pushes its due date out to match — see EffectiveSchedule for
-// why priority otherwise has nothing to act on until graded once. That
-// covers both an imported highlight and a whole article the reader wants to
-// put off — "I'll read this in a week" is exactly this, applied to a root.
+// BacklogOption is one preset resolved for a specific element: the day count
+// its button will actually apply, fuzz included, and a label rendering it.
+type BacklogOption struct {
+	Days  int
+	Label string
+}
+
+// BacklogOptions resolves every preset for one element, fuzz applied, for
+// rendering the schedule panel. The label is the exact duration clicking the
+// button will use, never the preset's own round number — the same "preview
+// is the behaviour" rule Previews follows for grading.
+func BacklogOptions(elementID int64) []BacklogOption {
+	options := make([]BacklogOption, len(BacklogPresets))
+	for i, preset := range BacklogPresets {
+		days := FuzzedBacklogDays(elementID, preset)
+		options[i] = BacklogOption{Days: days, Label: FormatInterval(float64(days))}
+	}
+	return options
+}
+
+// Backlog puts an element off by the given number of days, starting today —
+// the explicit counterpart to grading it, for something not worth reading
+// right now but not worth abandoning either. Interval and due date are the
+// only things it touches; state, A-Factor and repetition count are left
+// alone, so this is not a grade and does not pretend to be one.
 //
-// A root gets one extra protection an extract does not need: the very first
-// time this runs on it, only a move toward less important reschedules it,
-// and only ever further out than wherever it is already due. An article is
-// due immediately by default, and without that guard, simply raising its
-// priority (nudging it toward more important) would first jump the due date
-// out to FreshInterval's own floor — always later than "today" — which is
-// the opposite of what raising priority is supposed to mean. An extract has
-// no such default to protect: importedPriority already delays it, so there
-// is no "immediate" state a stray touch could undo.
-//
-// Once a root has been through here at all, the guard no longer applies: its
-// interval is no longer import's default, and from then on it tracks the
-// slider freely in both directions, exactly like an extract already does —
-// see the non-root case for why leaving it anchored to the furthest point
-// ever dragged to would collapse Sooner, Next and Defer into one identical,
-// useless preview.
-func Reprioritize(schedule Schedule, priority float64, isRoot bool, today time.Time) Schedule {
+// Applies the same way to a root article and an extract. Unlike a slider, a
+// button click has no resting position that could be mistaken for
+// indifference, so there is no default state left to protect the way an
+// earlier, priority-driven version of this had to.
+func Backlog(schedule Schedule, days int, today time.Time) Schedule {
 	next := schedule
-	next.AFactor = clamp(orDefault(schedule.AFactor, defaultAFactor), minAFactor, maxAFactor)
-	next.Priority = clamp(priority, 0, 1)
-
-	if schedule.State != StateNew {
-		return next
-	}
-
-	interval := FreshInterval(next.Priority)
-	candidate := Day(today).AddDate(0, 0, int(math.Round(interval)))
-
-	if isRoot && schedule.IntervalDays < minInterval {
-		switch {
-		case next.Priority <= schedule.Priority:
-			return next
-		case !schedule.DueOn.IsZero() && !candidate.After(schedule.DueOn):
-			return next
-		}
-	}
-
-	next.IntervalDays = interval
-	next.DueOn = candidate
+	next.IntervalDays = float64(days)
+	next.DueOn = Day(today).AddDate(0, 0, days)
 	return next
 }
 

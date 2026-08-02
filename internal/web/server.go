@@ -131,7 +131,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /elements/{id}/cloze", s.handleCloze)
 	mux.HandleFunc("DELETE /elements/{id}/cloze/{ordinal}", s.handleDeleteCloze)
 	mux.HandleFunc("POST /elements/{id}/grade", s.handleGrade)
-	mux.HandleFunc("POST /elements/{id}/priority", s.handlePriority)
+	mux.HandleFunc("POST /elements/{id}/backlog", s.handleBacklog)
 	mux.HandleFunc("POST /elements/{id}/progress", s.handleProgress)
 	mux.HandleFunc("POST /elements/{id}/unsuspend", s.handleUnsuspend)
 	mux.HandleFunc("POST /elements/{id}/star", s.handleStar)

@@ -30,6 +30,10 @@ type readerData struct {
 	// Intervals labels each grade button with what it would actually do,
 	// keyed by the form value the button posts.
 	Intervals map[string]string
+
+	// Backlog is the resolved (fuzz applied) preset durations for the
+	// schedule panel's "put this off" buttons — see ir.BacklogOptions.
+	Backlog []ir.BacklogOption
 }
 
 // clozeRow is one deletion as the reader needs to manage it individually —
@@ -126,17 +130,14 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 
 	// Each button is labelled with the interval its grade would produce. The
 	// previews come from the scheduler itself rather than a parallel
-	// calculation, so a button cannot advertise something that would not
-	// happen — EffectiveSchedule included: an ungraded extract or highlight's
-	// interval is substituted from its priority before previewing, the same
-	// substitution handleGrade makes before actually grading it, so the two
-	// never disagree.
-	previews := ir.Previews(element.Schedule.EffectiveSchedule(element.IsRoot()), s.today())
+	// calculation, so a button cannot advertise something that would not happen.
+	previews := ir.Previews(element.Schedule, s.today())
 	intervals := map[string]string{
 		"next":   previews[ir.GradeNext].Interval,
 		"sooner": previews[ir.GradeSooner].Interval,
 		"defer":  previews[ir.GradeDefer].Interval,
 	}
+	backlog := ir.BacklogOptions(element.ID)
 
 	// The page heading is always the article's own title, not the extract's
 	// stored title: that field is a truncated echo of the passage, which is
@@ -163,6 +164,7 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 		Tags:         tags,
 		AllTags:      allTags,
 		Intervals:    intervals,
+		Backlog:      backlog,
 	})
 }
 

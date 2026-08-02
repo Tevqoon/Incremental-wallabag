@@ -519,212 +519,119 @@ func TestBuryLeavesTheScheduleAlone(t *testing.T) {
 	}
 }
 
-// TestFreshInterval pins the curve's endpoints and its shape: geometric, not
-// linear, for the same reason priorityCap is — halfway down the scale should
-// feel like a middling wait, not land near six months.
-func TestFreshInterval(t *testing.T) {
-	if got := FreshInterval(0); !closeEnough(got, 1) {
-		t.Errorf("FreshInterval(0) = %.2f, want 1 (a day, the floor)", got)
-	}
-	if got := FreshInterval(1); !closeEnough(got, 365) {
-		t.Errorf("FreshInterval(1) = %.2f, want 365 (a year, the ceiling)", got)
-	}
-	if mid := FreshInterval(0.5); mid < 15 || mid > 25 {
-		t.Errorf("FreshInterval(0.5) = %.1f, want roughly 19 (sqrt(365)), not linear interpolation (~183)", mid)
-	}
-}
+// TestFuzzedBacklogDaysStaysWithinSpread guards the shape of the jitter: it
+// must move the preset, or the fuzz is pointless, but never past the eighth
+// on either side that defines it.
+func TestFuzzedBacklogDaysStaysWithinSpread(t *testing.T) {
+	for _, preset := range BacklogPresets {
+		spread := 0
+		if preset.Days > 1 {
+			spread = max(1, preset.Days/backlogFuzzDivisor)
+		}
+		low, high := preset.Days-spread, preset.Days+spread
 
-// TestEffectiveScheduleSubstitutesForFreshNonRootElements: an ungraded
-// extract or highlight has no interval of its own yet, so without this
-// substitution its priority has nothing to act on until it is graded once —
-// see FreshInterval.
-func TestEffectiveScheduleSubstitutesForFreshNonRootElements(t *testing.T) {
-	fresh := Schedule{State: StateNew, Priority: 0.6, DueOn: today}
-
-	effective := fresh.EffectiveSchedule(false)
-
-	want := FreshInterval(0.6)
-	if !closeEnough(effective.IntervalDays, want) {
-		t.Errorf("interval = %.1f, want %.1f (FreshInterval(0.6))", effective.IntervalDays, want)
+		// A spread of many elements, not just one, since the property being
+		// checked is about the whole distribution, not a single sample.
+		for elementID := int64(1); elementID <= 200; elementID++ {
+			got := FuzzedBacklogDays(elementID, preset)
+			if got < low || got > high {
+				t.Fatalf("preset %s, element %d: fuzzed = %d, want in [%d, %d]",
+					preset.Label, elementID, got, low, high)
+			}
+		}
 	}
 }
 
-// TestEffectiveScheduleLeavesRootArticlesAlone: a whole article is due on
-// import's own schedule, not a priority curve — substituting FreshInterval
-// for it would make touching priority at all silently postpone a
-// due-today article, with nothing in the UI suggesting that would happen.
-func TestEffectiveScheduleLeavesRootArticlesAlone(t *testing.T) {
+// TestFuzzedBacklogDaysSpreadsAcrossElements is the whole point of fuzzing:
+// if everyone who clicks "1mo" today lands on the exact same due date, the
+// pile-up the fuzz exists to prevent happens anyway, just one step removed —
+// see spreadOffset for the same problem on the import side.
+func TestFuzzedBacklogDaysSpreadsAcrossElements(t *testing.T) {
+	preset := BacklogPreset{Days: 30, Label: "1mo"}
+	seen := make(map[int]bool)
+	for elementID := int64(1); elementID <= 50; elementID++ {
+		seen[FuzzedBacklogDays(elementID, preset)] = true
+	}
+	if len(seen) < 5 {
+		t.Errorf("50 elements picking the same preset produced only %d distinct due dates, want a real spread", len(seen))
+	}
+}
+
+// TestFuzzedBacklogDaysIsDeterministic: the label a button shows and the date
+// clicking it actually sets must always be the same number, or the button
+// promised something it did not do.
+func TestFuzzedBacklogDaysIsDeterministic(t *testing.T) {
+	preset := BacklogPreset{Days: 180, Label: "6mo"}
+	first := FuzzedBacklogDays(42, preset)
+	for i := 0; i < 5; i++ {
+		if got := FuzzedBacklogDays(42, preset); got != first {
+			t.Fatalf("call %d: got %d, want %d (same every time)", i, got, first)
+		}
+	}
+}
+
+// TestFuzzedBacklogDaysNeverZeroesOutTheJitter: it would be tempting to skip
+// fuzzing when a preset is already small, but a day either way is exactly
+// what stops several extracts snoozed to "7d" on the same afternoon from all
+// landing on the same future date — the case fuzzing exists for in the first
+// place.
+func TestFuzzedBacklogDaysNeverZeroesOutTheJitter(t *testing.T) {
+	preset := BacklogPreset{Days: 7, Label: "7d"}
+	seen := make(map[int]bool)
+	for elementID := int64(1); elementID <= 30; elementID++ {
+		seen[FuzzedBacklogDays(elementID, preset)] = true
+	}
+	if len(seen) < 2 {
+		t.Error("the 7d preset never varies across elements — the fuzz was neglected at the low end")
+	}
+}
+
+// TestBacklogOptionsLabelMatchesAppliedDays: the label rendered on a button
+// must describe the exact number of days Backlog would apply if that button
+// were clicked — never the preset's own round number once fuzz has moved it.
+func TestBacklogOptionsLabelMatchesAppliedDays(t *testing.T) {
+	for _, option := range BacklogOptions(7) {
+		want := FormatInterval(float64(option.Days))
+		if option.Label != want {
+			t.Errorf("days=%d label=%q, want %q", option.Days, option.Label, want)
+		}
+	}
+}
+
+// TestBacklogSetsIntervalAndDueDate: the interval and due date move to
+// exactly what was asked for, starting from today — and nothing about the
+// SM-2 state (state, reps, A-Factor) is touched, because putting something
+// off is not a grade and must not be recorded as one.
+func TestBacklogSetsIntervalAndDueDate(t *testing.T) {
+	schedule := Schedule{State: StateReading, IntervalDays: 8, AFactor: 2.4, Reps: 3, Priority: 0.3}
+
+	after := Backlog(schedule, 30, today)
+
+	if after.IntervalDays != 30 {
+		t.Errorf("interval = %.1f, want 30", after.IntervalDays)
+	}
+	wantDue := Day(today).AddDate(0, 0, 30)
+	if !after.DueOn.Equal(wantDue) {
+		t.Errorf("due = %v, want %v", after.DueOn, wantDue)
+	}
+	if after.State != schedule.State || after.Reps != schedule.Reps || after.AFactor != schedule.AFactor {
+		t.Errorf("Backlog changed grading state: got %+v, want state/reps/afactor unchanged from %+v", after, schedule)
+	}
+}
+
+// TestBacklogAppliesToFreshAndGradedElementsAlike: unlike the slider it
+// replaced, a backlog button has no default resting position that could be
+// mistaken for indifference, so it needs no special case for an element that
+// has never been graded — it behaves exactly the same either way.
+func TestBacklogAppliesToFreshAndGradedElementsAlike(t *testing.T) {
 	fresh := Schedule{State: StateNew, Priority: 0.5, DueOn: today}
+	after := Backlog(fresh, 7, today)
 
-	effective := fresh.EffectiveSchedule(true)
-
-	if effective != fresh {
-		t.Errorf("EffectiveSchedule(isRoot=true) changed a root article's schedule: got %+v, want %+v", effective, fresh)
-	}
-}
-
-// TestEffectiveScheduleLeavesGradedElementsAlone: once something has a due
-// date earned by actually reading it, that supersedes any priority-derived
-// guess — same reasoning as Reprioritize's own State check.
-func TestEffectiveScheduleLeavesGradedElementsAlone(t *testing.T) {
-	reading := Schedule{State: StateReading, IntervalDays: 8, Priority: 0.6, DueOn: today}
-
-	effective := reading.EffectiveSchedule(false)
-
-	if effective != reading {
-		t.Errorf("EffectiveSchedule changed a graded element's schedule: got %+v, want %+v", effective, reading)
-	}
-}
-
-// TestReprioritizeBacklogsAFreshElement: a fresh highlight has no due date
-// earned by reading, so dragging its priority toward "matters less" must move
-// the date itself immediately rather than waiting for a grade that may never
-// come for months.
-func TestReprioritizeBacklogsAFreshElement(t *testing.T) {
-	fresh := Schedule{State: StateNew, Priority: 0.5, DueOn: today, AFactor: 2.0}
-
-	after := Reprioritize(fresh, 1.0, false, today)
-
-	if after.Priority != 1.0 {
-		t.Errorf("priority = %.2f, want 1.0", after.Priority)
-	}
-	wantDue := Day(today).AddDate(0, 0, 365)
-	if !after.DueOn.Equal(wantDue) {
-		t.Errorf("due = %v, want %v (a year out, FreshInterval(1.0))", after.DueOn, wantDue)
-	}
-	if !closeEnough(after.IntervalDays, 365) {
-		t.Errorf("interval = %.1f, want ~365 so a later grade grows from this anchor, not from zero", after.IntervalDays)
-	}
 	if after.State != StateNew {
-		t.Errorf("state = %q, want %q — reprioritizing is not grading it", after.State, StateNew)
+		t.Errorf("state = %q, want %q — backlogging is not grading it", after.State, StateNew)
 	}
-}
-
-// TestReprioritizeTracksTheSliderInBothDirections: priority always shapes an
-// ungraded element's schedule, not just the first time it is dragged toward
-// "matters less" — moving it back toward "matters more" afterwards must pull
-// the due date back in too, not leave it pinned to the furthest point ever
-// reached. This is also what keeps Sooner distinguishable from Next and
-// Defer: pinned to a stale, oversized anchor, halving it (Sooner) can still
-// exceed the cap and collapse into the same clamped value as the other two.
-func TestReprioritizeTracksTheSliderInBothDirections(t *testing.T) {
-	fresh := Schedule{State: StateNew, Priority: 0.5, DueOn: today, AFactor: 2.0}
-
-	backlogged := Reprioritize(fresh, 1.0, false, today)
-	settled := Reprioritize(backlogged, 0.8, false, today)
-
-	wantInterval := FreshInterval(0.8)
-	if !closeEnough(settled.IntervalDays, wantInterval) {
-		t.Errorf("interval = %.1f, want ~%.1f (FreshInterval(0.8), not still anchored to FreshInterval(1.0))",
-			settled.IntervalDays, wantInterval)
-	}
-	wantDue := Day(today).AddDate(0, 0, int(math.Round(wantInterval)))
-	if !settled.DueOn.Equal(wantDue) {
-		t.Errorf("due = %v, want %v", settled.DueOn, wantDue)
-	}
-
-	// With the anchor no longer oversized, the three grade previews must not
-	// all collapse into the same clamped ceiling.
-	previews := Previews(settled, today)
-	if previews[GradeSooner].Interval == previews[GradeNext].Interval {
-		t.Errorf("Sooner and Next both preview %q; the anchor is still too large for Sooner to differ",
-			previews[GradeNext].Interval)
-	}
-}
-
-// TestReprioritizeCanBacklogAWholeArticle: "I'll read this in a week" has to
-// apply to a root the same as an extract — dragging priority toward less
-// important pushes a fresh article's due date out too.
-func TestReprioritizeCanBacklogAWholeArticle(t *testing.T) {
-	article := Schedule{State: StateNew, Priority: 0.5, DueOn: today}
-
-	after := Reprioritize(article, 1.0, true, today)
-
-	if after.Priority != 1.0 {
-		t.Errorf("priority = %.2f, want 1.0", after.Priority)
-	}
-	wantDue := Day(today).AddDate(0, 0, 365)
+	wantDue := Day(today).AddDate(0, 0, 7)
 	if !after.DueOn.Equal(wantDue) {
-		t.Errorf("due = %v, want %v (a year out, FreshInterval(1.0))", after.DueOn, wantDue)
-	}
-}
-
-// TestReprioritizeNeverBuriesAnUntouchedArticle: an article is due
-// immediately by default. The very first time priority moves on it, raising
-// importance (the only direction that matters while it still sits at that
-// default) must leave the due date alone — without this, nudging priority at
-// all would jump a due-today article out to FreshInterval's floor, which is
-// always later than "today" and the opposite of what raising priority means.
-func TestReprioritizeNeverBuriesAnUntouchedArticle(t *testing.T) {
-	article := Schedule{State: StateNew, Priority: 0.6, DueOn: today}
-
-	after := Reprioritize(article, 0.1, true, today)
-
-	if after.Priority != 0.1 {
-		t.Errorf("priority = %.2f, want 0.1", after.Priority)
-	}
-	if !after.DueOn.Equal(today) || after.IntervalDays != article.IntervalDays {
-		t.Errorf("raising priority on an untouched article changed its schedule: %+v", after)
-	}
-}
-
-// TestReprioritizeTracksAnAlreadyBacklogedArticleFreely: once an article has
-// been backlogged at all, its interval is no longer import's default, so
-// further slider moves — including back toward more important — track it
-// freely, the same as an extract does once anchored. Leaving it pinned to
-// the furthest point ever dragged to would be the exact bug
-// TestReprioritizeTracksTheSliderInBothDirections guards for extracts.
-func TestReprioritizeTracksAnAlreadyBacklogedArticleFreely(t *testing.T) {
-	article := Schedule{State: StateNew, Priority: 0.5, DueOn: today}
-
-	backlogged := Reprioritize(article, 1.0, true, today)
-	settled := Reprioritize(backlogged, 0.2, true, today)
-
-	wantInterval := FreshInterval(0.2)
-	if !closeEnough(settled.IntervalDays, wantInterval) {
-		t.Errorf("interval = %.1f, want ~%.1f (FreshInterval(0.2), not still anchored to FreshInterval(1.0))",
-			settled.IntervalDays, wantInterval)
-	}
-	wantDue := Day(today).AddDate(0, 0, int(math.Round(wantInterval)))
-	if !settled.DueOn.Equal(wantDue) {
-		t.Errorf("due = %v, want %v", settled.DueOn, wantDue)
-	}
-}
-
-// TestReprioritizeOnlyPushesAnArticleOutPastItsCurrentDueDate: on an
-// untouched article's first backlog, a small move toward less important must
-// not pull the due date in if it is already scheduled further out than that —
-// same reasoning as the guard against pulling a due date in at all, just for
-// the case where there already is a later one to preserve.
-func TestReprioritizeOnlyPushesAnArticleOutPastItsCurrentDueDate(t *testing.T) {
-	farOut := Day(today).AddDate(0, 0, 300)
-	article := Schedule{State: StateNew, Priority: 0.5, DueOn: farOut}
-
-	// FreshInterval(0.6) is roughly 34 days — far short of the 300 days this
-	// article is already scheduled out to.
-	after := Reprioritize(article, 0.6, true, today)
-
-	if !after.DueOn.Equal(farOut) {
-		t.Errorf("due = %v, want unchanged at %v (already further out than the new interval)", after.DueOn, farOut)
-	}
-}
-
-// TestReprioritizeLeavesGradedElementsAlone: an element already in circulation
-// has a due date earned by actually reading it. Reprioritize must behave like
-// a plain priority write there — see the min() clamp in Next for how priority
-// still bounds it, just not by rewriting history on the spot.
-func TestReprioritizeLeavesGradedElementsAlone(t *testing.T) {
-	reading := Schedule{
-		State: StateReading, IntervalDays: 8, AFactor: 2.4, Reps: 3,
-		Priority: 0.3, DueOn: today,
-	}
-
-	after := Reprioritize(reading, 0.9, false, today)
-
-	if after.Priority != 0.9 {
-		t.Errorf("priority = %.2f, want 0.9", after.Priority)
-	}
-	if !after.DueOn.Equal(today) || after.IntervalDays != 8 || after.Reps != 3 {
-		t.Errorf("reprioritizing a graded element changed its schedule: %+v", after)
+		t.Errorf("due = %v, want %v", after.DueOn, wantDue)
 	}
 }

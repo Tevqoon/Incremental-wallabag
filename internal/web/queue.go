@@ -128,12 +128,7 @@ func (s *Server) handleGrade(w http.ResponseWriter, r *http.Request) {
 
 	// The whole scheduling decision is one pure function call. Everything
 	// stateful — reading the row, writing it back — stays here.
-	//
-	// EffectiveSchedule first, so grading an ungraded extract or highlight for
-	// the very first time grows from the same priority-derived interval its
-	// button preview already promised (see handleRead) — not the flat one-day
-	// floor Next would otherwise fall back to.
-	updated := ir.Next(element.Schedule.EffectiveSchedule(element.IsRoot()), grade, s.today())
+	updated := ir.Next(element.Schedule, grade, s.today())
 
 	if err := s.store.SaveSchedule(id, updated, time.Now()); err != nil {
 		s.fail(w, err)
@@ -366,27 +361,25 @@ func (s *Server) tagTarget(w http.ResponseWriter, r *http.Request) (int64, store
 	return id, document, true
 }
 
-// handlePriority changes how urgently an element competes for attention.
+// handleBacklog puts an element off by a fixed number of days, immediately —
+// the explicit counterpart to grading it, for the schedule panel's preset
+// buttons. See ir.Backlog and ir.BacklogOptions.
 //
-// Answers with the schedule buttons re-rendered for the new priority, rather
-// than 204, because the buttons' day counts are a function of it (via
-// priorityCap) — leaving them stale would let the slider silently disagree
-// with what grading is about to do. The reader.html template targets this
-// response at #schedule-buttons.
-func (s *Server) handlePriority(w http.ResponseWriter, r *http.Request) {
+// Answers with the schedule buttons re-rendered, not 204: Sooner, Next and
+// Defer grow from whatever interval this just set (ir.Next reads it off the
+// schedule same as always), so leaving the buttons stale would let them
+// silently disagree with what grading is about to do. The reader.html
+// template targets this response at #schedule-buttons.
+func (s *Server) handleBacklog(w http.ResponseWriter, r *http.Request) {
 	id, err := elementID(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	priority, err := strconv.ParseFloat(r.FormValue("priority"), 64)
-	if err != nil {
-		http.Error(w, "priority must be a number", http.StatusBadRequest)
-		return
-	}
-	if priority < 0 || priority > 1 {
-		http.Error(w, "priority must be between 0 and 1", http.StatusBadRequest)
+	days, err := strconv.Atoi(r.FormValue("days"))
+	if err != nil || days < 1 {
+		http.Error(w, "days must be a positive integer", http.StatusBadRequest)
 		return
 	}
 
@@ -396,12 +389,7 @@ func (s *Server) handlePriority(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reprioritize, not a plain field write: an ungraded extract or highlight
-	// has no due date earned by reading it, so dragging the slider toward
-	// "matters less" needs to move the date itself, not just a number that
-	// would only ever be consulted once the reader gets around to grading it.
-	// Root articles are excluded — see Reprioritize.
-	element.Schedule = ir.Reprioritize(element.Schedule, priority, element.IsRoot(), s.today())
+	element.Schedule = ir.Backlog(element.Schedule, days, s.today())
 	if err := s.store.SaveSchedule(id, element.Schedule, time.Now()); err != nil {
 		s.fail(w, err)
 		return

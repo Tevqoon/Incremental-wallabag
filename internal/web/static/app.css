@@ -341,6 +341,12 @@ button:hover, .button:hover { border-color: var(--accent); color: var(--accent);
 
 .paste-extract button { min-width: 0; flex-direction: row; }
 
+/* Seven presets, not one to three like every other grade group — wraps
+   rather than overflowing, and each button is just its label, so it does not
+   need the wider min-width the interval-labelled grade buttons carry. */
+.backlog-buttons { flex-wrap: wrap; max-width: 20rem; }
+.backlog-buttons button { min-width: 3.2rem; }
+
 .grade-buttons button small {
   font-size: 0.65rem;
   font-weight: 400;
@@ -370,20 +376,10 @@ button.danger:hover { border-color: var(--danger); color: var(--danger); }
   color: var(--muted);
 }
 
-.priority {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  margin-left: auto;
-  font: 0.7rem/1 system-ui, sans-serif;
-  color: var(--muted);
-}
-.priority input { width: 7rem; }
-
 @media (max-width: 34rem) {
   .grade-groups { gap: 1rem; }
   .grade-buttons button { min-width: 3.9rem; padding: 0.45rem 0.5rem; }
-  .priority { margin-left: 0; width: 100%; }
+  .backlog-buttons { max-width: none; }
   .paste-extract { width: 100%; }
   .paste-extract input { flex: 1; width: auto; }
 }

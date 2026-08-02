@@ -656,15 +656,15 @@ func TestGradeRejectsUnknownValue(t *testing.T) {
 	}
 }
 
-func TestPriorityUpdate(t *testing.T) {
+// TestBacklogPutsAnElementOff is the schedule panel's preset buttons: unlike
+// the slider they replaced, a click sets the due date directly and
+// immediately, no grade required.
+func TestBacklogPutsAnElementOff(t *testing.T) {
 	server, db, _ := newTestServer(t, true)
 
-	// Answers with the refreshed schedule buttons, not 204: the day counts
-	// they show depend on priority (via priorityCap), so the slider moving
-	// must bring back something for htmx to swap in.
-	response := post(t, server, "/elements/1/priority", url.Values{
-		"priority": {"0.1"},
-	})
+	before, _ := db.ElementByID(1)
+
+	response := post(t, server, "/elements/1/backlog", url.Values{"days": {"30"}})
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", response.Code)
 	}
@@ -673,64 +673,40 @@ func TestPriorityUpdate(t *testing.T) {
 	}
 
 	element, _ := db.ElementByID(1)
-	if element.Schedule.Priority != 0.1 {
-		t.Errorf("priority = %v, want 0.1", element.Schedule.Priority)
+	wantDue := ir.Day(time.Now()).AddDate(0, 0, 30)
+	if !element.Schedule.DueOn.Equal(wantDue) {
+		t.Errorf("due = %v, want %v", element.Schedule.DueOn, wantDue)
 	}
-
-	// Out-of-range values must be rejected, not clamped silently.
-	for _, bad := range []string{"-0.5", "1.5", "high"} {
-		if response := post(t, server, "/elements/1/priority", url.Values{
-			"priority": {bad},
-		}); response.Code != http.StatusBadRequest {
-			t.Errorf("priority %q: status = %d, want 400", bad, response.Code)
-		}
+	if element.Schedule.IntervalDays != 30 {
+		t.Errorf("interval = %.1f, want 30", element.Schedule.IntervalDays)
+	}
+	if element.Schedule.State != before.Schedule.State {
+		t.Errorf("state = %q, want unchanged at %q — backlogging is not grading it",
+			element.Schedule.State, before.Schedule.State)
 	}
 }
 
-// TestPriorityUpdateChangesScheduleButtons guards the actual bug report: the
-// day counts on the schedule buttons must reflect the priority just set, not
-// whatever was on the page when it loaded. A fresh element's first interval
-// (1 day) sits under even the tightest priorityCap, so the two would look
-// identical regardless of whether the fix works — the element is graded
-// forward first so its interval is large enough for priority to visibly
-// clamp it.
-func TestPriorityUpdateChangesScheduleButtons(t *testing.T) {
+// TestBacklogRejectsInvalidDays guards against silently accepting nonsense —
+// a negative or zero day count has no sensible due date to produce.
+func TestBacklogRejectsInvalidDays(t *testing.T) {
 	server, _, _ := newTestServer(t, true)
 
-	// Five "next" grades grow the interval 1, 2, 4, 8, 16 days (AFactor 2.0,
-	// untouched by GradeNext) — past the low-priority cap (7d) but short of
-	// the high-priority one (365d).
-	for i := 0; i < 5; i++ {
-		// Grading redirects on success (to wherever "next" sends the reader),
-		// so 200 is not the right expectation here.
-		if response := post(t, server, "/elements/1/grade", url.Values{"grade": {"next"}}); response.Code >= 400 {
-			t.Fatalf("grade %d: status = %d", i, response.Code)
+	for _, bad := range []string{"-5", "0", "high"} {
+		if response := post(t, server, "/elements/1/backlog", url.Values{
+			"days": {bad},
+		}); response.Code != http.StatusBadRequest {
+			t.Errorf("days %q: status = %d, want 400", bad, response.Code)
 		}
-	}
-
-	low := post(t, server, "/elements/1/priority", url.Values{"priority": {"0"}})
-	if !strings.Contains(low.Body.String(), "Next<small>7d</small>") {
-		t.Errorf("priority 0 (cap 7d): body = %s", low.Body.String())
-	}
-
-	high := post(t, server, "/elements/1/priority", url.Values{"priority": {"1"}})
-	if !strings.Contains(high.Body.String(), "Next<small>1.1mo</small>") {
-		t.Errorf("priority 1 (cap 365d, raw interval 32d): body = %s", high.Body.String())
 	}
 }
 
-// TestPriorityImmediatelyBacklogsAFreshElement is the actual bug report: a
-// freshly imported highlight has never been graded, so it has no interval for
-// priority to cap and the slider used to have no visible effect at all — not
-// until the reader graded it, which for a deliberately deprioritized item
-// might be months later, if ever. Dragging priority toward "matters less"
-// must reschedule it immediately instead of waiting for that grade.
-//
-// Uses an extract rather than element 1 itself so it exercises the
-// unconditional non-root path — an already-untouched article takes the
-// protected first-touch path instead, covered by
-// TestPriorityCanBacklogAWholeArticle and TestPriorityNeverBuriesAnUntouchedArticle.
-func TestPriorityImmediatelyBacklogsAFreshElement(t *testing.T) {
+// TestBacklogAppliesToArticlesAndExtractsAlike is what the preset buttons
+// replaced the slider to get: a whole article and an extract are put off the
+// same way, with no special-casing for whichever one is still sitting at its
+// import default. The slider needed one, to keep a stray drag from silently
+// postponing a due-today article — a deliberate button click has no such
+// accidental resting position to protect against.
+func TestBacklogAppliesToArticlesAndExtractsAlike(t *testing.T) {
 	server, db, _ := newTestServer(t, true)
 
 	extractID, err := db.CreateExtract(store.NewExtract{
@@ -741,72 +717,52 @@ func TestPriorityImmediatelyBacklogsAFreshElement(t *testing.T) {
 		t.Fatalf("CreateExtract: %v", err)
 	}
 
-	before, _ := db.ElementByID(extractID)
-	if before.Schedule.State != ir.StateNew {
-		t.Fatalf("fixture element state = %q, want %q for this test to mean anything", before.Schedule.State, ir.StateNew)
-	}
+	for _, id := range []int64{1, extractID} { // article, then extract
+		before, _ := db.ElementByID(id)
 
-	response := post(t, server, fmt.Sprintf("/elements/%d/priority", extractID), url.Values{"priority": {"1"}})
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", response.Code)
-	}
-	if strings.Contains(response.Body.String(), "Next<small>1d</small>") {
-		t.Errorf("schedule buttons still show the unbacklogged 1d preview: %s", response.Body.String())
-	}
+		response := post(t, server, fmt.Sprintf("/elements/%d/backlog", id), url.Values{"days": {"7"}})
+		if response.Code != http.StatusOK {
+			t.Fatalf("element %d: status = %d, want 200", id, response.Code)
+		}
 
-	element, _ := db.ElementByID(extractID)
-	if element.Schedule.State != ir.StateNew {
-		t.Errorf("state = %q, want %q — reprioritizing must not grade it", element.Schedule.State, ir.StateNew)
-	}
-	if !element.Schedule.DueOn.After(before.Schedule.DueOn) {
-		t.Errorf("due = %v, want pushed out past the original %v", element.Schedule.DueOn, before.Schedule.DueOn)
+		element, _ := db.ElementByID(id)
+		wantDue := ir.Day(time.Now()).AddDate(0, 0, 7)
+		if !element.Schedule.DueOn.Equal(wantDue) {
+			t.Errorf("element %d: due = %v, want %v", id, element.Schedule.DueOn, wantDue)
+		}
+		if element.Schedule.State != before.Schedule.State {
+			t.Errorf("element %d: state changed from %q to %q", id, before.Schedule.State, element.Schedule.State)
+		}
 	}
 }
 
-// TestPriorityCanBacklogAWholeArticle: "I'll read this in a week" has to work
-// on a whole article, not just an extract — dragging priority toward less
-// important pushes a fresh article's due date out too, immediately.
-func TestPriorityCanBacklogAWholeArticle(t *testing.T) {
-	server, db, _ := newTestServer(t, true)
+// TestBacklogUpdatesSchedulePreview: Sooner, Next and Defer grow from
+// whatever interval a backlog button just set — the same rule Previews
+// always follows, that a button can never promise something grading would
+// not actually do.
+func TestBacklogUpdatesSchedulePreview(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
 
-	before, _ := db.ElementByID(1)
-
-	// The fixture article sits at defaultPriority (0.5); this moves toward
-	// less important.
-	response := post(t, server, "/elements/1/priority", url.Values{"priority": {"1"}})
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", response.Code)
-	}
+	response := post(t, server, "/elements/1/backlog", url.Values{"days": {"30"}})
 	if strings.Contains(response.Body.String(), "Next<small>1d</small>") {
-		t.Errorf("a whole article's preview did not change from backlogging it: %s", response.Body.String())
-	}
-
-	element, _ := db.ElementByID(1)
-	if !element.Schedule.DueOn.After(before.Schedule.DueOn) {
-		t.Errorf("due = %v, want pushed out past the original %v", element.Schedule.DueOn, before.Schedule.DueOn)
+		t.Errorf("schedule preview still shows the unbacklogged 1d default: %s", response.Body.String())
 	}
 }
 
-// TestPriorityNeverBuriesAnUntouchedArticle: an article is due immediately by
-// default. Raising its priority — the only direction that matters while it
-// still sits at that default — must not silently postpone it; only a
-// deliberate move toward less important is a request to put it off.
-func TestPriorityNeverBuriesAnUntouchedArticle(t *testing.T) {
-	server, db, _ := newTestServer(t, true)
+// TestReaderShowsBacklogButtons is a smoke test for the schedule panel
+// itself: every preset should render with a fuzzed, non-empty label, not the
+// removed priority slider.
+func TestReaderShowsBacklogButtons(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
 
-	before, _ := db.ElementByID(1)
-
-	response := post(t, server, "/elements/1/priority", url.Values{"priority": {"0.1"}})
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", response.Code)
+	body := get(t, server, "/read/1").Body.String()
+	if strings.Contains(body, `class="priority"`) {
+		t.Error("the reader still renders the old priority slider")
 	}
-	if !strings.Contains(response.Body.String(), "Next<small>1d</small>") {
-		t.Errorf("a fresh article's preview changed just from raising its priority: %s", response.Body.String())
-	}
-
-	element, _ := db.ElementByID(1)
-	if !element.Schedule.DueOn.Equal(before.Schedule.DueOn) {
-		t.Errorf("due = %v, want unchanged at %v", element.Schedule.DueOn, before.Schedule.DueOn)
+	for _, option := range ir.BacklogOptions(1) {
+		if !strings.Contains(body, option.Label) {
+			t.Errorf("reader body does not contain backlog label %q", option.Label)
+		}
 	}
 }
 
