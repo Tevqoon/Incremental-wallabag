@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1
+
 # Build stage. The full Go toolchain lives here and is discarded afterwards.
 FROM golang:1.26-alpine AS build
 
@@ -28,7 +30,15 @@ COPY . .
 #                   the default "auto", which quietly omits it. An image that
 #                   cannot identify itself is how a stale container goes
 #                   unnoticed, so this is worth failing the build over.
-RUN CGO_ENABLED=0 go build -trimpath -buildvcs=true -ldflags="-s -w" -o /increader ./cmd/increader
+#
+# -trimpath changes the build ID of every package it touches, which is all of
+# them — including the standard library. That invalidates the toolchain's own
+# shipped build cache, so without a cache of our own every build recompiles
+# the standard library from scratch. The mount is that cache, kept across
+# builds by BuildKit rather than baked into an image layer: a rebuild after a
+# source change only recompiles what actually changed.
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -trimpath -buildvcs=true -ldflags="-s -w" -o /increader ./cmd/increader
 
 # Runtime stage. distroless/static has no shell, no package manager and no libc:
 # only CA certificates (needed for HTTPS to wallabag.it), /etc/passwd and a
