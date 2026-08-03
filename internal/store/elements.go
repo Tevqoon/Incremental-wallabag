@@ -72,6 +72,14 @@ type Element struct {
 	Origin      string
 	ExternalRef string
 
+	// Ranges is the provider's own position record for this highlight, e.g.
+	// wallabag's XPath ranges — stored opaquely, exactly as
+	// source.Highlight.Ranges carried it in, for wallabag.Source's
+	// ResolveRange to recover the highlight's full text from later, once
+	// the article's own HTML is available. Empty for anything that is not
+	// an imported highlight with one, which is most elements.
+	Ranges string
+
 	// MissingUpstream is set by Reconcile when a full listing's annotations no
 	// longer include this extract's ExternalRef — the counterpart to
 	// Document.MissingUpstream, for an individual highlight rather than a
@@ -110,7 +118,7 @@ const elementColumns = `
 	e.start_block, e.start_offset, e.end_block, e.end_offset,
 	e.priority, e.state, e.due_on, e.interval_days, e.afactor, e.reps,
 	e.read_block, e.origin, COALESCE(e.external_ref, ''), e.missing_upstream,
-	e.buried_on, e.created_at, e.updated_at`
+	e.buried_on, COALESCE(e.ranges, ''), e.created_at, e.updated_at`
 
 // nullableElement holds the columns that can be NULL, which cannot be scanned
 // straight into the Element fields they populate.
@@ -141,7 +149,7 @@ func scanTargets(element *Element, nullable *nullableElement) []any {
 		&element.Schedule.Priority, &element.Schedule.State, &nullable.dueOn,
 		&element.Schedule.IntervalDays, &element.Schedule.AFactor, &element.Schedule.Reps,
 		&element.ReadBlock, &element.Origin, &element.ExternalRef, &element.MissingUpstream,
-		&nullable.buriedOn, &nullable.createdAt, &nullable.updatedAt,
+		&nullable.buriedOn, &element.Ranges, &nullable.createdAt, &nullable.updatedAt,
 	}
 }
 
@@ -338,6 +346,10 @@ type NewExtract struct {
 	Origin      string
 	ExternalRef string
 
+	// Ranges is the provider's own position record for this highlight,
+	// carried through opaquely — see Element.Ranges.
+	Ranges string
+
 	// DelayDays is how long before the extract first becomes due. Zero means
 	// today, which is what a caller with no opinion gets.
 	DelayDays int
@@ -377,6 +389,10 @@ func (s *Store) CreateExtract(extract NewExtract, now time.Time) (int64, error) 
 	if extract.ExternalRef != "" {
 		externalRef = extract.ExternalRef
 	}
+	var ranges any
+	if extract.Ranges != "" {
+		ranges = extract.Ranges
+	}
 
 	var id int64
 	err := s.inTransaction(func(tx *sql.Tx) error {
@@ -385,13 +401,13 @@ func (s *Store) CreateExtract(extract NewExtract, now time.Time) (int64, error) 
 			    (document_id, parent_id, kind, title, content_html, quote,
 			     start_block, start_offset, end_block, end_offset,
 			     priority, state, due_on, interval_days, afactor, reps, read_block,
-			     origin, external_ref, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, 0, 2.0, 0, 0, ?, ?, ?, ?)`,
+			     origin, external_ref, ranges, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, 0, 2.0, 0, 0, ?, ?, ?, ?, ?)`,
 			extract.DocumentID, extract.ParentID, extract.Kind, extract.Title,
 			extract.ContentHTML, extract.Quote,
 			startBlock, startOffset, endBlock, endOffset,
 			extract.Priority, now.AddDate(0, 0, extract.DelayDays).Format(dateFormat),
-			extract.Origin, externalRef,
+			extract.Origin, externalRef, ranges,
 			formatTime(now), formatTime(now),
 		)
 		if err != nil {
@@ -665,6 +681,26 @@ func insertHighlights(tx *sql.Tx, documentID, parentID int64, highlights []sourc
 			return imported, fmt.Errorf("store: check highlight %s: %w", highlight.ExternalID, err)
 		}
 		if exists > 0 {
+			// Ranges is a column newer than every highlight already imported
+			// before it existed, and re-importing an existing external_ref
+			// never reaches the INSERT below that would otherwise set it —
+			// so without this, a highlight synced before this column shipped
+			// would carry a NULL ranges forever, never getting the one
+			// chance anchorHighlights' recovery fallback needs. A listing
+			// sync has annotation.Ranges even though it lacks the article
+			// body itself, so this can run here rather than waiting for the
+			// article to be opened. Guarded to a row that has none yet:
+			// once backfilled, there is nothing left to update on any later
+			// sync.
+			if len(highlight.Ranges) > 0 {
+				if _, err := tx.Exec(`
+					UPDATE elements SET ranges = ?
+					WHERE document_id = ? AND external_ref = ? AND ranges IS NULL`,
+					string(highlight.Ranges), documentID, highlight.ExternalID,
+				); err != nil {
+					return imported, fmt.Errorf("store: backfill ranges for highlight %s: %w", highlight.ExternalID, err)
+				}
+			}
 			continue
 		}
 
@@ -699,12 +735,17 @@ func insertHighlights(tx *sql.Tx, documentID, parentID int64, highlights []sourc
 			return imported, fmt.Errorf("store: check highlight quote %s: %w", highlight.ExternalID, err)
 		}
 
+		var ranges any
+		if len(highlight.Ranges) > 0 {
+			ranges = string(highlight.Ranges)
+		}
+
 		_, err = tx.Exec(`
 			INSERT INTO elements
 			    (document_id, parent_id, kind, title, content_html, quote,
 			     priority, state, due_on, interval_days, afactor, reps,
-			     read_block, origin, external_ref, created_at, updated_at)
-			VALUES (?, ?, 'topic', ?, ?, ?, ?, 'new', ?, 0, 2.0, 0, 0, 'import', ?, ?, ?)`,
+			     read_block, origin, external_ref, ranges, created_at, updated_at)
+			VALUES (?, ?, 'topic', ?, ?, ?, ?, 'new', ?, 0, 2.0, 0, 0, 'import', ?, ?, ?, ?)`,
 			documentID, parentID,
 			SummariseQuote(highlight.Quote),
 			"<p>"+html.EscapeString(highlight.Quote)+"</p>",
@@ -715,7 +756,7 @@ func insertHighlights(tx *sql.Tx, documentID, parentID int64, highlights []sourc
 			// stacking them on one date moves the pile instead of clearing it.
 			// The multiplier matches the queue's tie-break so the two agree.
 			now.AddDate(0, 0, spreadOffset(documentID, delayDays)).Format(dateFormat),
-			highlight.ExternalID,
+			highlight.ExternalID, ranges,
 			formatTime(now), formatTime(now),
 		)
 		if err != nil {

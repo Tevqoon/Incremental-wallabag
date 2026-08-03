@@ -1,7 +1,9 @@
 package wallabag
 
 import (
+	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -128,5 +130,155 @@ func TestComputeRangesFirstOccurrenceWins(t *testing.T) {
 	got := computeRanges(htmlDoc, "The repeated phrase")
 	if got == nil || got[0].Start != "/p[1]" {
 		t.Errorf("computeRanges = %+v, want the first paragraph", got)
+	}
+}
+
+// TestRecoverQuoteRoundTrips is recoverQuote's core promise: whatever
+// computeRanges resolved a quote to, recovering it back must return that
+// same passage — the whole reason this exists is to get back exactly what a
+// truncated wallabag quote could no longer describe on its own.
+func TestRecoverQuoteRoundTrips(t *testing.T) {
+	tests := []struct {
+		name  string
+		html  string
+		quote string
+	}{
+		{
+			name:  "simple paragraph",
+			html:  `<p>Before text. </p><p>The quick brown fox jumps over the lazy dog.</p><p>After text.</p>`,
+			quote: "quick brown fox",
+		},
+		{
+			name:  "wrapped in a div",
+			html:  "<div><p>Paragraph one.</p><p>Paragraph two.</p><p>The target passage is right here.</p></div>",
+			quote: "target passage",
+		},
+		{
+			name:  "spans a paragraph boundary with no gap between them",
+			html:  `<p>First paragraph ends here.</p><p>Second paragraph starts here.</p>`,
+			quote: "ends here.\n\nSecond paragraph starts",
+		},
+		{
+			name:  "boundary inside inline markup",
+			html:  `<p>Some text with <strong>an emphasised phrase</strong> in the middle.</p>`,
+			quote: "emphasised phrase",
+		},
+		{
+			name:  "boundary straddles inline markup",
+			html:  `<p>Some <strong>bold</strong> and plain text after.</p>`,
+			quote: "bold and plain",
+		},
+		{
+			name: "a whole highlight far longer than wallabag's own quote field would keep",
+			html: `<p>First paragraph of a long highlight.</p>` +
+				`<p>Second paragraph, still part of the same highlight, going on for a while.</p>` +
+				`<p>Third and final paragraph, well past where a 900-character quote would have been cut.</p>`,
+			quote: "First paragraph of a long highlight.\n\nSecond paragraph, still part of the same highlight, going on for a while.\n\nThird and final paragraph, well past where a 900-character quote would have been cut.",
+		},
+	}
+
+	// A trivial stand-in for ir.NormalizeSpace: this package deliberately
+	// does not depend on ir, and the comparison only needs to agree that a
+	// run of whitespace is a run of whitespace, not reproduce it exactly —
+	// recoverQuote's actual caller (ir.Article.Locate) applies that same
+	// normalisation to whatever it receives before ever comparing it to
+	// anything, so a difference only in how much whitespace sits at a
+	// boundary is not a real difference to that caller.
+	normalize := func(s string) string { return strings.Join(strings.Fields(s), " ") }
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ranges := computeRanges(test.html, test.quote)
+			if ranges == nil {
+				t.Fatalf("test premise is wrong: computeRanges could not find %q", test.quote)
+			}
+
+			got, ok := recoverQuote(test.html, ranges)
+			if !ok {
+				t.Fatal("recoverQuote reported failure")
+			}
+			if normalize(got) != normalize(test.quote) {
+				t.Errorf("recoverQuote = %q, want %q", got, test.quote)
+			}
+		})
+	}
+}
+
+// TestRecoverQuoteFailsSafely covers the ways a range can fail to resolve —
+// most plausibly because the article changed upstream since the highlight
+// was made — without panicking or recovering garbage.
+func TestRecoverQuoteFailsSafely(t *testing.T) {
+	html := `<p>Some ordinary paragraph.</p>`
+
+	tests := []struct {
+		name   string
+		html   string
+		ranges []serializedRange
+	}{
+		{
+			name:   "no ranges at all",
+			html:   html,
+			ranges: nil,
+		},
+		{
+			name: "xpath names an element that is not there",
+			html: html,
+			ranges: []serializedRange{
+				{Start: "/p[9]", StartOffset: "0", End: "/p[9]", EndOffset: "4"},
+			},
+		},
+		{
+			name: "offset is not a number",
+			html: html,
+			ranges: []serializedRange{
+				{Start: "/p[1]", StartOffset: "not-a-number", End: "/p[1]", EndOffset: "4"},
+			},
+		},
+		{
+			name: "the article to resolve against no longer has any content",
+			html: "",
+			ranges: []serializedRange{
+				{Start: "/p[1]", StartOffset: "0", End: "/p[1]", EndOffset: "4"},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, ok := recoverQuote(test.html, test.ranges); ok {
+				t.Error("recoverQuote reported success, want failure")
+			}
+		})
+	}
+}
+
+// TestSourceResolveRange is the public entry point importHighlights and
+// anchorHighlights actually use: decoding the raw JSON a Highlight carries
+// and recovering text from it, matching source.RangeResolver.
+func TestSourceResolveRange(t *testing.T) {
+	html := `<p>Before text. </p><p>The quick brown fox jumps over the lazy dog.</p>`
+	ranges := computeRanges(html, "quick brown fox")
+	if ranges == nil {
+		t.Fatal("test premise is wrong: computeRanges found nothing")
+	}
+	encoded, err := json.Marshal(ranges)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+
+	source := &Source{}
+	got, ok := source.ResolveRange(html, encoded)
+	if !ok {
+		t.Fatal("ResolveRange reported failure")
+	}
+	if got != "quick brown fox" {
+		t.Errorf("ResolveRange = %q, want %q", got, "quick brown fox")
+	}
+
+	if _, ok := source.ResolveRange(html, nil); ok {
+		t.Error("ResolveRange succeeded with no ranges, want failure")
+	}
+	if _, ok := source.ResolveRange(html, json.RawMessage(`not json`)); ok {
+		t.Error("ResolveRange succeeded with malformed JSON, want failure")
 	}
 }

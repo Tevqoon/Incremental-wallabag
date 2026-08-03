@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"log/slog"
@@ -254,7 +255,7 @@ func (s *Server) articleHTML(ctx context.Context, element store.Element) (string
 	// Highlights imported during sync have no position, because the listing
 	// that carries them omits the article text. Now that the text is here they
 	// can be anchored, which is what makes them render as marks.
-	if err := s.anchorHighlights(element, sanitized); err != nil {
+	if err := s.anchorHighlights(document, element, sanitized); err != nil {
 		s.logger.Error("could not anchor highlights",
 			"document", document.ID, "error", err)
 	}
@@ -298,11 +299,17 @@ func (s *Server) fetchBody(ctx context.Context, document store.Document) (string
 // render as a mark in the article rather than sitting there as a detached
 // passage.
 //
-// Located by text, never by the offsets wallabag recorded: those were measured
-// against wallabag's own copy and do not survive increader's sanitising. A
-// quote that can no longer be found — the article was reworded upstream — is
-// left unanchored rather than discarded; the passage mattered once.
-func (s *Server) anchorHighlights(element store.Element, sanitizedHTML string) error {
+// Located primarily by text, not by the position wallabag itself recorded:
+// that was measured against wallabag's own copy of the article, and does
+// not survive increader's sanitising. But a highlight's own quote is not
+// always reliable either — wallabag's database silently truncates a long
+// one — so a quote that fails to locate gets one more attempt first, using
+// the provider's own position record to recover the full, untruncated text
+// from the article's raw HTML (see source.RangeResolver), before it is
+// finally left unanchored. The article having simply been reworded upstream
+// since the highlight was made is the one failure mode nothing here can do
+// anything about.
+func (s *Server) anchorHighlights(document store.Document, element store.Element, sanitizedHTML string) error {
 	children, err := s.store.ChildrenOf(element.ID)
 	if err != nil {
 		return err
@@ -323,9 +330,26 @@ func (s *Server) anchorHighlights(element store.Element, sanitizedHTML string) e
 		return err
 	}
 
+	// Absent for a provider with no such capability (or none configured at
+	// all) — resolver stays nil and the type assertion below always fails,
+	// which is exactly "skip the fallback", not an error.
+	resolver, _ := s.sources[document.Source].(source.RangeResolver)
+
 	now := time.Now()
 	for _, extract := range pending {
 		position, located := article.Locate(extract.Quote)
+
+		if !located && resolver != nil && extract.Ranges != "" {
+			// The quote alone was not enough — most plausibly because
+			// wallabag's own database truncated it (see
+			// wallabag.maxHighlightQuoteLength) — but the range this
+			// highlight was made with still describes the article's real,
+			// complete text. Recover that and give Locate one more try
+			// before giving up on this highlight for good.
+			if recovered, ok := resolver.ResolveRange(document.ContentHTML, json.RawMessage(extract.Ranges)); ok {
+				position, located = article.Locate(recovered)
+			}
+		}
 		if !located {
 			continue
 		}
@@ -398,6 +422,7 @@ func (s *Server) importHighlights(element store.Element, sanitizedHTML string, h
 			// Keyed by the provider's annotation id, so re-importing the same
 			// highlight is rejected by the unique index rather than duplicated.
 			ExternalRef: highlight.ExternalID,
+			Ranges:      string(highlight.Ranges),
 		}, now)
 		if err != nil {
 			if store.IsDuplicate(err) {

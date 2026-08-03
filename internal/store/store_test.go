@@ -476,6 +476,70 @@ func TestHighlightsImportDuringSync(t *testing.T) {
 	}
 }
 
+// TestResyncBackfillsRangesOntoAnExistingHighlight covers the highlights
+// already imported before the ranges column existed: re-importing the same
+// external_ref never reaches the INSERT that would otherwise set it, so
+// without a backfill on the existing-row path, those highlights would carry
+// a NULL ranges forever and never get the one chance
+// anchorHighlights' recovery fallback needs to reach them. A listing sync
+// has annotation.Ranges even though it lacks the article body itself, so
+// this can happen here rather than waiting for the article to be opened.
+func TestResyncBackfillsRangesOntoAnExistingHighlight(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	document := source.Document{
+		ExternalID: "1", Title: "Predates ranges tracking", UpdatedAt: now,
+		Highlights: []source.Highlight{
+			{ExternalID: "500", Quote: "A passage worth keeping."},
+		},
+	}
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	before, err := db.ChildrenOf(1)
+	if err != nil || len(before) != 1 {
+		t.Fatalf("ChildrenOf: got %d, err %v", len(before), err)
+	}
+	if before[0].Ranges != "" {
+		t.Fatalf("test premise is wrong: ranges = %q, want empty", before[0].Ranges)
+	}
+
+	// The same highlight, same external_ref, seen again — but this time
+	// carrying a ranges payload, exactly as a real re-sync against a wallabag
+	// server would once ResolveRange's caller ships.
+	document.Highlights[0].Ranges = []byte(`["stub-range"]`)
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, now); err != nil {
+		t.Fatalf("re-sync: %v", err)
+	}
+
+	after, err := db.ChildrenOf(1)
+	if err != nil || len(after) != 1 {
+		t.Fatalf("ChildrenOf after re-sync: got %d, err %v", len(after), err)
+	}
+	if after[0].ID != before[0].ID {
+		t.Errorf("re-sync created a new row instead of updating %d: got %d", before[0].ID, after[0].ID)
+	}
+	if after[0].Ranges != `["stub-range"]` {
+		t.Errorf("ranges = %q, want the backfilled payload", after[0].Ranges)
+	}
+	// Nothing else about the row should have moved.
+	if after[0].Quote != before[0].Quote || after[0].HasRange != before[0].HasRange {
+		t.Errorf("backfilling ranges touched something else: before %+v, after %+v", before[0], after[0])
+	}
+
+	// A third sync, ranges already set, must leave it alone rather than
+	// erroring or churning a write every time.
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, now); err != nil {
+		t.Fatalf("third sync: %v", err)
+	}
+	final, _ := db.ChildrenOf(1)
+	if len(final) != 1 || final[0].Ranges != `["stub-range"]` {
+		t.Errorf("ranges did not stay stable across a third sync: %+v", final)
+	}
+}
+
 // TestHighlightUnderANewRefAdoptsInsteadOfDuplicating guards the actual bug
 // report: UpdateHighlightLocation replaces an annotation by creating a new
 // one and best-effort deleting the old, and if that delete has not gone

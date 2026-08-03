@@ -1,0 +1,14 @@
+-- The provider's own position record for an imported highlight — wallabag's
+-- annotator "ranges" array (XPath plus character offsets), stored exactly as
+-- received. Opaque to this schema: nothing here ever reads its shape, only
+-- carries it forward from the moment a highlight is imported to the moment
+-- its article is actually opened and there is HTML to resolve it against.
+--
+-- It exists because wallabag's own quote field is not reliable for a long
+-- highlight — wallabag's database silently truncates it — while the range,
+-- once resolved against the article's raw HTML, still points at the
+-- complete passage: the same text wallabag's own reader highlights when it
+-- draws the annotation in place. See internal/wallabag/ranges.go for both
+-- directions: computeRanges (increader's own extracts, going out) and the
+-- reverse this column exists to support (an imported highlight, coming in).
+ALTER TABLE elements ADD COLUMN ranges TEXT;

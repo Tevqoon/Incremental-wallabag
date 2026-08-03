@@ -9,6 +9,7 @@ package source
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 )
@@ -178,6 +179,41 @@ type Highlight struct {
 	// unable to be drawn as a highlight in the provider's own reader.
 	HasLocation bool
 
+	// Ranges is the provider's own position record for this highlight —
+	// wallabag's annotator "ranges" array, or whatever a future provider's
+	// equivalent turns out to be — carried opaquely: nothing outside the
+	// provider that produced it ever reads its shape, only stores it
+	// alongside the highlight and hands it back to that same provider's
+	// RangeResolver later, once the article's own HTML is available to
+	// resolve it against. Empty when the provider has no such record.
+	//
+	// This exists because Quote is not always reliable on its own — a
+	// wallabag highlight long enough that its database silently truncates
+	// the quote field is still fully described by its range, since wallabag
+	// draws the highlight from the range, not from the quote.
+	Ranges json.RawMessage
+
 	CreatedAt time.Time
 	UpdatedAt time.Time
+}
+
+// RangeResolver is an optional extension a Source may satisfy: recovering a
+// highlight's actual text from its own provider-specific position record —
+// see Highlight.Ranges — rather than from the provider's own quote field,
+// which is not always reliable (wallabag silently truncates a long one).
+//
+// Discovered the same way Enricher and Writer are, by type assertion: a
+// provider with no such record (KOReader, say, which has its own different
+// notion of a highlight's position) simply does not implement this, and
+// callers fall back to whatever Quote already holds.
+type RangeResolver interface {
+	Source
+
+	// ResolveRange recovers the text ranges describes, resolved against
+	// rawContentHTML — the article's content exactly as the provider itself
+	// serves it, the same copy the provider's own reader draws the
+	// highlight against. Reports false if ranges cannot be resolved at all,
+	// most plausibly because the article changed upstream since the
+	// highlight was made.
+	ResolveRange(rawContentHTML string, ranges json.RawMessage) (string, bool)
 }

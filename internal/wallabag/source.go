@@ -2,6 +2,7 @@ package wallabag
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"time"
@@ -26,6 +27,9 @@ type Source struct {
 // method" into a compile error here, rather than an error at the distant call
 // site that tries to use the type as a Source.
 var _ source.Source = (*Source)(nil)
+
+// Compile-time proof that *Source also satisfies source.RangeResolver.
+var _ source.RangeResolver = (*Source)(nil)
 
 // NewSource wraps a client as a content source.
 func NewSource(client *Client) *Source {
@@ -108,6 +112,38 @@ func (s *Source) mergeAnnotations(ctx context.Context, since time.Time, document
 	return nil
 }
 
+// ResolveRange implements source.RangeResolver: recovers a highlight's full
+// text from its own stored ranges, resolved against the article's raw HTML —
+// see recoverQuote in ranges.go for what actually does the work, and
+// Highlight.Ranges for why this exists at all (wallabag's own quote field
+// silently truncates a long highlight; the range does not).
+func (s *Source) ResolveRange(rawContentHTML string, ranges json.RawMessage) (string, bool) {
+	if len(ranges) == 0 {
+		return "", false
+	}
+	var parsed []serializedRange
+	if err := json.Unmarshal(ranges, &parsed); err != nil {
+		return "", false
+	}
+	return recoverQuote(rawContentHTML, parsed)
+}
+
+// encodeRanges carries a wallabag annotation's own ranges array forward
+// opaquely as source.Highlight.Ranges — see that field's own comment. Errors
+// are swallowed rather than returned: a highlight this cannot encode simply
+// keeps whatever HasLocation already says and loses nothing it did not
+// already lack, matching computeRanges' own best-effort convention.
+func encodeRanges(raw []json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	return encoded
+}
+
 // Content fetches one article's HTML body.
 func (s *Source) Content(ctx context.Context, externalID string) (string, error) {
 	id, err := strconv.Atoi(externalID)
@@ -158,6 +194,7 @@ func toDocument(entry Entry) source.Document {
 			Quote:       annotation.Quote,
 			Note:        annotation.Text,
 			HasLocation: len(annotation.Ranges) > 0,
+			Ranges:      encodeRanges(annotation.Ranges),
 			CreatedAt:   annotation.CreatedAt.Time,
 			UpdatedAt:   annotation.UpdatedAt.Time,
 		})

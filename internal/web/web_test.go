@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"image"
 	"image/png"
@@ -27,15 +28,29 @@ import (
 
 // fakeSource stands in for wallabag. Content records whether the lazy body
 // fetch actually happened.
+//
+// It also implements source.RangeResolver, controlled by resolveRange: nil
+// (the default) means "no such capability", matching a provider that never
+// implemented the interface at all — the ordinary case for every test that
+// does not specifically exercise the ranges-recovery fallback.
 type fakeSource struct {
 	body         string
 	contentCalls int
+
+	resolveRange func(rawHTML string, ranges json.RawMessage) (string, bool)
 }
 
 func (f *fakeSource) Name() string { return "wallabag" }
 
 func (f *fakeSource) Fetch(context.Context, time.Time) ([]source.Document, error) {
 	return nil, nil
+}
+
+func (f *fakeSource) ResolveRange(rawHTML string, ranges json.RawMessage) (string, bool) {
+	if f.resolveRange == nil {
+		return "", false
+	}
+	return f.resolveRange(rawHTML, ranges)
 }
 
 func (f *fakeSource) Content(context.Context, string) (string, error) {
@@ -1829,6 +1844,80 @@ func TestImportedHighlightSpanningParagraphsIsAnchored(t *testing.T) {
 	if !strings.Contains(body, `<mark class="extract"`) {
 		t.Error("the anchored highlight does not render as a mark")
 	}
+}
+
+// TestUnlocatableHighlightRecoversViaProviderRanges covers the other real
+// bug this session: wallabag silently truncates a long highlight's quote
+// field, so the quote alone can fail to locate no matter how correctly
+// increader searches for it. The provider's own position record — its
+// ranges, resolved against the article's raw HTML — still describes the
+// complete passage, and anchorHighlights must fall back to it rather than
+// leaving the highlight permanently stranded.
+func TestUnlocatableHighlightRecoversViaProviderRanges(t *testing.T) {
+	server, db, provider := newTestServer(t, true)
+
+	const fullQuote = "It jumps over the lazy dog daily."
+	var resolvedAgainst string
+	provider.resolveRange = func(rawHTML string, ranges json.RawMessage) (string, bool) {
+		resolvedAgainst = string(ranges)
+		return fullQuote, true
+	}
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
+		ExternalID: "1", Title: "A test article", UpdatedAt: time.Now(),
+		Highlights: []source.Highlight{{
+			ExternalID: "500",
+			// Deliberately absent from articleBody, standing in for
+			// wallabag's own truncated quote field: the point is that
+			// Locate must fail on this alone, before recovery ever runs.
+			Quote:  "this text does not appear anywhere in the article…",
+			Ranges: json.RawMessage(`["stub-range"]`),
+		}},
+	}}, 0, time.Now()); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	body := get(t, server, "/read/1").Body.String()
+
+	if resolvedAgainst != `["stub-range"]` {
+		t.Errorf("ResolveRange received ranges %q, want the stored ranges passed through unchanged", resolvedAgainst)
+	}
+
+	after, _ := db.ChildrenOf(1)
+	if len(after) != 1 || !after[0].HasRange {
+		t.Fatalf("highlight did not anchor via the ranges-recovery fallback: %+v", after)
+	}
+	if after[0].Quote != fullQuote {
+		t.Errorf("stored quote = %q, want the recovered text %q", after[0].Quote, fullQuote)
+	}
+	if !strings.Contains(body, `<mark class="extract"`) {
+		t.Error("the recovered highlight does not render as a mark")
+	}
+}
+
+// TestLocatableHighlightNeverConsultsRanges: the fallback exists for the
+// case Locate cannot handle on its own, not as a second opinion on every
+// highlight — a quote that already matches must anchor from that alone.
+func TestLocatableHighlightNeverConsultsRanges(t *testing.T) {
+	server, db, provider := newTestServer(t, true)
+
+	provider.resolveRange = func(rawHTML string, ranges json.RawMessage) (string, bool) {
+		t.Error("ResolveRange was called for a highlight Locate already found on its own")
+		return "", false
+	}
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
+		ExternalID: "1", Title: "A test article", UpdatedAt: time.Now(),
+		Highlights: []source.Highlight{{
+			ExternalID: "500",
+			Quote:      "quick brown fox",
+			Ranges:     json.RawMessage(`["stub-range"]`),
+		}},
+	}}, 0, time.Now()); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	get(t, server, "/read/1")
 }
 
 func TestExtractsPage(t *testing.T) {
