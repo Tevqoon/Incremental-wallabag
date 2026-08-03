@@ -290,7 +290,9 @@ func (s *Server) fetchBody(ctx context.Context, document store.Document) (string
 }
 
 // anchorHighlights gives imported extracts their position in the parent, now
-// that the article body is available.
+// that the article body is available — and separately, upgrades one already
+// anchored if its provider's own position record can now recover more of it
+// than was available the last time this ran.
 //
 // Highlights arrive during sync from a metadata listing, which carries the
 // annotation text but no article HTML — so they are stored without a position.
@@ -303,12 +305,15 @@ func (s *Server) fetchBody(ctx context.Context, document store.Document) (string
 // that was measured against wallabag's own copy of the article, and does
 // not survive increader's sanitising. But a highlight's own quote is not
 // always reliable either — wallabag's database silently truncates a long
-// one — so a quote that fails to locate gets one more attempt first, using
-// the provider's own position record to recover the full, untruncated text
-// from the article's raw HTML (see source.RangeResolver), before it is
-// finally left unanchored. The article having simply been reworded upstream
-// since the highlight was made is the one failure mode nothing here can do
-// anything about.
+// one — so ranges (see source.RangeResolver) gets a look any time it might
+// still have something better to offer: always for a highlight that never
+// anchored at all, and also for one that already did, in case it was
+// anchored by an earlier version of this pass that only had the truncated
+// quote and no range to recover from yet — the exact situation a highlight
+// imported before that column existed is in, until its next ordinary sync
+// backfills one. Once the recovered text stops growing, ranges has nothing
+// left to offer either, and repeating the check finds that out cheaply
+// rather than needing to remember it was already asked.
 func (s *Server) anchorHighlights(document store.Document, element store.Element, sanitizedHTML string) error {
 	children, err := s.store.ChildrenOf(element.ID)
 	if err != nil {
@@ -317,7 +322,10 @@ func (s *Server) anchorHighlights(document store.Document, element store.Element
 
 	var pending []store.Element
 	for _, child := range children {
-		if child.Origin == store.OriginImport && !child.HasRange {
+		if child.Origin != store.OriginImport {
+			continue
+		}
+		if !child.HasRange || child.Ranges != "" {
 			pending = append(pending, child)
 		}
 	}
@@ -339,15 +347,17 @@ func (s *Server) anchorHighlights(document store.Document, element store.Element
 	for _, extract := range pending {
 		position, located := article.Locate(extract.Quote)
 
-		if !located && resolver != nil && extract.Ranges != "" {
-			// The quote alone was not enough — most plausibly because
-			// wallabag's own database truncated it (see
-			// wallabag.maxHighlightQuoteLength) — but the range this
-			// highlight was made with still describes the article's real,
-			// complete text. Recover that and give Locate one more try
-			// before giving up on this highlight for good.
-			if recovered, ok := resolver.ResolveRange(document.ContentHTML, json.RawMessage(extract.Ranges)); ok {
-				position, located = article.Locate(recovered)
+		if resolver != nil && extract.Ranges != "" {
+			// Worth resolving whenever it might change the outcome: always
+			// for a fresh miss, and for an existing anchor only if the
+			// range can recover something longer than what is already
+			// stored — Locate already succeeded on that, so a same-length
+			// or shorter recovery has nothing to add.
+			if recovered, ok := resolver.ResolveRange(document.ContentHTML, json.RawMessage(extract.Ranges)); ok &&
+				(!located || len(recovered) > len(extract.Quote)) {
+				if recoveredPosition, recoveredLocated := article.Locate(recovered); recoveredLocated {
+					position, located = recoveredPosition, true
+				}
 			}
 		}
 		if !located {
@@ -358,6 +368,12 @@ func (s *Server) anchorHighlights(document store.Document, element store.Element
 		// markup, and its whitespace matches the offsets stored beside it.
 		quote, err := article.Text(position)
 		if err != nil {
+			continue
+		}
+		// Nothing actually changed — the common case for an already
+		// anchored highlight whose range had nothing further to offer.
+		// Skip the write rather than touching updated_at for no reason.
+		if extract.HasRange && quote == extract.Quote {
 			continue
 		}
 		markup, err := article.HTML(position)

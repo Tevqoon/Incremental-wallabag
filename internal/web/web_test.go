@@ -1895,15 +1895,21 @@ func TestUnlocatableHighlightRecoversViaProviderRanges(t *testing.T) {
 	}
 }
 
-// TestLocatableHighlightNeverConsultsRanges: the fallback exists for the
-// case Locate cannot handle on its own, not as a second opinion on every
-// highlight — a quote that already matches must anchor from that alone.
-func TestLocatableHighlightNeverConsultsRanges(t *testing.T) {
+// TestResolvedRangeMustBeLongerToReplaceAGoodAnchor: ranges is checked even
+// when the quote already located fine on its own — that is what lets an
+// already anchored highlight from before this column existed (see
+// TestAlreadyAnchoredHighlightUpgradesOnceRangesArrivesLater) get a second
+// look once one arrives — but a same-length-or-shorter recovery must never
+// overwrite a perfectly good anchor. Only "longer" counts as an improvement
+// worth re-anchoring for.
+func TestResolvedRangeMustBeLongerToReplaceAGoodAnchor(t *testing.T) {
 	server, db, provider := newTestServer(t, true)
 
 	provider.resolveRange = func(rawHTML string, ranges json.RawMessage) (string, bool) {
-		t.Error("ResolveRange was called for a highlight Locate already found on its own")
-		return "", false
+		// No shorter than, and not locatable as, the real quote — a
+		// resolver returning something worse (or merely equal) must not be
+		// allowed to replace an anchor that already works.
+		return "fox", true
 	}
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
@@ -1917,7 +1923,75 @@ func TestLocatableHighlightNeverConsultsRanges(t *testing.T) {
 		t.Fatalf("sync: %v", err)
 	}
 
+	body := get(t, server, "/read/1").Body.String()
+
+	after, _ := db.ChildrenOf(1)
+	if len(after) != 1 || !after[0].HasRange {
+		t.Fatalf("highlight was not anchored: %+v", after)
+	}
+	if after[0].Quote != "quick brown fox" {
+		t.Errorf("quote = %q, want the original, longer match kept", after[0].Quote)
+	}
+	if !strings.Contains(body, `<mark class="extract"`) {
+		t.Error("the anchored highlight does not render as a mark")
+	}
+}
+
+// TestAlreadyAnchoredHighlightUpgradesOnceRangesArrivesLater is the exact
+// real-world sequence this fallback exists for: a highlight imported and
+// anchored before the ranges column existed, whose quote was already
+// truncated then, is later backfilled with a range on an ordinary sync — and
+// the very next time its article is opened, that stale, truncated anchor
+// must be replaced with the full recovered text, not left as it was because
+// something was already sitting in start_block.
+func TestAlreadyAnchoredHighlightUpgradesOnceRangesArrivesLater(t *testing.T) {
+	server, db, provider := newTestServer(t, true)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
+		ExternalID: "1", Title: "A test article", UpdatedAt: time.Now(),
+		Highlights: []source.Highlight{{ExternalID: "500", Quote: "quick brown"}},
+	}}, 0, time.Now()); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	// First open: anchors from the plain (here, deliberately truncated)
+	// quote alone — no ranges have arrived yet, matching a highlight
+	// imported before this feature existed.
 	get(t, server, "/read/1")
+	before, _ := db.ChildrenOf(1)
+	if len(before) != 1 || !before[0].HasRange || before[0].Quote != "quick brown" {
+		t.Fatalf("test premise is wrong: %+v", before)
+	}
+
+	// An ordinary sync backfills ranges onto the now-existing row — see
+	// TestResyncBackfillsRangesOntoAnExistingHighlight in the store package
+	// for that half of this on its own.
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
+		ExternalID: "1", Title: "A test article", UpdatedAt: time.Now(),
+		Highlights: []source.Highlight{{
+			ExternalID: "500", Quote: "quick brown",
+			Ranges: json.RawMessage(`["stub-range"]`),
+		}},
+	}}, 0, time.Now()); err != nil {
+		t.Fatalf("re-sync: %v", err)
+	}
+
+	provider.resolveRange = func(rawHTML string, ranges json.RawMessage) (string, bool) {
+		return "quick brown fox", true
+	}
+
+	body := get(t, server, "/read/1").Body.String()
+
+	after, _ := db.ChildrenOf(1)
+	if len(after) != 1 {
+		t.Fatalf("got %d extracts, want 1", len(after))
+	}
+	if after[0].Quote != "quick brown fox" {
+		t.Errorf("quote = %q, want the upgraded, longer text %q", after[0].Quote, "quick brown fox")
+	}
+	if !strings.Contains(body, `<mark class="extract"`) {
+		t.Error("the upgraded highlight does not render as a mark")
+	}
 }
 
 func TestExtractsPage(t *testing.T) {
