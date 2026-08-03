@@ -1797,6 +1797,40 @@ func TestSyncImportedHighlightsAreAnchoredOnOpen(t *testing.T) {
 	}
 }
 
+// TestImportedHighlightSpanningParagraphsIsAnchored is the real bug: a
+// highlight of any real length very often covers more than one paragraph,
+// and ir.Locate used to search one block at a time — structurally unable to
+// find a quote crossing a paragraph break no matter how faithfully it was
+// recorded, since the break is exactly the whitespace the comparison
+// discards. That left the extract's content intact but permanently
+// unanchored: no mark in the parent, and — for a highlight long enough that
+// wallabag's own quote field had already truncated it before increader ever
+// saw it — no way to tell the two failures apart from the reader alone.
+func TestImportedHighlightSpanningParagraphsIsAnchored(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	quote := "quick brown fox. It jumps over the lazy dog daily."
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
+		ExternalID: "1", Title: "A test article", UpdatedAt: time.Now(),
+		Highlights: []source.Highlight{{ExternalID: "500", Quote: quote}},
+	}}, 0, time.Now()); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	body := get(t, server, "/read/1").Body.String()
+
+	after, _ := db.ChildrenOf(1)
+	if len(after) != 1 || !after[0].HasRange {
+		t.Fatalf("highlight was not anchored: %+v", after)
+	}
+	if after[0].Range.StartBlock == after[0].Range.EndBlock {
+		t.Fatalf("test premise is wrong: the quote should cross a block boundary, got %+v", after[0].Range)
+	}
+	if !strings.Contains(body, `<mark class="extract"`) {
+		t.Error("the anchored highlight does not render as a mark")
+	}
+}
+
 func TestExtractsPage(t *testing.T) {
 	server, db, _ := newTestServer(t, true)
 

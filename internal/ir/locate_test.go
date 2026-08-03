@@ -45,11 +45,13 @@ func TestLocate(t *testing.T) {
 			found: false,
 		},
 		{
-			// The separator between blocks is exactly the whitespace the
-			// comparison discards, so a spanning quote cannot be located.
-			name:  "a quote spanning blocks is not located",
+			// A quote of any real length very often crosses a paragraph
+			// break — this is the case that broke a real wallabag-imported
+			// highlight and never showed it as a mark in the parent article.
+			name:  "a quote spanning blocks is located",
 			quote: "quick brown fox. It jumps over",
-			found: false,
+			want:  Range{StartBlock: 0, StartOffset: 4, EndBlock: 1, EndOffset: 16},
+			found: true,
 		},
 		{
 			name:  "an empty quote is not located",
@@ -115,6 +117,57 @@ func TestLocateRoundTripsEveryBlock(t *testing.T) {
 			t.Errorf("block %d round trip: %q, want %q",
 				block.Index, NormalizeSpace(text), NormalizeSpace(block.Text))
 		}
+	}
+}
+
+// TestLocateRecoversAWallabagTruncatedQuote guards the fallback for a real
+// observed case: wallabag's own annotation storage silently truncates a long
+// quote and marks the cut with a trailing "…" (U+2026, no leading space) —
+// text that can never appear in the article itself, so the untruncated quote
+// can never match. Locate must still find where the passage started, from
+// what text it does have.
+func TestLocateRecoversAWallabagTruncatedQuote(t *testing.T) {
+	source := "<p>The quick brown fox jumps over the lazy dog.</p>" +
+		"<p>A second, unrelated paragraph.</p>"
+	article := mustParse(t, source)
+
+	got, found := article.Locate("The quick brown fox jumps over the la…")
+	if !found {
+		t.Fatal("a wallabag-truncated quote was not located")
+	}
+
+	want := Range{StartBlock: 0, StartOffset: 0, EndBlock: 0, EndOffset: 37}
+	if got != want {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+
+	text, err := article.Text(got)
+	if err != nil {
+		t.Fatalf("Text%v: %v", got, err)
+	}
+	if text != "The quick brown fox jumps over the la" {
+		t.Errorf("located range covers %q, want the untruncated prefix", text)
+	}
+}
+
+// TestLocateDoesNotMisreadARealTrailingEllipsis guards the other direction:
+// a quote that genuinely ends in "…" in the article itself must match as
+// exactly that — including the ellipsis — on the first attempt, never fall
+// through to the truncation fallback and lose it.
+func TestLocateDoesNotMisreadARealTrailingEllipsis(t *testing.T) {
+	article := mustParse(t, "<p>Well, this is awkward…</p>")
+
+	got, found := article.Locate("this is awkward…")
+	if !found {
+		t.Fatal("a quote genuinely ending in an ellipsis was not located")
+	}
+
+	text, err := article.Text(got)
+	if err != nil {
+		t.Fatalf("Text%v: %v", got, err)
+	}
+	if text != "this is awkward…" {
+		t.Errorf("located range covers %q, want the ellipsis included", text)
 	}
 }
 
