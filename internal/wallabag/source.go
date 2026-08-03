@@ -191,7 +191,7 @@ func toDocument(entry Entry) source.Document {
 	for _, annotation := range entry.Annotations {
 		highlights = append(highlights, source.Highlight{
 			ExternalID:  strconv.Itoa(annotation.ID),
-			Quote:       annotation.Quote,
+			Quote:       stripInvisibleFormatting(annotation.Quote),
 			Note:        annotation.Text,
 			HasLocation: len(annotation.Ranges) > 0,
 			Ranges:      encodeRanges(annotation.Ranges),

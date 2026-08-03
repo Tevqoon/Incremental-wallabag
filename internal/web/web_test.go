@@ -317,26 +317,30 @@ func TestExtractPreservesLinks(t *testing.T) {
 // TestExtractAcrossMultibyteCharacter guards the seam between a browser's
 // selection offsets (JavaScript string .length, counting UTF-16 code units —
 // one per rune for anything in the Basic Multilingual Plane) and this
-// package's own byte-indexed strings. A soft hyphen, curly quote or em dash
-// is more than one byte but exactly one rune; a real article is full of
-// them, and a request built the way a browser actually builds one — offsets
-// counted in runes, past a multi-byte character — used to come back a 409
-// because the server re-derived a different, byte-misaligned substring.
+// package's own byte-indexed strings. A curly quote or em dash is more than
+// one byte but exactly one rune; a real article is full of them, and a
+// request built the way a browser actually builds one — offsets counted in
+// runes, past a multi-byte character — used to come back a 409 because the
+// server re-derived a different, byte-misaligned substring.
+//
+// Deliberately not a soft hyphen: sanitize strips those (see
+// stripInvisibleFormatting), so one would no longer reach the server at all
+// and this test would stop exercising the seam it exists for.
 func TestExtractAcrossMultibyteCharacter(t *testing.T) {
 	server, db, _ := newTestServer(t, true)
 
-	if err := db.SetDocumentContent(1, `<p>Amer­ican eco­nomists study markets.</p>`); err != nil {
+	if err := db.SetDocumentContent(1, `<p>Amer—ican eco—nomists study markets.</p>`); err != nil {
 		t.Fatalf("SetDocumentContent: %v", err)
 	}
 
-	// A browser selecting "eco­nomists" (soft hyphen included) reports these
-	// as rune offsets: "Amer­ican " is 10 runes, the word itself 11 more.
+	// A browser selecting "eco—nomists" (em dash included) reports these as
+	// rune offsets: "Amer—ican " is 10 runes, the word itself 11 more.
 	response := post(t, server, "/elements/1/extract", url.Values{
 		"start_block":  {"0"},
 		"start_offset": {"10"},
 		"end_block":    {"0"},
 		"end_offset":   {"21"},
-		"quote":        {"eco­nomists"},
+		"quote":        {"eco—nomists"},
 	})
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
@@ -349,8 +353,8 @@ func TestExtractAcrossMultibyteCharacter(t *testing.T) {
 	if len(children) != 1 {
 		t.Fatalf("got %d extracts, want 1", len(children))
 	}
-	if got := children[0].Quote; got != "eco­nomists" {
-		t.Errorf("stored quote = %q, want %q", got, "eco­nomists")
+	if got := children[0].Quote; got != "eco—nomists" {
+		t.Errorf("stored quote = %q, want %q", got, "eco—nomists")
 	}
 }
 
@@ -993,6 +997,28 @@ func TestSanitizerStripsScripts(t *testing.T) {
 	}
 	if !strings.Contains(body, "Clickable.") {
 		t.Error("sanitising dropped an element instead of just its handler")
+	}
+}
+
+// TestSanitizerStripsInvisibleFormatting guards against a real annoyance, not
+// a security issue: press-typeset HTML often carries soft hyphens marking
+// optional line-break points, invisible in a browser but rendered as a
+// stray glyph by anything that later treats the article's text as plain
+// text — an Emacs export of an imported highlight, for one.
+func TestSanitizerStripsInvisibleFormatting(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if err := db.SetDocumentContent(1, "<p>Isem­bard oper­ates a fran­chise.</p>"); err != nil {
+		t.Fatalf("SetDocumentContent: %v", err)
+	}
+
+	body := get(t, server, "/read/1").Body.String()
+
+	if strings.ContainsRune(body, '­') {
+		t.Error("rendered page still contains a soft hyphen")
+	}
+	if !strings.Contains(body, "Isembard operates a franchise.") {
+		t.Errorf("stripping the soft hyphens should leave the words intact, got body:\n%s", body)
 	}
 }
 

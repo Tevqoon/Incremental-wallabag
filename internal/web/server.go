@@ -221,7 +221,7 @@ func elementID(r *http.Request) (int64, error) {
 // metadata only, and the body arrives when someone actually reads it.
 func (s *Server) articleHTML(ctx context.Context, element store.Element) (string, error) {
 	if !element.IsRoot() {
-		return s.policy.Sanitize(element.ContentHTML), nil
+		return s.sanitize(element.ContentHTML), nil
 	}
 
 	document, err := s.store.DocumentByID(element.DocumentID)
@@ -241,7 +241,7 @@ func (s *Server) articleHTML(ctx context.Context, element store.Element) (string
 
 		// Highlights that only arrive with a full fetch are imported here, at
 		// the moment the article is first opened.
-		sanitized := s.policy.Sanitize(body)
+		sanitized := s.sanitize(body)
 		if err := s.importHighlights(element, sanitized, highlights); err != nil {
 			// A failed import must not stop the article from being read; the
 			// highlights can be imported again on the next open.
@@ -250,7 +250,7 @@ func (s *Server) articleHTML(ctx context.Context, element store.Element) (string
 		}
 	}
 
-	sanitized := s.policy.Sanitize(document.ContentHTML)
+	sanitized := s.sanitize(document.ContentHTML)
 
 	// Highlights imported during sync have no position, because the listing
 	// that carries them omits the article text. Now that the text is here they

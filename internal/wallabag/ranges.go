@@ -10,6 +10,35 @@ import (
 	"golang.org/x/net/html/atom"
 )
 
+// invisibleFormatting mirrors internal/web's stripInvisibleFormatting: this
+// package deliberately does not depend on ir or web (see recoverQuote's own
+// tests), so the same small character set is kept here rather than shared.
+// Soft hyphens in particular are common in press-typeset HTML (confirmed on
+// a real Financial Times article) and, left in, turn up as stray glyphs in
+// anything that later exports the stored quote as plain text.
+//
+// Spelled out as \u escapes rather than typed literally: these characters
+// are invisible by definition, so a literal in source would be exactly as
+// unverifiable by eye as the bug this exists to fix.
+var invisibleFormatting = map[rune]bool{
+	'\u00ad': true, // soft hyphen
+	'\u200b': true, // zero-width space
+	'\u200c': true, // zero-width non-joiner
+	'\u200d': true, // zero-width joiner
+	'\u2060': true, // word joiner
+	'\ufeff': true, // byte-order mark / zero-width no-break space
+}
+
+// stripInvisibleFormatting removes invisibleFormatting's characters.
+func stripInvisibleFormatting(s string) string {
+	return strings.Map(func(r rune) rune {
+		if invisibleFormatting[r] {
+			return -1
+		}
+		return r
+	}, s)
+}
+
 // serializedRange is one entry of an annotation's "ranges" array, in the
 // exact shape wallabag's vendored annotator fork (github.com/wallabag/annotator,
 // src/xpath-range) serializes and expects back — confirmed against real
@@ -317,7 +346,7 @@ func recoverQuote(rawHTML string, ranges []serializedRange) (string, bool) {
 		}
 		passages = append(passages, passage)
 	}
-	return strings.Join(passages, " "), true
+	return stripInvisibleFormatting(strings.Join(passages, " ")), true
 }
 
 // recoverOneRange resolves a single range against root — the same <body>

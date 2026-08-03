@@ -265,6 +265,34 @@ func TestRecoverQuoteFailsSafely(t *testing.T) {
 	}
 }
 
+// TestRecoverQuoteStripsInvisibleFormatting covers a real find on a real
+// Financial Times article: its own HTML carried soft hyphens throughout,
+// which recoverQuote used to pass straight through into the stored quote —
+// invisible in the app itself, but rendered as a stray glyph in anything
+// that later exports the passage as plain text.
+func TestRecoverQuoteStripsInvisibleFormatting(t *testing.T) {
+	html := "<p>Isem­bard oper­ates a fran­chise model.</p>"
+
+	// The quote given to computeRanges has to match the raw text byte for
+	// byte, soft hyphens included — the stripping only happens on the way
+	// back out, in recoverQuote.
+	ranges := computeRanges(html, "oper­ates a fran­chise")
+	if ranges == nil {
+		t.Fatal("test premise is wrong: computeRanges could not find the passage")
+	}
+
+	got, ok := recoverQuote(html, ranges)
+	if !ok {
+		t.Fatal("recoverQuote reported failure")
+	}
+	if strings.ContainsRune(got, '­') {
+		t.Errorf("recoverQuote = %q, still contains a soft hyphen", got)
+	}
+	if got != "operates a franchise" {
+		t.Errorf("recoverQuote = %q, want %q", got, "operates a franchise")
+	}
+}
+
 // TestSourceResolveRange is the public entry point importHighlights and
 // anchorHighlights actually use: decoding the raw JSON a Highlight carries
 // and recovering text from it, matching source.RangeResolver.

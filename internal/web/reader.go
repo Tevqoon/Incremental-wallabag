@@ -405,7 +405,7 @@ func (s *Server) clozeOffsets(r *http.Request, element store.Element) (int, int,
 
 	// An extract's own content is the article here, not the document it came
 	// from: the offsets are relative to the passage being clozed.
-	article, err := ir.ParseArticle(s.policy.Sanitize(element.ContentHTML))
+	article, err := ir.ParseArticle(s.sanitize(element.ContentHTML))
 	if err != nil {
 		return 0, 0, err
 	}

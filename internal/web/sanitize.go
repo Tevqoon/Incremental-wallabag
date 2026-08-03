@@ -1,6 +1,53 @@
 package web
 
-import "github.com/microcosm-cc/bluemonday"
+import (
+	"strings"
+
+	"github.com/microcosm-cc/bluemonday"
+)
+
+// invisibleFormatting is the set of Unicode characters that carry no
+// meaning as plain text but frequently ride along in scraped press HTML:
+// soft hyphens marking a typesetter's optional line-break point, and a
+// handful of zero-width joiners and marks. Confirmed on a real article
+// (soft hyphens throughout an FT piece, littering every export of the
+// highlight's text) rather than assumed from a general character list.
+//
+// Spelled out as \u escapes rather than typed literally: these characters
+// are invisible by definition, so a literal in source would be exactly as
+// unverifiable by eye as the bug this exists to fix.
+var invisibleFormatting = map[rune]bool{
+	'\u00ad': true, // soft hyphen
+	'\u200b': true, // zero-width space
+	'\u200c': true, // zero-width non-joiner
+	'\u200d': true, // zero-width joiner
+	'\u2060': true, // word joiner
+	'\ufeff': true, // byte-order mark / zero-width no-break space
+}
+
+// stripInvisibleFormatting removes invisibleFormatting's characters from
+// HTML text. Safe to run over the whole markup string, not just text nodes:
+// none of these characters have any legitimate role in tag or attribute
+// syntax, so nothing structural can depend on one surviving.
+func stripInvisibleFormatting(s string) string {
+	return strings.Map(func(r rune) rune {
+		if invisibleFormatting[r] {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+// sanitize runs the bluemonday policy and then strips invisibleFormatting.
+//
+// This must be the only path from raw article HTML to anything ir.ParseArticle
+// or Locate ever sees: block text, offsets and rendered markup are all derived
+// from whatever string comes out of here, so stripping later — say, from an
+// already-parsed Block.Text — would shorten it without shortening the DOM
+// node backing it, and silently misalign every offset downstream.
+func (s *Server) sanitize(rawHTML string) string {
+	return stripInvisibleFormatting(s.policy.Sanitize(rawHTML))
+}
 
 // newPolicy builds the sanitiser applied to every article body before it is
 // parsed or rendered.
