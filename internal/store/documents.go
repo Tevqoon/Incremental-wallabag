@@ -360,18 +360,30 @@ type LibraryEntry struct {
 type LibraryFilter struct {
 	Query string
 
-	// State is "", "unread", "starred", "archived", "annotated", "missing" or
-	// "scheduled" — the first four are the same divisions wallabag's own
-	// sidebar offers, so the two read the same way. The rest are increader's
-	// own: "missing" is documents the last reconciliation could not find
-	// upstream any more; "scheduled" is articles due later than today,
-	// sorted furthest out first. That is a due date, not a state — Backlog
-	// deliberately leaves state alone (it is not a grade), so a
-	// never-graded article pushed out by a preset button is "scheduled"
-	// too, same as one grown out by ordinary reading. Distinct from
-	// "archived" (wallabag's own "already read", due_on cleared) and from a
-	// still-untouched import (due today, not later) — so a reader can spot
-	// something they pushed out further than they meant to.
+	// State is "", "unread", "starred", "archived", "annotated", "missing",
+	// "scheduled", "suspended" or "done" — the first four are the same
+	// divisions wallabag's own sidebar offers, so the two read the same way.
+	// The rest are increader's own: "missing" is documents the last
+	// reconciliation could not find upstream any more; "scheduled" is
+	// articles due later than today, sorted furthest out first. That is a
+	// due date, not a state — Backlog deliberately leaves state alone (it is
+	// not a grade), so a never-graded article pushed out by a preset button
+	// is "scheduled" too, same as one grown out by ordinary reading.
+	// Distinct from "archived" (wallabag's own "already read", due_on
+	// cleared) and from a still-untouched import (due today, not later) —
+	// so a reader can spot something they pushed out further than they
+	// meant to.
+	//
+	// "suspended" and "done" read the root topic's own schedule state
+	// rather than the document's wallabag flags: "archived" is everything
+	// wallabag considers read, whether or not increader has ever looked at
+	// it, while "suspended" is the parked backlog still waiting to be
+	// gone through here — most of it arriving suspended straight from a
+	// wallabag archive import — and "done" is what has actually been
+	// worked through and graded in increader itself. The distinction is
+	// what makes "suspended" useful as a rediscovery queue: browsing it and
+	// pushing an old archive to "done" is a visible measure of progress
+	// that "archived" alone cannot show.
 	State string
 
 	// Tag restricts to documents carrying this label.
@@ -415,6 +427,8 @@ func (s *Store) SearchDocuments(filter LibraryFilter, today time.Time) ([]Librar
 		       OR (? = 'archived'  AND d.is_archived = 1)
 		       OR (? = 'missing'   AND d.missing_upstream = 1)
 		       OR (? = 'scheduled' AND root.due_on > ?)
+		       OR (? = 'suspended' AND root.state = 'suspended')
+		       OR (? = 'done'      AND root.state = 'done')
 		       OR (? = 'annotated' AND EXISTS (
 		              SELECT 1 FROM elements child
 		              WHERE child.parent_id = root.id AND child.origin = 'import')))
@@ -428,6 +442,8 @@ func (s *Store) SearchDocuments(filter LibraryFilter, today time.Time) ([]Librar
 		filter.Query, pattern, pattern, pattern,
 		filter.State, filter.State, filter.State, filter.State, filter.State,
 		filter.State, today.Format(dateFormat),
+		filter.State,
+		filter.State,
 		filter.State,
 		filter.Tag, filter.Tag,
 		filter.State,
@@ -498,11 +514,18 @@ func (s *Store) CountByState(sourceName string, today time.Time) (map[string]int
 		    (SELECT COUNT(DISTINCT document_id) FROM elements WHERE origin = 'import'),
 		    (SELECT COUNT(*) FROM elements root
 		     WHERE root.parent_id IS NULL AND root.due_on > ?
+		       AND root.document_id IN (SELECT id FROM documents WHERE source = ?)),
+		    (SELECT COUNT(*) FROM elements root
+		     WHERE root.parent_id IS NULL AND root.state = 'suspended'
+		       AND root.document_id IN (SELECT id FROM documents WHERE source = ?)),
+		    (SELECT COUNT(*) FROM elements root
+		     WHERE root.parent_id IS NULL AND root.state = 'done'
 		       AND root.document_id IN (SELECT id FROM documents WHERE source = ?))
-		FROM documents WHERE source = ?`, today.Format(dateFormat), sourceName, sourceName)
+		FROM documents WHERE source = ?`,
+		today.Format(dateFormat), sourceName, sourceName, sourceName, sourceName)
 
-	var all, unread, starred, archived, missing, annotated, scheduled int
-	if err := row.Scan(&all, &unread, &starred, &archived, &missing, &annotated, &scheduled); err != nil {
+	var all, unread, starred, archived, missing, annotated, scheduled, suspended, done int
+	if err := row.Scan(&all, &unread, &starred, &archived, &missing, &annotated, &scheduled, &suspended, &done); err != nil {
 		return nil, fmt.Errorf("store: count documents by state: %w", err)
 	}
 	counts["all"] = all
@@ -512,5 +535,7 @@ func (s *Store) CountByState(sourceName string, today time.Time) (map[string]int
 	counts["missing"] = missing
 	counts["annotated"] = annotated
 	counts["scheduled"] = scheduled
+	counts["suspended"] = suspended
+	counts["done"] = done
 	return counts, nil
 }

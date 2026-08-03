@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -1677,6 +1678,47 @@ func TestSuspendAndUnsuspend(t *testing.T) {
 	}
 }
 
+// TestUnsuspendRedirectsToGivenTarget is what lets the library's "queue it"
+// button stay on whatever filtered list it was clicked from instead of
+// jumping into the reader — the same redirect mechanism handleBacklog offers,
+// applied to unsuspending too.
+func TestUnsuspendRedirectsToGivenTarget(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if err := db.Suspend(1, time.Now()); err != nil {
+		t.Fatalf("seed suspend: %v", err)
+	}
+
+	response := post(t, server, "/elements/1/unsuspend", url.Values{
+		"redirect": {"/library?state=suspended"},
+	})
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", response.Code)
+	}
+	if got := response.Header().Get("Location"); got != "/library?state=suspended" {
+		t.Errorf("Location = %q, want /library?state=suspended", got)
+	}
+}
+
+// TestUnsuspendDefaultsToTheReader: with no redirect given — the reader's own
+// "put back in the queue" button never sends one — unsuspending lands back on
+// the article, same as before redirect existed.
+func TestUnsuspendDefaultsToTheReader(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if err := db.Suspend(1, time.Now()); err != nil {
+		t.Fatalf("seed suspend: %v", err)
+	}
+
+	response := post(t, server, "/elements/1/unsuspend", nil)
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", response.Code)
+	}
+	if got := response.Header().Get("Location"); got != "/read/1" {
+		t.Errorf("Location = %q, want /read/1", got)
+	}
+}
+
 // TestArchivedArticleIsNotQueuedButIsReadable is the whole point of syncing
 // wallabag's archive flag.
 func TestArchivedArticleIsNotQueuedButIsReadable(t *testing.T) {
@@ -1874,7 +1916,9 @@ func TestExtractsPageOffersRescheduling(t *testing.T) {
 }
 
 // TestDoneArchivesUpstream is what the reader asked for: finishing an article
-// here finishes it in wallabag, so the two views stop drifting.
+// here finishes it in wallabag, so the two views stop drifting. Done also
+// pushes a "done" tag upstream — Dismiss does not, since that is abandoning
+// the article unread rather than actually working through it.
 func TestDoneArchivesUpstream(t *testing.T) {
 	for _, grade := range []string{"done", "dismiss"} {
 		t.Run(grade, func(t *testing.T) {
@@ -1895,13 +1939,128 @@ func TestDoneArchivesUpstream(t *testing.T) {
 			if err != nil {
 				t.Fatalf("PendingWrites: %v", err)
 			}
-			if len(writes) != 1 || writes[0].Operation != store.OpArchive {
-				t.Fatalf("queued %+v, want one archive write", writes)
+
+			var archives, tagAdds int
+			for _, write := range writes {
+				switch write.Operation {
+				case store.OpArchive:
+					archives++
+					if !store.PayloadBool(write.Payload) {
+						t.Error("the queued write does not say archived")
+					}
+				case store.OpTagAdd:
+					tagAdds++
+					if write.Payload != "done" {
+						t.Errorf("queued tag = %q, want %q", write.Payload, "done")
+					}
+				}
 			}
-			if !store.PayloadBool(writes[0].Payload) {
-				t.Error("the queued write does not say archived")
+			if archives != 1 {
+				t.Fatalf("queued %+v, want exactly one archive write", writes)
+			}
+
+			wantTagAdds := 0
+			if grade == "done" {
+				wantTagAdds = 1
+			}
+			if tagAdds != wantTagAdds {
+				t.Errorf("queued %+v, want %d tag_add write(s)", writes, wantTagAdds)
+			}
+
+			tags, _ := db.TagsOf(document.ID)
+			hasDoneTag := slices.Contains(tags, "done")
+			if grade == "done" && !hasDoneTag {
+				t.Error("the article was not tagged done locally")
+			}
+			if grade == "dismiss" && hasDoneTag {
+				t.Error("dismissing tagged the article done")
 			}
 		})
+	}
+}
+
+// TestUnsuspendClearsDoneTag: bringing a finished article back into
+// circulation should not leave a stale "done" tag behind, either locally or
+// as a queued write upstream.
+func TestUnsuspendClearsDoneTag(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	post(t, server, "/elements/1/grade", url.Values{"grade": {"done"}})
+
+	document, _ := db.DocumentByID(1)
+	tags, _ := db.TagsOf(document.ID)
+	if !slices.Contains(tags, "done") {
+		t.Fatalf("seed: article was not tagged done, tags = %v", tags)
+	}
+
+	if response := post(t, server, "/elements/1/unsuspend", nil); response.Code != http.StatusSeeOther {
+		t.Fatalf("unsuspend: status = %d", response.Code)
+	}
+
+	tags, _ = db.TagsOf(document.ID)
+	if slices.Contains(tags, "done") {
+		t.Error("unsuspending left the done tag attached")
+	}
+
+	writes, _ := db.PendingWrites("wallabag", 10)
+	var sawTagRemove bool
+	for _, write := range writes {
+		if write.Operation == store.OpTagRemove && write.Payload == "done" {
+			sawTagRemove = true
+		}
+	}
+	if !sawTagRemove {
+		t.Errorf("queued writes = %+v, want a tag_remove for \"done\"", writes)
+	}
+}
+
+// TestUnsuspendWithoutDoneTagQueuesNothingExtra: an article suspended
+// straight from a wallabag archive import was never graded Done here, so
+// unsuspending it must not queue a pointless tag_remove for a tag it never
+// had.
+func TestUnsuspendWithoutDoneTagQueuesNothingExtra(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
+		ExternalID: "2", Title: "Archived elsewhere, never graded here", IsArchived: true, UpdatedAt: time.Now(),
+	}}, 0, time.Now()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if response := post(t, server, "/elements/2/unsuspend", nil); response.Code != http.StatusSeeOther {
+		t.Fatalf("unsuspend: status = %d", response.Code)
+	}
+
+	writes, _ := db.PendingWrites("wallabag", 10)
+	for _, write := range writes {
+		if write.Operation == store.OpTagRemove {
+			t.Errorf("queued a tag_remove for an article that was never tagged done: %+v", write)
+		}
+	}
+}
+
+// TestRegradingAwayFromDoneClearsTheTag: the reader can still open a Done
+// article directly and grade it again — Next, say — which puts it back in
+// circulation. The done tag would then be a lie if it stayed, so regrading
+// away from Done clears it the same way unsuspending does.
+func TestRegradingAwayFromDoneClearsTheTag(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	post(t, server, "/elements/1/grade", url.Values{"grade": {"done"}})
+
+	document, _ := db.DocumentByID(1)
+	tags, _ := db.TagsOf(document.ID)
+	if !slices.Contains(tags, "done") {
+		t.Fatalf("seed: article was not tagged done, tags = %v", tags)
+	}
+
+	if response := post(t, server, "/elements/1/grade", url.Values{"grade": {"next"}}); response.Code != http.StatusSeeOther {
+		t.Fatalf("regrade: status = %d", response.Code)
+	}
+
+	tags, _ = db.TagsOf(document.ID)
+	if slices.Contains(tags, "done") {
+		t.Error("regrading away from done left the tag attached")
 	}
 }
 
@@ -2102,6 +2261,58 @@ func TestLibraryScheduledFilterFindsGradedArticles(t *testing.T) {
 	near := strings.Index(body, "Backlogged not as far")
 	if far == -1 || near == -1 || far > near {
 		t.Error("scheduled filter is not sorted furthest due date first")
+	}
+}
+
+// TestLibrarySuspendedAndDoneFilters: "suspended" is the parked backlog worth
+// going back through — most of it archived somewhere else and never touched
+// here — while "done" is what has actually been worked through and graded in
+// increader. An article archived upstream but not yet opened here should show
+// up as suspended, not done; only grading it moves it across.
+func TestLibrarySuspendedAndDoneFilters(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "2", Title: "Archived elsewhere, untouched here", IsArchived: true, UpdatedAt: time.Now()},
+		{ExternalID: "3", Title: "Never archived", UpdatedAt: time.Now()},
+	}, 0, time.Now()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Element 1 is the still-unread article newTestServer seeds; grade it
+	// Done to land it in the "done" bucket.
+	if response := post(t, server, "/elements/1/grade", url.Values{"grade": {"done"}}); response.Code != http.StatusSeeOther {
+		t.Fatalf("grade done: status = %d", response.Code)
+	}
+
+	suspended := get(t, server, "/library?state=suspended").Body.String()
+	if !strings.Contains(suspended, "Archived elsewhere, untouched here") {
+		t.Errorf("suspended filter is missing the freshly imported archive:\n%s", suspended)
+	}
+	if strings.Contains(suspended, "Never archived") {
+		t.Error("suspended filter included an article still in circulation")
+	}
+	if strings.Contains(suspended, "A test article") {
+		t.Error("suspended filter included an article graded done, not suspended")
+	}
+
+	done := get(t, server, "/library?state=done").Body.String()
+	if !strings.Contains(done, "A test article") {
+		t.Errorf("done filter is missing the article graded done:\n%s", done)
+	}
+	if strings.Contains(done, "Archived elsewhere, untouched here") {
+		t.Error("done filter included a suspended article that was never graded here")
+	}
+
+	counts, err := db.CountByState("wallabag", time.Now())
+	if err != nil {
+		t.Fatalf("CountByState: %v", err)
+	}
+	if counts["suspended"] != 1 {
+		t.Errorf("suspended count = %d, want 1", counts["suspended"])
+	}
+	if counts["done"] != 1 {
+		t.Errorf("done count = %d, want 1", counts["done"])
 	}
 }
 

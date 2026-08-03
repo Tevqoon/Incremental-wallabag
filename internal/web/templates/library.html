@@ -15,6 +15,10 @@
     <a href="/library?state=unread" class="{{if eq .State "unread"}}on{{end}}">Unread {{index .Counts "unread"}}</a>
     <a href="/library?state=starred" class="{{if eq .State "starred"}}on{{end}}">Starred {{index .Counts "starred"}}</a>
     <a href="/library?state=archived" class="{{if eq .State "archived"}}on{{end}}">Archive {{index .Counts "archived"}}</a>
+    <a href="/library?state=suspended" class="{{if eq .State "suspended"}}on{{end}}"
+       title="Parked backlog waiting to be gone through — most of it archived elsewhere, not yet touched here">Suspended {{index .Counts "suspended"}}</a>
+    <a href="/library?state=done" class="{{if eq .State "done"}}on{{end}}"
+       title="Worked through and graded here">Done {{index .Counts "done"}}</a>
     <a href="/library?state=annotated" class="{{if eq .State "annotated"}}on{{end}}">Annotated {{index .Counts "annotated"}}</a>
     <a href="/library?state=scheduled" class="{{if eq .State "scheduled"}}on{{end}}"
        title="Articles due later than today, furthest out first">Scheduled {{index .Counts "scheduled"}}</a>
@@ -47,7 +51,10 @@
               <span class="badge badge-danger" title="the last check could not find this in wallabag any more">missing upstream</span>
             {{end}}
             {{if eq .State "suspended"}}
-              <button class="tiny" hx-post="/elements/{{.RootElementID}}/unsuspend">queue it</button>
+              <button class="tiny" hx-post="/elements/{{.RootElementID}}/unsuspend"
+                      hx-vals="js:{redirect: window.location.pathname + window.location.search}">
+                queue it
+              </button>
             {{end}}
             {{if or (eq .State "new") (eq .State "reading")}}
               <span title="scheduled">{{date .DueOn}}</span>

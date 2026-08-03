@@ -2,6 +2,7 @@ package web
 
 import (
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -9,6 +10,14 @@ import (
 	"github.com/Tevqoon/increader/internal/ir"
 	"github.com/Tevqoon/increader/internal/store"
 )
+
+// doneTagLabel marks, upstream at the provider, an article that was actually
+// worked through here — not merely archived. wallabag's own archive flag
+// covers both Done and Dismiss (see archiveUpstream), so on its own it
+// cannot tell "read to the end and annotated" from "abandoned unread"; this
+// tag is what lets that distinction survive outside increader too, in
+// wallabag's own tag list.
+const doneTagLabel = "done"
 
 // handleSyncNow runs a full sync immediately rather than waiting for the
 // scheduled interval, so a document just added at a provider shows up without
@@ -148,6 +157,29 @@ func (s *Server) handleGrade(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// The tag tracks the state transition, not the grade in isolation: it
+	// goes on when a grade lands on Done (never Dismiss — that is abandoning
+	// it unread, not working through it) and comes back off if something
+	// already Done gets graded again into anything else, same as unsuspending
+	// takes it off. Rare in practice — grading happens once, from the queue,
+	// which excludes Done material — but the reader can still reach a Done
+	// article directly and grade it again, and the tag should not lie about
+	// that.
+	if element.IsRoot() {
+		switch {
+		case updated.State == ir.StateDone:
+			if err := s.setDoneTag(element.DocumentID, true); err != nil {
+				s.fail(w, err)
+				return
+			}
+		case element.Schedule.State == ir.StateDone:
+			if err := s.setDoneTag(element.DocumentID, false); err != nil {
+				s.fail(w, err)
+				return
+			}
+		}
+	}
+
 	s.redirect(w, r, "/next")
 }
 
@@ -224,11 +256,48 @@ func (s *Server) archiveUpstream(element store.Element, archived bool) error {
 	return nil
 }
 
+// setDoneTag adds or removes doneTagLabel on a document, both locally and
+// upstream — the write-back counterpart to the library's own "done" state.
+//
+// Guarded the same way archiveUpstream guards the archive flag: skipped
+// when the tag already agrees with done, so grading an already-done article
+// Done again, or unsuspending something that was never graded Done in the
+// first place, queues nothing.
+func (s *Server) setDoneTag(documentID int64, done bool) error {
+	document, err := s.store.DocumentByID(documentID)
+	if err != nil {
+		return err
+	}
+	labels, err := s.store.TagsOf(documentID)
+	if err != nil {
+		return err
+	}
+	if slices.Contains(labels, doneTagLabel) == done {
+		return nil
+	}
+
+	if done {
+		err = s.store.AttachTag(documentID, document.Source, document.ExternalID, doneTagLabel)
+	} else {
+		err = s.store.DetachTag(documentID, document.Source, document.ExternalID, doneTagLabel)
+	}
+	if err != nil {
+		return err
+	}
+	s.publishSoon()
+	return nil
+}
+
 // handleUnsuspend returns a suspended element to the queue.
 //
 // The counterpart to suspending, and also how an archived article is pulled
 // back in for re-reading — archived material arrives suspended, so there is
 // only one mechanism to understand.
+//
+// Defaults to landing back on the reader, same as pressing the button there
+// does, but honours redirect the same way handleBacklog does — the library's
+// "queue it" sends its own current URL, so unsuspending a row from a filtered
+// list stays on that list instead of jumping into the article.
 func (s *Server) handleUnsuspend(w http.ResponseWriter, r *http.Request) {
 	id, err := elementID(r)
 	if err != nil {
@@ -255,9 +324,17 @@ func (s *Server) handleUnsuspend(w http.ResponseWriter, r *http.Request) {
 			s.fail(w, err)
 			return
 		}
+		// Bringing something back into circulation should not leave a stale
+		// "done" tag behind — setDoneTag is a no-op unless it is actually
+		// there, which is only ever true for something graded Done before it
+		// was pulled back in.
+		if err := s.setDoneTag(element.DocumentID, false); err != nil {
+			s.fail(w, err)
+			return
+		}
 	}
 
-	s.redirect(w, r, "/read/"+strconv.FormatInt(id, 10))
+	s.redirect(w, r, redirectTarget(r, "/read/"+strconv.FormatInt(id, 10)))
 }
 
 // handleStar toggles wallabag's favourite flag on an article.
@@ -518,7 +595,7 @@ func (s *Server) handleLibrary(w http.ResponseWriter, r *http.Request) {
 		Tag:   query.Get("tag"),
 	}
 	switch filter.State {
-	case "", "unread", "starred", "archived", "annotated", "missing", "scheduled":
+	case "", "unread", "starred", "archived", "annotated", "missing", "scheduled", "suspended", "done":
 	default:
 		http.Error(w, "unknown state filter", http.StatusBadRequest)
 		return
