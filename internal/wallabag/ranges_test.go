@@ -175,6 +175,19 @@ func TestRecoverQuoteRoundTrips(t *testing.T) {
 				`<p>Third and final paragraph, well past where a 900-character quote would have been cut.</p>`,
 			quote: "First paragraph of a long highlight.\n\nSecond paragraph, still part of the same highlight, going on for a while.\n\nThird and final paragraph, well past where a 900-character quote would have been cut.",
 		},
+		{
+			// Confirmed against a real highlight on a real article (Gwern's
+			// "2002<sub>24ya</sub>" convention for annotating a date):
+			// inline markup immediately abutting text with deliberately no
+			// space at all, still inside the very same paragraph as the
+			// text around it. A version of this comparing immediate parents
+			// instead of nearest block ancestors inserted a spurious space
+			// here, which silently broke recovery for every highlight
+			// crossing one of these — not just this specific site's dates.
+			name:  "inline markup immediately abuts text with no space, same paragraph",
+			html:  `<p>Published in 2002<sub>24ya</sub>, the essay remains relevant.</p>`,
+			quote: "Published in 200224ya, the essay remains relevant.",
+		},
 	}
 
 	// A trivial stand-in for ir.NormalizeSpace: this package deliberately

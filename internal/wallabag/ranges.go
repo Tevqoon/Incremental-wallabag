@@ -442,22 +442,56 @@ func byteOffsetForUTF16(s string, target int) int {
 	return len(s)
 }
 
+// blockAncestorTags are the elements extractBetween treats as separating two
+// pieces of text enough to need a space between them when they are rejoined
+// — a deliberate, independent approximation of ir.blockTags, not an import
+// of it: this package stays free of increader's own reading model, the same
+// reason computeRanges takes rawHTML instead of reaching for ir.Article's
+// parsed, sanitised view of the same content.
+var blockAncestorTags = map[atom.Atom]bool{
+	atom.P: true, atom.Li: true, atom.Blockquote: true, atom.Pre: true,
+	atom.H1: true, atom.H2: true, atom.H3: true,
+	atom.H4: true, atom.H5: true, atom.H6: true,
+	atom.Dd: true, atom.Dt: true, atom.Td: true, atom.Th: true,
+	atom.Figcaption: true, atom.Div: true, atom.Section: true, atom.Article: true,
+}
+
+// nearestBlockAncestor walks up from node to the nearest ancestor
+// extractBetween treats as a block boundary, or as far up as there is to go
+// if none of node's ancestors are one.
+func nearestBlockAncestor(node *html.Node) *html.Node {
+	n := node.Parent
+	for n != nil && !(n.Type == html.ElementNode && blockAncestorTags[n.DataAtom]) {
+		if n.Parent == nil {
+			return n
+		}
+		n = n.Parent
+	}
+	return n
+}
+
 // extractBetween concatenates the text nodes package nodes covers from
 // (startNode, startByte) through (endNode, endByte) inclusive of both
 // boundaries, in the document order nodes is already in.
 //
-// A space is inserted between two consecutive nodes whenever they do not
-// share an immediate parent element. Adjacent block-level siblings — two
-// paragraphs the highlight spans, most importantly — carry no whitespace
-// between their text nodes at the DOM level at all (the same fact
+// A space is inserted between two consecutive nodes whenever their nearest
+// block ancestors differ. Adjacent block-level siblings — two paragraphs the
+// highlight spans, most importantly — carry no whitespace between their text
+// nodes at the DOM level at all (the same fact
 // TestComputeRangesAcrossParagraphsWithNoGap exists to cover on the way
 // out), so without this a recovered multi-paragraph passage would run its
 // paragraphs together with nothing between them: text Article.Locate, which
-// this feeds, could then never match, since Locate's own search space
-// always has exactly one space at a block boundary. The rare cost is a
-// spurious space where inline markup genuinely split one word in the source
-// with no space at all — recovery simply not helping that one passage,
-// which is what would have happened here anyway without this fallback.
+// this feeds, could then never match, since Locate's own search space always
+// has exactly one space at a block boundary.
+//
+// Comparing the nearest *block* ancestor rather than the immediate parent —
+// confirmed against a real highlight crossing a "2002<sub>24ya</sub>"-style
+// annotation, adjacent inline markup with deliberately no space at all — is
+// what keeps that case from getting the same treatment: "2002" and "24ya"
+// sit in different immediate elements but the same enclosing paragraph, and
+// the immediate-parent version of this inserted a space between them that
+// broke every match past that point, since one extra character early in the
+// recovered text derails an exact substring search for everything after it.
 func extractBetween(nodes []*html.Node, startNode *html.Node, startByte int, endNode *html.Node, endByte int) (string, bool) {
 	var (
 		b          strings.Builder
@@ -471,7 +505,7 @@ func extractBetween(nodes []*html.Node, startNode *html.Node, startByte int, end
 		if !collecting {
 			continue
 		}
-		if previous != nil && previous.Parent != node.Parent {
+		if previous != nil && nearestBlockAncestor(previous) != nearestBlockAncestor(node) {
 			b.WriteByte(' ')
 		}
 		previous = node
