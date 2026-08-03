@@ -1,6 +1,10 @@
 package ir
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+	"unicode/utf8"
+)
 
 // Locate finds a passage in the article by its text and returns the range it
 // occupies — including a passage that crosses a paragraph break, which a
@@ -123,6 +127,12 @@ func (a *Article) flattenBlocks() (string, []blockOffset) {
 // That index map is the whole point: a match is found in the normalised text
 // but has to be reported in the original's coordinates, because those are what
 // every stored range and rendered highlight uses.
+//
+// Whitespace is recognised by unicode.IsSpace, not just the four ASCII bytes,
+// to agree with NormalizeSpace's own strings.Fields — a real article can
+// contain Unicode spaces (a thin space around a quotation mark, say), and a
+// quote recorded elsewhere collapses those exactly like any other whitespace,
+// so this side has to as well or an otherwise-exact match silently fails.
 func normalizeWithOffsets(raw string) (string, []int) {
 	var (
 		builder strings.Builder
@@ -130,20 +140,24 @@ func normalizeWithOffsets(raw string) (string, []int) {
 		inSpace = true // leading whitespace is dropped, as NormalizeSpace does
 	)
 
-	for index := 0; index < len(raw); index++ {
-		character := raw[index]
+	for index := 0; index < len(raw); {
+		character, size := utf8.DecodeRuneInString(raw[index:])
 
-		if character == ' ' || character == '\t' || character == '\n' || character == '\r' {
+		if unicode.IsSpace(character) {
 			if !inSpace {
 				builder.WriteByte(' ')
 				offsets = append(offsets, index)
 				inSpace = true
 			}
+			index += size
 			continue
 		}
 
-		builder.WriteByte(character)
-		offsets = append(offsets, index)
+		builder.WriteString(raw[index : index+size])
+		for i := 0; i < size; i++ {
+			offsets = append(offsets, index+i)
+		}
+		index += size
 		inSpace = false
 	}
 

@@ -187,3 +187,27 @@ func TestLocateHandlesUnicode(t *testing.T) {
 		t.Errorf("located range covers %q, want %q", text, "café très chaud")
 	}
 }
+
+// TestLocateHandlesUnicodeWhitespace guards against a real failure seen on a
+// live article: NormalizeSpace (via strings.Fields) collapses any Unicode
+// whitespace, including U+2009 THIN SPACE, but a byte-level check for only
+// the four ASCII whitespace bytes does not — so a quote recorded elsewhere,
+// where the thin space was already collapsed to a plain space, silently
+// failed to match the article's own copy, which still had the real thin
+// space in it.
+func TestLocateHandlesUnicodeWhitespace(t *testing.T) {
+	article := mustParse(t, "<p>He asked, “Tolstoy? ” and said nothing more.</p>")
+
+	got, found := article.Locate("Tolstoy? ” and said")
+	if !found {
+		t.Fatal("a quote crossing a Unicode thin space could not be located")
+	}
+
+	text, err := article.Text(got)
+	if err != nil {
+		t.Fatalf("Text: %v", err)
+	}
+	if text != "Tolstoy? ” and said" {
+		t.Errorf("located range covers %q, want the original thin space preserved", text)
+	}
+}
