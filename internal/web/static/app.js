@@ -370,6 +370,61 @@
 
   document.addEventListener("DOMContentLoaded", trackReadingPosition);
 
+  // ---- Library bulk selection --------------------------------------------
+  //
+  // The bulk action bar's buttons are ordinary form submits — see
+  // library.html's bulk-form — so mass "queue it" and friends already work
+  // with no JavaScript at all: check some rows, press a button, land back on
+  // this same list. Everything here is a convenience layered on top, not a
+  // requirement for the feature to function: a running count so a press of
+  // Done or Dismiss is not a leap of faith, "select all" to avoid clicking
+  // every row by hand, and a confirmation prompt for the actions marked
+  // dangerous enough to want one.
+
+  function initBulkSelection() {
+    const selectAll = document.getElementById("select-all");
+    const count = document.getElementById("bulk-count");
+    if (!selectAll && !count) return; // not the library page
+
+    const boxes = () => document.querySelectorAll('input[name="ids"]');
+
+    function updateCount() {
+      if (!count) return;
+      const n = document.querySelectorAll('input[name="ids"]:checked').length;
+      count.textContent = n ? `${n} selected` : "";
+    }
+
+    if (selectAll) {
+      selectAll.addEventListener("change", () => {
+        boxes().forEach((box) => { box.checked = selectAll.checked; });
+        updateCount();
+      });
+    }
+
+    document.addEventListener("change", (event) => {
+      if (event.target.name !== "ids") return;
+      // Unchecking any one row means "all" is no longer accurate; checking
+      // every row back by hand is the only way this checkbox lights up
+      // again, same as any other tri-state-avoiding "select all".
+      if (!event.target.checked && selectAll) selectAll.checked = false;
+      updateCount();
+    });
+  }
+
+  document.addEventListener("DOMContentLoaded", initBulkSelection);
+
+  // A bulk action button's own data-confirm carries its prompt — set in the
+  // template per action (see libraryBulkAction.Confirm) rather than fixed
+  // here, since only some of the actions (Done, Dismiss) are worth pausing
+  // for. event.submitter is the specific button that triggered the submit,
+  // which a form-level listener needs to tell "Queue it" from "Dismiss".
+  document.addEventListener("submit", (event) => {
+    const submitter = event.submitter;
+    if (submitter && submitter.dataset.confirm && !confirm(submitter.dataset.confirm)) {
+      event.preventDefault();
+    }
+  });
+
   // ---- Scroll anchoring across an extract --------------------------------
   //
   // Making an extract has htmx swap #article wholesale (see reader.html):

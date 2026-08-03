@@ -123,6 +123,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /sync", s.handleSyncNow)
 	mux.HandleFunc("GET /next", s.handleNext)
 	mux.HandleFunc("GET /library", s.handleLibrary)
+	mux.HandleFunc("POST /library/bulk", s.handleLibraryBulk)
 	mux.HandleFunc("DELETE /documents/{id}", s.handleDeleteDocument)
 	mux.HandleFunc("GET /documents/{id}/images/{imageID}", s.handleDocumentImage)
 	mux.HandleFunc("GET /extracts", s.handleExtracts)

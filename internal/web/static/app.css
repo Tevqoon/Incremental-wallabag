@@ -107,6 +107,26 @@ h1 { font-size: 1.5rem; line-height: 1.25; margin: 0 0 0.35rem; }
 .item.is-extract .item-title { font-size: 0.95rem; color: var(--muted); }
 .item.is-extract .item-title:hover { color: var(--accent); }
 
+/* The library's rows only — a checkbox alongside the title/meta stack that
+   plain .item elsewhere (the extracts page) has no equivalent of, so this is
+   its own modifier rather than a change to .item itself, which would turn
+   .item-title and .item-meta into flex siblings there instead of the
+   stacked block layout they still want. */
+.item-selectable { display: flex; gap: 0.6rem; align-items: flex-start; }
+.item-select { flex: none; margin-top: 0.35rem; }
+.item-body { flex: 1; min-width: 0; }
+
+/* The library's selection bar, above the list itself. */
+.bulk-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0 0 1rem;
+  font: 0.78rem/1 system-ui, sans-serif;
+}
+.bulk-count { color: var(--muted); }
+
 .item-meta {
   font-family: system-ui, sans-serif;
   font-size: 0.72rem;
