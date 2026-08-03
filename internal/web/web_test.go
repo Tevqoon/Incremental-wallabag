@@ -2316,6 +2316,197 @@ func TestLibrarySuspendedAndDoneFilters(t *testing.T) {
 	}
 }
 
+// TestLibraryBulkQueue is the mass "queue it" the library's selection bar
+// exists for: several suspended articles, checked at once, all pulled back
+// into circulation and unarchived upstream in a single request.
+func TestLibraryBulkQueue(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "2", Title: "Archived one", IsArchived: true, UpdatedAt: time.Now()},
+		{ExternalID: "3", Title: "Archived two", IsArchived: true, UpdatedAt: time.Now()},
+	}, 0, time.Now()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	response := post(t, server, "/library/bulk", url.Values{
+		"action": {"queue"},
+		"ids":    {"2", "3"},
+	})
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303: %s", response.Code, response.Body.String())
+	}
+	if got := response.Header().Get("Location"); got != "/library" {
+		t.Errorf("Location = %q, want /library (the default with no redirect field)", got)
+	}
+
+	for _, id := range []int64{2, 3} {
+		element, err := db.ElementByID(id)
+		if err != nil {
+			t.Fatalf("ElementByID(%d): %v", id, err)
+		}
+		if element.Schedule.State != "reading" {
+			t.Errorf("element %d state = %q, want reading", id, element.Schedule.State)
+		}
+	}
+
+	// 3, not 2: element 1 is newTestServer's own seeded article, still new
+	// and already due, alongside the two just unsuspended.
+	queue, _ := db.Queue(time.Now(), 10)
+	if len(queue) != 3 {
+		t.Errorf("queue has %d items, want 3 (the seeded article plus the 2 just unsuspended)", len(queue))
+	}
+
+	writes, _ := db.PendingWrites("wallabag", 10)
+	var unarchived int
+	for _, write := range writes {
+		if write.Operation == store.OpArchive && !store.PayloadBool(write.Payload) {
+			unarchived++
+		}
+	}
+	if unarchived != 2 {
+		t.Errorf("queued %d unarchive writes, want 2: %+v", unarchived, writes)
+	}
+}
+
+// TestLibraryBulkDone applies the same grade to several articles at once,
+// exercising the other side of the bulk bar: not just queuing, but the
+// scheduling grades too.
+func TestLibraryBulkDone(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "2", Title: "Second article", UpdatedAt: time.Now()},
+	}, 0, time.Now()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	response := post(t, server, "/library/bulk", url.Values{
+		"action": {"done"},
+		"ids":    {"1", "2"},
+	})
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303: %s", response.Code, response.Body.String())
+	}
+
+	for _, id := range []int64{1, 2} {
+		element, err := db.ElementByID(id)
+		if err != nil {
+			t.Fatalf("ElementByID(%d): %v", id, err)
+		}
+		if element.Schedule.State != "done" {
+			t.Errorf("element %d state = %q, want done", id, element.Schedule.State)
+		}
+
+		document, err := db.DocumentByID(element.DocumentID)
+		if err != nil {
+			t.Fatalf("DocumentByID: %v", err)
+		}
+		if !document.IsArchived {
+			t.Errorf("document %d was not archived", document.ID)
+		}
+		tags, _ := db.TagsOf(document.ID)
+		if !slices.Contains(tags, "done") {
+			t.Errorf("document %d was not tagged done", document.ID)
+		}
+	}
+}
+
+// TestLibraryBulkRedirectsToGivenTarget: the bulk form's hidden redirect
+// field is what keeps a mass action from dropping the reader out of whatever
+// filtered or searched view they selected rows from.
+func TestLibraryBulkRedirectsToGivenTarget(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	response := post(t, server, "/library/bulk", url.Values{
+		"action":   {"suspend"},
+		"ids":      {"1"},
+		"redirect": {"/library?state=unread"},
+	})
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", response.Code)
+	}
+	if got := response.Header().Get("Location"); got != "/library?state=unread" {
+		t.Errorf("Location = %q, want /library?state=unread", got)
+	}
+}
+
+// TestLibraryBulkRejectsUnknownAction guards the same way handleGrade guards
+// against an unknown grade: a typo or a stale client should not silently do
+// nothing, or silently do the wrong thing.
+func TestLibraryBulkRejectsUnknownAction(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	response := post(t, server, "/library/bulk", url.Values{
+		"action": {"launch-the-missiles"},
+		"ids":    {"1"},
+	})
+	if response.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", response.Code)
+	}
+}
+
+// TestLibraryBulkSkipsMissingIDs: a row can vanish between the page loading
+// and the button being pressed — most plausibly another tab deleting it. That
+// stale checkbox should not stop the rest of a batch that is otherwise
+// perfectly good from going through.
+func TestLibraryBulkSkipsMissingIDs(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	response := post(t, server, "/library/bulk", url.Values{
+		"action": {"suspend"},
+		"ids":    {"1", "999999"},
+	})
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303: %s", response.Code, response.Body.String())
+	}
+
+	element, _ := db.ElementByID(1)
+	if element.Schedule.State != "suspended" {
+		t.Errorf("element 1 state = %q, want suspended despite the other id being bogus", element.Schedule.State)
+	}
+}
+
+// TestLibraryBulkNoIDsIsANoOp: submitting the bar with nothing checked — the
+// buttons carry no disabled state of their own, since that would need
+// JavaScript the rest of this feature deliberately does not depend on — must
+// not error, just land back where it started having changed nothing.
+func TestLibraryBulkNoIDsIsANoOp(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	before, _ := db.ElementByID(1)
+
+	response := post(t, server, "/library/bulk", url.Values{"action": {"done"}})
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", response.Code)
+	}
+
+	after, _ := db.ElementByID(1)
+	if after.Schedule.State != before.Schedule.State {
+		t.Errorf("state changed to %q with no ids selected", after.Schedule.State)
+	}
+}
+
+// TestLibraryShowsBulkControls: the selection bar and its checkboxes are
+// there to be found in the rendered page, not just reachable by a client
+// that already knows the endpoint.
+func TestLibraryShowsBulkControls(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	body := get(t, server, "/library").Body.String()
+	if !strings.Contains(body, `id="bulk-form"`) {
+		t.Error("the library page has no bulk-form")
+	}
+	if !strings.Contains(body, `name="ids" value="1" form="bulk-form"`) {
+		t.Error("the article's row has no checkbox tied to the bulk form")
+	}
+	for _, action := range []string{"queue", "suspend", "done", "dismiss"} {
+		if !strings.Contains(body, `value="`+action+`"`) {
+			t.Errorf("the bulk bar is missing the %q action", action)
+		}
+	}
+}
+
 // TestBuryKeepsItTodayButLast covers the skip case end to end.
 func TestBuryKeepsItTodayButLast(t *testing.T) {
 	server, db, _ := newTestServer(t, true)

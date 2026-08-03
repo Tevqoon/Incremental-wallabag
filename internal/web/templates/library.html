@@ -38,10 +38,37 @@
     </nav>
   {{end}}
 
+  <!-- A plain form, not htmx: each checkbox and bulk button below is tied
+       to it via the HTML "form" attribute rather than DOM nesting, so it
+       sits outside the <ol> instead of wrapping it — nesting a <form> around
+       the per-row hx-post buttons would make the browser treat some of them
+       as native submits too. Being a plain form is also what lets bulk
+       actions work with no JavaScript at all: select rows, press a button,
+       get redirected back here. app.js only adds "select all" and a
+       confirmation prompt on top. -->
+  <form id="bulk-form" method="post" action="/library/bulk">
+    <input type="hidden" name="redirect" value="{{.CurrentURL}}">
+  </form>
+
   {{if .Entries}}
+    <div class="bulk-bar">
+      <label><input type="checkbox" id="select-all"> select all</label>
+      <span id="bulk-count" class="bulk-count"></span>
+      {{range .BulkActions}}
+        <button type="submit" form="bulk-form" name="action" value="{{.Value}}"
+                class="tiny{{if .Danger}} danger{{end}}"
+                {{if .Confirm}}data-confirm="{{.Confirm}}"{{end}}>
+          {{.Label}}
+        </button>
+      {{end}}
+    </div>
+
     <ol class="items">
       {{range .Entries}}
-        <li class="item" id="document-{{.ID}}">
+        <li class="item item-selectable" id="document-{{.ID}}">
+          <input type="checkbox" name="ids" value="{{.RootElementID}}" form="bulk-form"
+                 class="item-select" aria-label="Select “{{.Title}}”">
+          <div class="item-body">
           <a class="item-title" href="/read/{{.RootElementID}}">{{.Title}}</a>
           <div class="item-meta">
             <span class="badge">{{.State}}</span>
@@ -94,6 +121,7 @@
                 delete
               </button>
             {{end}}
+          </div>
           </div>
         </li>
       {{end}}

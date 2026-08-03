@@ -135,13 +135,27 @@ func (s *Server) handleGrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := s.applyGrade(element, grade); err != nil {
+		s.fail(w, err)
+		return
+	}
+
+	s.redirect(w, r, "/next")
+}
+
+// applyGrade is the whole scheduling and write-back effect of grading an
+// element — everything handleGrade does beyond the request-specific bits
+// (parsing the grade, recording the read block, the early return for Bury).
+// Pulled out so the library's bulk actions bar can apply the very same grade
+// a reader would give one article at a time, to many at once, without a
+// second implementation of what "Done" or "Suspend" actually does.
+func (s *Server) applyGrade(element store.Element, grade ir.Grade) error {
 	// The whole scheduling decision is one pure function call. Everything
 	// stateful — reading the row, writing it back — stays here.
 	updated := ir.Next(element.Schedule, grade, s.today())
 
-	if err := s.store.SaveSchedule(id, updated, time.Now()); err != nil {
-		s.fail(w, err)
-		return
+	if err := s.store.SaveSchedule(element.ID, updated, time.Now()); err != nil {
+		return err
 	}
 
 	// Finishing with an article here means finishing with it in wallabag too.
@@ -152,8 +166,7 @@ func (s *Server) handleGrade(w http.ResponseWriter, r *http.Request) {
 	// Only whole articles: an extract has no identity upstream.
 	if element.IsRoot() && (grade == ir.GradeDone || grade == ir.GradeDismiss) {
 		if err := s.archiveUpstream(element, true); err != nil {
-			s.fail(w, err)
-			return
+			return err
 		}
 	}
 
@@ -169,18 +182,15 @@ func (s *Server) handleGrade(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case updated.State == ir.StateDone:
 			if err := s.setDoneTag(element.DocumentID, true); err != nil {
-				s.fail(w, err)
-				return
+				return err
 			}
 		case element.Schedule.State == ir.StateDone:
 			if err := s.setDoneTag(element.DocumentID, false); err != nil {
-				s.fail(w, err)
-				return
+				return err
 			}
 		}
 	}
-
-	s.redirect(w, r, "/next")
+	return nil
 }
 
 // handleDeleteExtract permanently removes an extract or item.
@@ -305,9 +315,21 @@ func (s *Server) handleUnsuspend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.store.Unsuspend(id, s.today(), time.Now()); err != nil {
-		s.fail(w, err)
+	if err := s.applyUnsuspend(id); err != nil {
+		s.notFoundOrFail(w, err)
 		return
+	}
+
+	s.redirect(w, r, redirectTarget(r, "/read/"+strconv.FormatInt(id, 10)))
+}
+
+// applyUnsuspend is the whole effect of unsuspending an element, pulled out
+// of handleUnsuspend the same way applyGrade was pulled out of handleGrade —
+// so the library's bulk "queue it" action can do exactly this to many rows
+// at once rather than reimplementing it.
+func (s *Server) applyUnsuspend(id int64) error {
+	if err := s.store.Unsuspend(id, s.today(), time.Now()); err != nil {
+		return err
 	}
 
 	// Putting an article back into the reading queue means it is unread again.
@@ -316,25 +338,21 @@ func (s *Server) handleUnsuspend(w http.ResponseWriter, r *http.Request) {
 	// transition and suspend it right back out of the queue.
 	element, err := s.store.ElementByID(id)
 	if err != nil {
-		s.notFoundOrFail(w, err)
-		return
+		return err
 	}
 	if element.IsRoot() {
 		if err := s.archiveUpstream(element, false); err != nil {
-			s.fail(w, err)
-			return
+			return err
 		}
 		// Bringing something back into circulation should not leave a stale
 		// "done" tag behind — setDoneTag is a no-op unless it is actually
 		// there, which is only ever true for something graded Done before it
 		// was pulled back in.
 		if err := s.setDoneTag(element.DocumentID, false); err != nil {
-			s.fail(w, err)
-			return
+			return err
 		}
 	}
-
-	s.redirect(w, r, redirectTarget(r, "/read/"+strconv.FormatInt(id, 10)))
+	return nil
 }
 
 // handleStar toggles wallabag's favourite flag on an article.
@@ -572,13 +590,73 @@ func (s *Server) notFoundOrFail(w http.ResponseWriter, err error) {
 
 // libraryData is what the library page renders.
 type libraryData struct {
-	Title   string
-	Query   string
-	State   string
-	Tag     string
-	Entries []store.LibraryEntry
-	Counts  map[string]int
-	Tags    []store.Tag
+	Title       string
+	Query       string
+	State       string
+	Tag         string
+	Entries     []store.LibraryEntry
+	Counts      map[string]int
+	Tags        []store.Tag
+	CurrentURL  string
+	BulkActions []libraryBulkAction
+}
+
+// libraryBulkAction is one action the library's selection bar can apply to
+// every checked row in a single request — the same effect its single-row
+// equivalent already has elsewhere in the app, reused rather than
+// reimplemented for the many-at-once case. Value and Label render its
+// button; Confirm, when set, is shown before the button's own form submits;
+// apply is the effect itself.
+type libraryBulkAction struct {
+	Value   string
+	Label   string
+	Confirm string
+	Danger  bool
+	apply   func(*Server, store.Element) error
+}
+
+// libraryBulkActions lists every bulk action the library offers, in the
+// order their buttons appear. Extending the selection bar with another one —
+// a bulk "star", say — is exactly one more entry here, built on whatever
+// single-element function already exists for it; neither the handler below
+// nor the template need to change.
+var libraryBulkActions = []libraryBulkAction{
+	{
+		Value: "queue", Label: "Queue it",
+		apply: func(s *Server, element store.Element) error {
+			return s.applyUnsuspend(element.ID)
+		},
+	},
+	{
+		Value: "suspend", Label: "Suspend",
+		apply: func(s *Server, element store.Element) error {
+			return s.applyGrade(element, ir.GradeSuspend)
+		},
+	},
+	{
+		Value: "done", Label: "Done",
+		Confirm: "Mark the selected articles Done? This archives them in wallabag too.",
+		apply: func(s *Server, element store.Element) error {
+			return s.applyGrade(element, ir.GradeDone)
+		},
+	},
+	{
+		Value: "dismiss", Label: "Dismiss", Danger: true,
+		Confirm: "Dismiss the selected articles, unread? This archives them in wallabag too.",
+		apply: func(s *Server, element store.Element) error {
+			return s.applyGrade(element, ir.GradeDismiss)
+		},
+	},
+}
+
+// findLibraryBulkAction looks up a bulk action by its form value.
+func findLibraryBulkAction(value string) (libraryBulkAction, bool) {
+	for _, action := range libraryBulkActions {
+		if action.Value == value {
+			return action, true
+		}
+	}
+	return libraryBulkAction{}, false
 }
 
 // handleLibrary lists and searches every synced document.
@@ -618,14 +696,65 @@ func (s *Server) handleLibrary(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.render(w, "library.html", libraryData{
-		Title:   "Library",
-		Query:   filter.Query,
-		State:   filter.State,
-		Tag:     filter.Tag,
-		Entries: entries,
-		Counts:  counts,
-		Tags:    tags,
+		Title:       "Library",
+		Query:       filter.Query,
+		State:       filter.State,
+		Tag:         filter.Tag,
+		Entries:     entries,
+		Counts:      counts,
+		Tags:        tags,
+		CurrentURL:  r.URL.RequestURI(),
+		BulkActions: libraryBulkActions,
 	})
+}
+
+// handleLibraryBulk applies one action to every row checked in the library's
+// selection bar. It is a plain HTML form post rather than an htmx one — the
+// button that submits it carries the action as its own value, so no
+// JavaScript is needed to route a row's worth of checkboxes to an effect;
+// see library.html's "select all" and confirmation prompt for what little
+// JavaScript is layered on top for convenience.
+//
+// A row that no longer exists — deleted, or merged away, in the moment
+// between the page loading and the button being pressed — is skipped rather
+// than aborting the rest of the batch; nothing about a stale selection
+// should stop everything else the reader actually meant to act on. Any other
+// error does abort, since that means something is actually wrong rather than
+// just out of date.
+func (s *Server) handleLibraryBulk(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+
+	action, ok := findLibraryBulkAction(r.FormValue("action"))
+	if !ok {
+		http.Error(w, "unknown bulk action", http.StatusBadRequest)
+		return
+	}
+
+	for _, raw := range r.Form["ids"] {
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			continue
+		}
+
+		element, err := s.store.ElementByID(id)
+		if err != nil {
+			if isNotFound(err) {
+				continue
+			}
+			s.fail(w, err)
+			return
+		}
+
+		if err := action.apply(s, element); err != nil {
+			s.fail(w, err)
+			return
+		}
+	}
+
+	s.redirect(w, r, redirectTarget(r, "/library"))
 }
 
 // handleDeleteDocument permanently removes a document no longer found
