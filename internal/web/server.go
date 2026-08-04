@@ -134,6 +134,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /import", s.handleImport)
 	mux.HandleFunc("GET /documents/{id}", s.handleDocument)
 	mux.HandleFunc("POST /documents/{id}/titles", s.handleDocumentTitles)
+	mux.HandleFunc("POST /documents/{id}/chapters", s.handleSetChapters)
 	mux.HandleFunc("GET /documents/{id}/triage", s.handleTriage)
 	mux.HandleFunc("POST /documents/{id}/triage/reset", s.handleTriageReset)
 	mux.HandleFunc("DELETE /documents/{id}", s.handleDeleteDocument)
@@ -155,6 +156,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /elements/{id}/tags", s.handleAddTag)
 	mux.HandleFunc("POST /elements/{id}/tags/remove", s.handleRemoveTag)
 	mux.HandleFunc("POST /elements/{id}/triage", s.handleTriageDecision)
+	mux.HandleFunc("POST /elements/{id}/annotation", s.handleEditAnnotation)
 	mux.HandleFunc("DELETE /elements/{id}", s.handleDeleteExtract)
 
 	return mux

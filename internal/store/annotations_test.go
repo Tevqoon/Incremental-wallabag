@@ -497,6 +497,100 @@ func TestUpdateDocumentAuthor(t *testing.T) {
 	}
 }
 
+// TestUpdateAnnotationEditsThePassage covers the correction a malformed PDF
+// extraction needs: the quote, note and chapter are all edited by hand, and
+// content_html is rebuilt from the new text rather than left holding the
+// original's now-stale markup.
+func TestUpdateAnnotationEditsThePassage(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	result, err := db.ImportAnnotations(book(), ImportOptions{Triage: true}, now)
+	if err != nil {
+		t.Fatalf("ImportAnnotations: %v", err)
+	}
+	annotations, err := db.DocumentAnnotations(result.DocumentID)
+	if err != nil {
+		t.Fatalf("DocumentAnnotations: %v", err)
+	}
+	target := annotations[0]
+
+	if err := db.UpdateAnnotation(target.ID,
+		"the painter is standing well back", "corrected OCR noise",
+		"Las Meninas (corrected)", now,
+	); err != nil {
+		t.Fatalf("UpdateAnnotation: %v", err)
+	}
+
+	edited, err := db.ElementByID(target.ID)
+	if err != nil {
+		t.Fatalf("ElementByID: %v", err)
+	}
+	if edited.Quote != "the painter is standing well back" {
+		t.Errorf("quote = %q, want the edit to have taken", edited.Quote)
+	}
+	if edited.Note != "corrected OCR noise" {
+		t.Errorf("note = %q, want the edit to have taken", edited.Note)
+	}
+	if edited.Chapter != "Las Meninas (corrected)" {
+		t.Errorf("chapter = %q, want the edit to have taken", edited.Chapter)
+	}
+	wantHTML := `<p>the painter is standing well back</p><p class="annotation-note">corrected OCR noise</p>`
+	if edited.ContentHTML != wantHTML {
+		t.Errorf("content_html = %q, want %q", edited.ContentHTML, wantHTML)
+	}
+
+	if err := db.UpdateAnnotation(9999, "x", "", "", now); !errors.Is(err, ErrNotFound) {
+		t.Errorf("error = %v, want ErrNotFound for a missing element", err)
+	}
+
+	root, err := db.RootElement(result.DocumentID)
+	if err != nil {
+		t.Fatalf("RootElement: %v", err)
+	}
+	if err := db.UpdateAnnotation(root.ID, "x", "", "", now); !errors.Is(err, ErrNotFound) {
+		t.Errorf("error = %v, want ErrNotFound for a document's own root topic", err)
+	}
+}
+
+// TestSetAnnotationChapterLeavesThePassageAlone is the mass chapter edit's
+// single-row primitive: only chapter changes, not the passage or note it
+// would be careless to overwrite on a batch of otherwise-unrelated rows.
+func TestSetAnnotationChapterLeavesThePassageAlone(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	result, err := db.ImportAnnotations(book(), ImportOptions{Triage: true}, now)
+	if err != nil {
+		t.Fatalf("ImportAnnotations: %v", err)
+	}
+	annotations, err := db.DocumentAnnotations(result.DocumentID)
+	if err != nil {
+		t.Fatalf("DocumentAnnotations: %v", err)
+	}
+	target := annotations[0]
+	originalQuote := target.Quote
+
+	if err := db.SetAnnotationChapter(target.ID, "Introduction (by colour)", now); err != nil {
+		t.Fatalf("SetAnnotationChapter: %v", err)
+	}
+
+	edited, err := db.ElementByID(target.ID)
+	if err != nil {
+		t.Fatalf("ElementByID: %v", err)
+	}
+	if edited.Chapter != "Introduction (by colour)" {
+		t.Errorf("chapter = %q, want the edit to have taken", edited.Chapter)
+	}
+	if edited.Quote != originalQuote {
+		t.Errorf("quote = %q, want it left alone by a chapter-only edit", edited.Quote)
+	}
+
+	if err := db.SetAnnotationChapter(9999, "x", now); !errors.Is(err, ErrNotFound) {
+		t.Errorf("error = %v, want ErrNotFound for a missing element", err)
+	}
+}
+
 // TestWallabagHighlightsAreUnaffected pins the sync path's behaviour, since
 // insertHighlights now serves two callers with different needs.
 func TestWallabagHighlightsAreUnaffected(t *testing.T) {

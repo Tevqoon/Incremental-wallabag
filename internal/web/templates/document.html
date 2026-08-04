@@ -70,6 +70,25 @@
         {{end}}
       </ol>
     </nav>
+
+    <!-- Mass chapter edit: a document with no outline of its own — most
+         PDFs, and any KOReader export before an outline was added — needs
+         some other way to get one, commonly a highlight colour standing in
+         for a heading. Same plain-form pattern library.html and
+         extracts.html use for their own bulk bars, outside the <ol> so
+         nesting a <form> around the per-row hx-post buttons is never an
+         issue, and app.js's select-all/count handling — written generically
+         against #select-all/#bulk-count/input[name="ids"] — applies here
+         unchanged. The one difference from those pages' bulk bars is the
+         text input travelling alongside the checkboxes: there is no fixed
+         set of chapter names to offer as buttons. -->
+    <form id="chapter-form" method="post" action="/documents/{{.Document.ID}}/chapters"></form>
+    <div class="bulk-bar">
+      <label><input type="checkbox" id="select-all"> select all</label>
+      <span id="bulk-count" class="bulk-count"></span>
+      <input type="text" name="chapter" form="chapter-form" placeholder="chapter name" class="tiny">
+      <button type="submit" form="chapter-form" class="tiny">Set chapter</button>
+    </div>
   {{end}}
 
   {{range $index, $group := .Groups}}
@@ -79,7 +98,10 @@
       </h2>
       <ol class="items">
         {{range $group.Annotations}}
-          <li class="item is-extract" id="element-{{.ID}}">
+          <li class="item item-selectable is-extract" id="element-{{.ID}}">
+            <input type="checkbox" name="ids" value="{{.ID}}" form="chapter-form"
+                   class="item-select" aria-label="Select this annotation">
+            <div class="item-body">
             <a class="item-title" href="/read/{{.ID}}">
               {{if .Quote}}{{.Quote}}{{else}}{{.Note}}{{end}}
             </a>
@@ -113,6 +135,31 @@
               <button class="link-danger" hx-delete="/elements/{{.ID}}?swap_only=1"
                       hx-target="closest li" hx-swap="outerHTML swap:200ms"
                       hx-confirm="Delete this annotation permanently?">delete</button>
+            </div>
+
+            <!-- Same disclosure idiom as the "Rename" section above: a plain
+                 form, no JavaScript required, for the correction a malformed
+                 PDF extraction (OCR noise, a mis-split sentence) or an
+                 uncorrected export often needs. -->
+            <details class="annotation-edit">
+              <summary>edit</summary>
+              <form method="post" action="/elements/{{.ID}}/annotation">
+                <input type="hidden" name="redirect" value="/documents/{{$.Document.ID}}#chapter-{{$index}}">
+                <label class="field">
+                  <span>Passage</span>
+                  <textarea name="quote" rows="2">{{.Quote}}</textarea>
+                </label>
+                <label class="field">
+                  <span>Note</span>
+                  <textarea name="note" rows="2">{{.Note}}</textarea>
+                </label>
+                <label class="field">
+                  <span>Chapter</span>
+                  <input type="text" name="chapter" value="{{.Chapter}}">
+                </label>
+                <button type="submit" class="tiny">Save</button>
+              </form>
+            </details>
             </div>
           </li>
         {{end}}

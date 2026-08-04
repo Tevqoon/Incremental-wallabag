@@ -819,7 +819,8 @@ button.link-danger:hover { color: var(--danger); }
 }
 .field input[type="text"],
 .field input[type="file"],
-.field select {
+.field select,
+.field textarea {
   width: 100%;
   padding: 0.45rem 0.5rem;
   border: 1px solid var(--rule);
@@ -828,6 +829,7 @@ button.link-danger:hover { color: var(--danger); }
   color: var(--fg);
   font: inherit;
 }
+.field textarea { resize: vertical; }
 .field small {
   display: block;
   margin-top: 0.3rem;
@@ -876,6 +878,16 @@ fieldset.field { border: 0; padding: 0; margin-inline: 0; }
   font-size: 0.9rem;
 }
 .doc-titles form { margin-top: 0.8rem; max-width: var(--measure); }
+
+/* Same disclosure idiom as .doc-titles, one level down: per-annotation
+   rather than per-document, for the passage/note/chapter correction editor. */
+.annotation-edit { margin-top: 0.5rem; }
+.annotation-edit summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.annotation-edit form { margin-top: 0.6rem; max-width: var(--measure); }
 
 /* The table of contents. A plain ordered list with the count pushed right,
    so a chapter with forty passages is visible as such at a glance. */
