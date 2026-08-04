@@ -46,7 +46,7 @@ func stripInvisibleFormatting(s string) string {
 // already-parsed Block.Text — would shorten it without shortening the DOM
 // node backing it, and silently misalign every offset downstream.
 func (s *Server) sanitize(rawHTML string) string {
-	return stripInvisibleFormatting(s.policy.Sanitize(rawHTML))
+	return stripInvisibleFormatting(s.policy.Sanitize(rewriteEmbeds(rawHTML)))
 }
 
 // newPolicy builds the sanitiser applied to every article body before it is
