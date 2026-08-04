@@ -2159,16 +2159,23 @@ func TestExtractsPageOffersRescheduling(t *testing.T) {
 }
 
 // TestDoneArchivesUpstream is what the reader asked for: finishing an article
-// here finishes it in wallabag, so the two views stop drifting. Done also
-// pushes a "done" tag upstream — Dismiss does not, since that is abandoning
-// the article unread rather than actually working through it.
+// here finishes it in wallabag, so the two views stop drifting. Done and
+// Dismiss both archive upstream, but each pushes its own tag too — "done" or
+// "dismissed" — since wallabag's archive flag alone cannot tell "read to the
+// end and annotated" from "abandoned unread" apart.
 func TestDoneArchivesUpstream(t *testing.T) {
-	for _, grade := range []string{"done", "dismiss"} {
-		t.Run(grade, func(t *testing.T) {
+	for _, tc := range []struct {
+		grade string
+		tag   string
+	}{
+		{"done", "done"},
+		{"dismiss", "dismissed"},
+	} {
+		t.Run(tc.grade, func(t *testing.T) {
 			server, db, _ := newTestServer(t, true)
 
 			if response := post(t, server, "/elements/1/grade", url.Values{
-				"grade": {grade},
+				"grade": {tc.grade},
 			}); response.Code != http.StatusSeeOther {
 				t.Fatalf("status = %d", response.Code)
 			}
@@ -2193,32 +2200,70 @@ func TestDoneArchivesUpstream(t *testing.T) {
 					}
 				case store.OpTagAdd:
 					tagAdds++
-					if write.Payload != "done" {
-						t.Errorf("queued tag = %q, want %q", write.Payload, "done")
+					if write.Payload != tc.tag {
+						t.Errorf("queued tag = %q, want %q", write.Payload, tc.tag)
 					}
 				}
 			}
 			if archives != 1 {
 				t.Fatalf("queued %+v, want exactly one archive write", writes)
 			}
-
-			wantTagAdds := 0
-			if grade == "done" {
-				wantTagAdds = 1
-			}
-			if tagAdds != wantTagAdds {
-				t.Errorf("queued %+v, want %d tag_add write(s)", writes, wantTagAdds)
+			if tagAdds != 1 {
+				t.Errorf("queued %+v, want exactly one tag_add write", writes)
 			}
 
 			tags, _ := db.TagsOf(document.ID)
-			hasDoneTag := slices.Contains(tags, "done")
-			if grade == "done" && !hasDoneTag {
-				t.Error("the article was not tagged done locally")
+			if !slices.Contains(tags, tc.tag) {
+				t.Errorf("the article was not tagged %q locally, tags = %v", tc.tag, tags)
 			}
-			if grade == "dismiss" && hasDoneTag {
-				t.Error("dismissing tagged the article done")
+			other := map[string]string{"done": "dismissed", "dismissed": "done"}[tc.tag]
+			if slices.Contains(tags, other) {
+				t.Errorf("grading %q also attached the %q tag", tc.grade, other)
 			}
 		})
+	}
+}
+
+// TestSuspendPushesSuspendedTag: parking an article should be visible
+// upstream too, the same as Done and Dismiss, but without archiving it —
+// suspended material is still unread, just not currently in circulation.
+func TestSuspendPushesSuspendedTag(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if response := post(t, server, "/library/bulk", url.Values{
+		"action": {"suspend"}, "ids": {"1"},
+	}); response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d", response.Code)
+	}
+
+	document, _ := db.DocumentByID(1)
+	if document.IsArchived {
+		t.Error("suspending archived the article; it should stay unread upstream")
+	}
+
+	writes, err := db.PendingWrites("wallabag", 10)
+	if err != nil {
+		t.Fatalf("PendingWrites: %v", err)
+	}
+	var tagAdds int
+	for _, write := range writes {
+		if write.Operation == store.OpArchive {
+			t.Errorf("suspending queued an archive write: %+v", write)
+		}
+		if write.Operation == store.OpTagAdd {
+			tagAdds++
+			if write.Payload != "suspended" {
+				t.Errorf("queued tag = %q, want %q", write.Payload, "suspended")
+			}
+		}
+	}
+	if tagAdds != 1 {
+		t.Errorf("queued %+v, want exactly one tag_add write", writes)
+	}
+
+	tags, _ := db.TagsOf(document.ID)
+	if !slices.Contains(tags, "suspended") {
+		t.Errorf("the article was not tagged suspended locally, tags = %v", tags)
 	}
 }
 

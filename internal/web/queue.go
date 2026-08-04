@@ -2,7 +2,6 @@ package web
 
 import (
 	"net/http"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -11,13 +10,31 @@ import (
 	"github.com/Tevqoon/increader/internal/store"
 )
 
-// doneTagLabel marks, upstream at the provider, an article that was actually
-// worked through here — not merely archived. wallabag's own archive flag
-// covers both Done and Dismiss (see archiveUpstream), so on its own it
-// cannot tell "read to the end and annotated" from "abandoned unread"; this
-// tag is what lets that distinction survive outside increader too, in
-// wallabag's own tag list.
-const doneTagLabel = "done"
+// doneTagLabel, dismissedTagLabel and suspendedTagLabel mark, upstream at the
+// provider, which of increader's own terminal-ish states an article is in.
+// wallabag's own archive flag covers Done and Dismiss alike (see
+// archiveUpstream), so on its own it cannot tell "read to the end and
+// annotated" from "abandoned unread" from "parked for later, still unread
+// and unarchived"; these tags are what let that distinction survive outside
+// increader too, in wallabag's own tag list — the same reasoning doneTagLabel
+// started with, extended to the other two states a document can sit in
+// without being in circulation.
+const (
+	doneTagLabel      = "done"
+	dismissedTagLabel = "dismissed"
+	suspendedTagLabel = "suspended"
+)
+
+// stateTagLabels maps each state that gets a tag of its own onto that tag's
+// label. The three are mutually exclusive — a document is Done, Dismissed or
+// Suspended, never more than one at once — which is what lets setStateTags
+// use this table to attach the current state's tag and remove the other two
+// in a single pass.
+var stateTagLabels = map[ir.State]string{
+	ir.StateDone:      doneTagLabel,
+	ir.StateDismissed: dismissedTagLabel,
+	ir.StateSuspended: suspendedTagLabel,
+}
 
 // handleSyncNow runs a full sync immediately rather than waiting for the
 // scheduled interval, so a document just added at a provider shows up without
@@ -170,22 +187,18 @@ func (s *Server) applyGrade(element store.Element, grade ir.Grade) error {
 		}
 	}
 
-	// The tag tracks the state transition, not the grade in isolation: it
-	// goes on when a grade lands on Done (never Dismiss — that is abandoning
-	// it unread, not working through it) and comes back off if something
-	// already Done gets graded again into anything else, same as unsuspending
-	// takes it off. Rare in practice — grading happens once, from the queue,
-	// which excludes Done material — but the reader can still reach a Done
-	// article directly and grade it again, and the tag should not lie about
-	// that.
+	// The tags track the state transition, not the grade in isolation: one
+	// goes on when a grade lands the element on Done, Dismissed or Suspended,
+	// and comes back off if something already in one of those states gets
+	// graded again into anything else — same as unsuspending clears it.
+	// Skipped entirely unless the state is actually moving into or out of one
+	// of the three: grading is mostly Next and Sooner, the everyday case, and
+	// those should not pay for a tag lookup that can never change anything.
 	if element.IsRoot() {
-		switch {
-		case updated.State == ir.StateDone:
-			if err := s.setDoneTag(element.DocumentID, true); err != nil {
-				return err
-			}
-		case element.Schedule.State == ir.StateDone:
-			if err := s.setDoneTag(element.DocumentID, false); err != nil {
+		_, wasTagged := stateTagLabels[element.Schedule.State]
+		_, isTagged := stateTagLabels[updated.State]
+		if wasTagged || isTagged {
+			if err := s.setStateTags(element.DocumentID, updated.State); err != nil {
 				return err
 			}
 		}
@@ -280,14 +293,16 @@ func (s *Server) archiveUpstream(element store.Element, archived bool) error {
 	return nil
 }
 
-// setDoneTag adds or removes doneTagLabel on a document, both locally and
-// upstream — the write-back counterpart to the library's own "done" state.
+// setStateTags brings a document's upstream tags in line with the state it
+// just landed in: the tag for state, if it has one in stateTagLabels, is
+// attached, and the tags for the other two states in that table are removed.
+// The write-back counterpart to the library's Done/Dismissed/Suspended
+// states, generalising what used to be a Done-only tag — see doneTagLabel.
 //
-// Guarded the same way archiveUpstream guards the archive flag: skipped
-// when the tag already agrees with done, so grading an already-done article
-// Done again, or unsuspending something that was never graded Done in the
-// first place, queues nothing.
-func (s *Server) setDoneTag(documentID int64, done bool) error {
+// Guarded per tag the same way archiveUpstream guards the archive flag:
+// a tag already in the state it should be in is left alone, so re-grading an
+// already-Done article Done again, say, queues nothing.
+func (s *Server) setStateTags(documentID int64, state ir.State) error {
 	document, err := s.store.DocumentByID(documentID)
 	if err != nil {
 		return err
@@ -296,19 +311,26 @@ func (s *Server) setDoneTag(documentID int64, done bool) error {
 	if err != nil {
 		return err
 	}
-	if slices.Contains(labels, doneTagLabel) == done {
-		return nil
+	current := make(map[string]bool, len(labels))
+	for _, label := range labels {
+		current[label] = true
 	}
 
-	if done {
-		err = s.store.AttachTag(documentID, document.Source, document.ExternalID, doneTagLabel)
-	} else {
-		err = s.store.DetachTag(documentID, document.Source, document.ExternalID, doneTagLabel)
+	for candidate, tag := range stateTagLabels {
+		want := candidate == state
+		if current[tag] == want {
+			continue
+		}
+		if want {
+			err = s.store.AttachTag(documentID, document.Source, document.ExternalID, tag)
+		} else {
+			err = s.store.DetachTag(documentID, document.Source, document.ExternalID, tag)
+		}
+		if err != nil {
+			return err
+		}
+		s.publishSoon()
 	}
-	if err != nil {
-		return err
-	}
-	s.publishSoon()
 	return nil
 }
 
@@ -359,10 +381,9 @@ func (s *Server) applyUnsuspend(id int64) error {
 			return err
 		}
 		// Bringing something back into circulation should not leave a stale
-		// "done" tag behind — setDoneTag is a no-op unless it is actually
-		// there, which is only ever true for something graded Done before it
-		// was pulled back in.
-		if err := s.setDoneTag(element.DocumentID, false); err != nil {
+		// Done, Dismissed or Suspended tag behind — setStateTags is a no-op
+		// on whichever of the three was not actually there.
+		if err := s.setStateTags(element.DocumentID, ir.StateReading); err != nil {
 			return err
 		}
 	}
