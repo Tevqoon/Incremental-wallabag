@@ -95,6 +95,32 @@ func TestDashboardShowsStreakAfterGrading(t *testing.T) {
 	}
 }
 
+// TestDashboardShowsWeeklyArticlesAndWords exercises the write path for the
+// two new activity tiles: finishing an article and harvesting an extract
+// should both show up in "this week"'s article and word counts.
+func TestDashboardShowsWeeklyArticlesAndWords(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	post(t, server, "/elements/1/extract", url.Values{
+		"start_block": {"0"}, "start_offset": {"4"},
+		"end_block": {"0"}, "end_offset": {"15"}, "quote": {"quick brown"},
+	})
+	if response := post(t, server, "/elements/1/grade", url.Values{"grade": {"done"}}); response.Code != http.StatusSeeOther {
+		t.Fatalf("grade: status = %d, want 303", response.Code)
+	}
+
+	body := get(t, server, "/").Body.String()
+	if !strings.Contains(body, "articles this week") {
+		t.Errorf("dashboard is missing the articles-this-week tile:\n%s", body)
+	}
+	if !strings.Contains(body, "words extracted this week") {
+		t.Errorf("dashboard is missing the words-this-week tile:\n%s", body)
+	}
+	if !strings.Contains(body, `class="tile-value">2<`) {
+		t.Errorf("dashboard does not show 2 words extracted (\"quick brown\"):\n%s", body)
+	}
+}
+
 // TestDashboardNavLinksPresent guards the split between the dashboard (home)
 // and the queue (its own page now) — both must be reachable from the nav.
 func TestDashboardNavLinksPresent(t *testing.T) {

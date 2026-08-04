@@ -65,6 +65,23 @@ func TestCalendarDayShowsGradedActivity(t *testing.T) {
 	}
 }
 
+// TestCalendarDayShowsWordCount covers the day view's word/article summary,
+// added alongside the dashboard's own weekly word count.
+func TestCalendarDayShowsWordCount(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	post(t, server, "/elements/1/extract", url.Values{
+		"start_block": {"0"}, "start_offset": {"4"},
+		"end_block": {"0"}, "end_offset": {"15"}, "quote": {"quick brown"},
+	})
+
+	today := time.Now().Format("2006-01-02")
+	body := get(t, server, "/calendar/day/"+today).Body.String()
+	if !strings.Contains(body, "2 words extracted") {
+		t.Errorf("day view does not show the extract's word count:\n%s", body)
+	}
+}
+
 // TestCalendarDayEmptyState covers a day with nothing logged.
 func TestCalendarDayEmptyState(t *testing.T) {
 	server, _, _ := newTestServer(t, true)

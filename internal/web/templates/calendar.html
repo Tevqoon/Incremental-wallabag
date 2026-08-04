@@ -24,7 +24,7 @@
                 {{if .Total}}has-activity{{end}}
                 {{if .IsToday}}is-today{{end}}"
          href="/calendar/day/{{isoDate .Date}}"
-         title="{{.Reviews}} review{{if ne .Reviews 1}}s{{end}}, {{.Extracts}} extract{{if ne .Extracts 1}}s{{end}}">
+         title="{{.Reviews}} review{{if ne .Reviews 1}}s{{end}}, {{.Extracts}} extract{{if ne .Extracts 1}}s{{end}}, {{.Articles}} article{{if ne .Articles 1}}s{{end}}, {{.Words}} word{{if ne .Words 1}}s{{end}}">
         <span class="calendar-daynum">{{.Date.Day}}</span>
         {{if .Total}}<span class="calendar-count">{{.Total}}</span>{{end}}
       </a>

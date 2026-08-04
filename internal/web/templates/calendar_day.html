@@ -10,6 +10,13 @@
   </p>
 
   {{if .Entries}}
+    <p class="meta">
+      {{.Articles}} article{{if ne .Articles 1}}s{{end}} touched ·
+      {{.Words}} word{{if ne .Words 1}}s{{end}} extracted
+    </p>
+  {{end}}
+
+  {{if .Entries}}
     <ol class="items">
       {{range .Entries}}
         <li class="item {{if .IsRoot}}is-article{{else}}is-extract{{end}}">
@@ -25,6 +32,7 @@
               <span class="badge">{{.Grade}}</span>
             {{else}}
               <span class="badge">extract</span>
+              <span class="source">{{.Words}} word{{if ne .Words 1}}s{{end}}</span>
             {{end}}
             {{if .Chapter}}<span class="source">{{.Chapter}}</span>{{end}}
             {{if not .IsRoot}}<span class="source">from {{.DocumentTitle}}</span>{{end}}
