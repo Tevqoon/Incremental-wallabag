@@ -2158,6 +2158,116 @@ func TestExtractsPageOffersRescheduling(t *testing.T) {
 	}
 }
 
+// TestExtractsShowsBulkControls: the extracts page's selection bar and its
+// checkboxes should be reachable by browsing there, not just by a client
+// that already knows /extracts/bulk exists — same guard as
+// TestLibraryShowsBulkControls.
+func TestExtractsShowsBulkControls(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	post(t, server, "/elements/1/extract", url.Values{
+		"start_block": {"0"}, "start_offset": {"4"},
+		"end_block": {"0"}, "end_offset": {"15"}, "quote": {"quick brown"},
+	})
+
+	body := get(t, server, "/extracts").Body.String()
+	if !strings.Contains(body, `id="bulk-form"`) {
+		t.Error("the extracts page has no bulk-form")
+	}
+	if !strings.Contains(body, `name="ids" value="2" form="bulk-form"`) {
+		t.Error("the extract's row has no checkbox tied to the bulk form")
+	}
+	if !strings.Contains(body, `value="delete"`) {
+		t.Error("the bulk bar is missing the delete action")
+	}
+}
+
+// TestExtractsBulkDelete is the mass version of the per-row delete button:
+// several extracts checked at once, all removed in a single request,
+// including queuing the upstream removal for the one that came from wallabag.
+func TestExtractsBulkDelete(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	manualID, err := db.CreateExtract(store.NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "mine", ContentHTML: "<p>mine</p>",
+		Origin: store.OriginManual,
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+	importedID, err := db.CreateExtract(store.NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "theirs", ContentHTML: "<p>theirs</p>",
+		Origin: store.OriginImport, ExternalRef: "h1",
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+
+	response := post(t, server, "/extracts/bulk", url.Values{
+		"action": {"delete"},
+		"ids":    {itoa(manualID), itoa(importedID)},
+	})
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303: %s", response.Code, response.Body.String())
+	}
+	if got := response.Header().Get("Location"); got != "/extracts" {
+		t.Errorf("Location = %q, want /extracts (the default with no redirect field)", got)
+	}
+
+	if _, err := db.ElementByID(manualID); err == nil {
+		t.Error("the manual extract was not deleted")
+	}
+	if _, err := db.ElementByID(importedID); err == nil {
+		t.Error("the imported extract was not deleted")
+	}
+
+	writes, _ := db.PendingWrites("wallabag", 10)
+	var sawHighlightDelete bool
+	for _, write := range writes {
+		if write.Operation == store.OpHighlightDelete && write.ExternalID == "h1" {
+			sawHighlightDelete = true
+		}
+	}
+	if !sawHighlightDelete {
+		t.Errorf("queued writes = %+v, want a highlight_delete for the imported extract", writes)
+	}
+}
+
+// TestExtractsBulkIgnoresRootElements guards the same tampering case
+// handleDeleteExtract already rejects for a single id: the selection bar
+// only ever lists extracts, and a whole article slipped into "ids" — a
+// tampered request, since no checkbox on the page can produce one — must not
+// be treated as one.
+func TestExtractsBulkIgnoresRootElements(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	response := post(t, server, "/extracts/bulk", url.Values{
+		"action": {"delete"},
+		"ids":    {"1"},
+	})
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303: %s", response.Code, response.Body.String())
+	}
+
+	if _, err := db.ElementByID(1); err != nil {
+		t.Errorf("the root article element was deleted: %v", err)
+	}
+}
+
+// TestExtractsBulkRejectsUnknownAction mirrors
+// TestLibraryBulkRejectsUnknownAction for the extracts page's own bulk endpoint.
+func TestExtractsBulkRejectsUnknownAction(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	response := post(t, server, "/extracts/bulk", url.Values{
+		"action": {"launch-the-missiles"},
+		"ids":    {"1"},
+	})
+	if response.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", response.Code)
+	}
+}
+
 // TestDoneArchivesUpstream is what the reader asked for: finishing an article
 // here finishes it in wallabag, so the two views stop drifting. Done and
 // Dismiss both archive upstream, but each pushes its own tag too — "done" or

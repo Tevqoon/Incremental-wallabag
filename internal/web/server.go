@@ -139,6 +139,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /documents/{id}", s.handleDeleteDocument)
 	mux.HandleFunc("GET /documents/{id}/images/{imageID}", s.handleDocumentImage)
 	mux.HandleFunc("GET /extracts", s.handleExtracts)
+	mux.HandleFunc("POST /extracts/bulk", s.handleExtractsBulk)
 	mux.HandleFunc("GET /calendar", s.handleCalendar)
 	mux.HandleFunc("GET /calendar/day/{date}", s.handleCalendarDay)
 	mux.HandleFunc("GET /read/{id}", s.handleRead)

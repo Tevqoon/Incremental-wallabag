@@ -859,6 +859,44 @@ type extractsData struct {
 	Manual      int
 	Missing     int
 	CurrentURL  string
+	BulkActions []extractBulkAction
+}
+
+// extractBulkAction is the extracts page's counterpart to libraryBulkAction:
+// same shape, applied to a checked extract rather than a checked document,
+// reusing whatever single-extract function its own per-row control already
+// calls rather than a second implementation for the many-at-once case.
+type extractBulkAction struct {
+	Value   string
+	Label   string
+	Confirm string
+	Danger  bool
+	apply   func(*Server, store.Element) error
+}
+
+// extractBulkActions lists every bulk action the extracts page offers.
+// Deliberately just the one to start: delete is the gap a reader actually
+// hits browsing a large harvest (see deleteExtract), where rescheduling or
+// grading a handful at once is served well enough by the per-row controls
+// already there.
+var extractBulkActions = []extractBulkAction{
+	{
+		Value: "delete", Label: "Delete", Danger: true,
+		Confirm: "Delete the selected extracts? Imported ones are also removed from wallabag. This cannot be undone.",
+		apply: func(s *Server, element store.Element) error {
+			return s.deleteExtract(element)
+		},
+	},
+}
+
+// findExtractBulkAction looks up a bulk action by its form value.
+func findExtractBulkAction(value string) (extractBulkAction, bool) {
+	for _, action := range extractBulkActions {
+		if action.Value == value {
+			return action, true
+		}
+	}
+	return extractBulkAction{}, false
 }
 
 // handleExtracts lists everything harvested, independently of what is due.
@@ -922,5 +960,52 @@ func (s *Server) handleExtracts(w http.ResponseWriter, r *http.Request) {
 		Manual:      manual,
 		Missing:     missing,
 		CurrentURL:  r.URL.RequestURI(),
+		BulkActions: extractBulkActions,
 	})
+}
+
+// handleExtractsBulk applies one action to every extract checked in the
+// extracts page's selection bar — the same plain-form, no-JavaScript-required
+// pattern as handleLibraryBulk, and for the same reasons: see its own doc
+// comment for why a missing row is skipped rather than aborting the batch.
+func (s *Server) handleExtractsBulk(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+
+	action, ok := findExtractBulkAction(r.FormValue("action"))
+	if !ok {
+		http.Error(w, "unknown bulk action", http.StatusBadRequest)
+		return
+	}
+
+	for _, raw := range r.Form["ids"] {
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			continue
+		}
+
+		element, err := s.store.ElementByID(id)
+		if err != nil {
+			if isNotFound(err) {
+				continue
+			}
+			s.fail(w, err)
+			return
+		}
+		// The selection bar only ever lists extracts, never a whole article;
+		// guarded here too rather than trusted from the client, the same
+		// caution handleDeleteExtract applies to a single id.
+		if element.IsRoot() {
+			continue
+		}
+
+		if err := action.apply(s, element); err != nil {
+			s.fail(w, err)
+			return
+		}
+	}
+
+	s.redirect(w, r, redirectTarget(r, "/extracts"))
 }
