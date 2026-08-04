@@ -1,0 +1,34 @@
+{{define "content"}}
+<section class="queue">
+  <div class="queue-head">
+    <h1>Calendar</h1>
+  </div>
+
+  <p class="meta">
+    <a href="/calendar?month={{.PrevMonth}}">‹ {{.PrevMonth}}</a>
+    <strong>{{.MonthLabel}}</strong>
+    <a href="/calendar?month={{.NextMonth}}">{{.NextMonth}} ›</a>
+  </p>
+
+  <div class="calendar-grid">
+    <div class="calendar-weekday">Mon</div>
+    <div class="calendar-weekday">Tue</div>
+    <div class="calendar-weekday">Wed</div>
+    <div class="calendar-weekday">Thu</div>
+    <div class="calendar-weekday">Fri</div>
+    <div class="calendar-weekday">Sat</div>
+    <div class="calendar-weekday">Sun</div>
+    {{range .Days}}
+      <a class="calendar-day
+                {{if not .InMonth}}is-outside{{end}}
+                {{if .Total}}has-activity{{end}}
+                {{if .IsToday}}is-today{{end}}"
+         href="/calendar/day/{{isoDate .Date}}"
+         title="{{.Reviews}} review{{if ne .Reviews 1}}s{{end}}, {{.Extracts}} extract{{if ne .Extracts 1}}s{{end}}">
+        <span class="calendar-daynum">{{.Date.Day}}</span>
+        {{if .Total}}<span class="calendar-count">{{.Total}}</span>{{end}}
+      </a>
+    {{end}}
+  </div>
+</section>
+{{end}}

@@ -1,0 +1,41 @@
+{{define "content"}}
+<section class="queue">
+  <div class="queue-head">
+    <h1>{{date .Day}}</h1>
+  </div>
+  <p class="meta">
+    <a href="/calendar/day/{{.PrevDay}}">‹ prev day</a>
+    <a href="/calendar?month={{.Month}}">calendar</a>
+    <a href="/calendar/day/{{.NextDay}}">next day ›</a>
+  </p>
+
+  {{if .Entries}}
+    <ol class="items">
+      {{range .Entries}}
+        <li class="item {{if .IsRoot}}is-article{{else}}is-extract{{end}}">
+          <a class="item-title" href="/read/{{.ID}}">
+            {{if .IsRoot}}
+              {{.DocumentTitle}}
+            {{else}}
+              {{if .Title}}{{.Title}}{{else}}{{.Quote}}{{end}}
+            {{end}}
+          </a>
+          <div class="item-meta">
+            {{if eq .Kind "review"}}
+              <span class="badge">{{.Grade}}</span>
+            {{else}}
+              <span class="badge">extract</span>
+            {{end}}
+            {{if .Chapter}}<span class="source">{{.Chapter}}</span>{{end}}
+            {{if not .IsRoot}}<span class="source">from {{.DocumentTitle}}</span>{{end}}
+          </div>
+        </li>
+      {{end}}
+    </ol>
+  {{else}}
+    <div class="empty">
+      <p>Nothing logged this day.</p>
+    </div>
+  {{end}}
+</section>
+{{end}}

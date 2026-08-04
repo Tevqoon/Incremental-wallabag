@@ -128,11 +128,15 @@
   </section>
 
   <section class="dash-section">
-    <h2>Activity</h2>
-    <div class="heatmap" title="last 12 weeks">
+    <div class="dash-section-head">
+      <h2>Activity</h2>
+      <a href="/calendar">Full calendar →</a>
+    </div>
+    <div class="heatmap" title="last 12 weeks — click a day for what happened">
       {{range .Heatmap}}
-        <span class="heatmap-cell" style="--level: {{level .Reviews .Extracts}}"
-              title="{{date .Date}}: {{.Reviews}} reviews, {{.Extracts}} extracts"></span>
+        <a class="heatmap-cell" href="/calendar/day/{{isoDate .Date}}"
+           style="--level: {{level .Reviews .Extracts}}"
+           title="{{date .Date}}: {{.Reviews}} reviews, {{.Extracts}} extracts"></a>
       {{end}}
     </div>
     <div class="weekbars">

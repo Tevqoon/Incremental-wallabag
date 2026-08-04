@@ -197,3 +197,63 @@ func TestActivityHeatmapBucketsByDay(t *testing.T) {
 		t.Errorf("today = %+v, want 1 review and 1 extract", last)
 	}
 }
+
+// TestActivityOnListsTheDaysEvents covers the calendar's day view: both
+// kinds of event, joined with the document they belong to, in the order
+// they actually happened.
+func TestActivityOnListsTheDaysEvents(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "1", Title: "Article", UpdatedAt: now},
+	}, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	if err := db.SaveScheduleReviewed(1, ir.Schedule{State: ir.StateDone}, now); err != nil {
+		t.Fatalf("SaveScheduleReviewed: %v", err)
+	}
+	// A minute later, so ordering by created_at is unambiguous rather than
+	// relying on two equal timestamps happening to come back in insertion
+	// order.
+	extractedAt := now.Add(time.Minute)
+	if _, err := db.CreateExtract(NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "a passage worth keeping",
+		ContentHTML: "<p>a passage worth keeping</p>", Origin: OriginManual,
+	}, extractedAt); err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+
+	entries, err := db.ActivityOn(ir.Day(now))
+	if err != nil {
+		t.Fatalf("ActivityOn: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("got %d entries, want 2", len(entries))
+	}
+
+	review := entries[0]
+	if review.Kind != ActivityReview || review.Grade != string(ir.StateDone) {
+		t.Errorf("first entry = %+v, want the review graded done", review)
+	}
+	if !review.IsRoot() || review.DocumentTitle != "Article" {
+		t.Errorf("review entry does not carry its document: %+v", review)
+	}
+
+	extract := entries[1]
+	if extract.Kind != ActivityExtract || extract.Grade != "" {
+		t.Errorf("second entry = %+v, want the extract with no grade", extract)
+	}
+	if extract.Quote != "a passage worth keeping" || extract.DocumentTitle != "Article" {
+		t.Errorf("extract entry = %+v, want its own quote and the parent's title", extract)
+	}
+
+	empty, err := db.ActivityOn(ir.Day(now).AddDate(0, 0, -1))
+	if err != nil {
+		t.Fatalf("ActivityOn (empty day): %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("got %d entries for a day with nothing logged, want 0", len(empty))
+	}
+}

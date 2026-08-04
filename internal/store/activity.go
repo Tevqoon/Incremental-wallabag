@@ -131,3 +131,62 @@ func (s *Store) ActivityHeatmap(from, to time.Time) ([]DayCount, error) {
 type dbtx interface {
 	Exec(query string, args ...any) (sql.Result, error)
 }
+
+// ActivityEntry is one activity_log row together with the element and
+// document it happened on — what the calendar's day view shows.
+type ActivityEntry struct {
+	Element
+	DocumentTitle string
+	DocumentURL   string
+
+	// Kind and Grade are the activity_log row's own columns, not the
+	// element's current schedule: Grade is the state a review actually
+	// landed on at the time, which for an element read again since need not
+	// still match what the element's live schedule says now.
+	Kind  string
+	Grade string
+
+	// OccurredAt is when the activity happened, not when the element was
+	// created — activity_log's own timestamp, for ordering entries within
+	// the day chronologically.
+	OccurredAt time.Time
+}
+
+// ActivityOn lists everything that happened on one day — every review graded
+// and every extract manually harvested, oldest first — the calendar's day
+// view. An element hard-deleted since cannot appear: activity_log cascades
+// off elements(id), so its own row went with it.
+func (s *Store) ActivityOn(day time.Time) ([]ActivityEntry, error) {
+	rows, err := s.db.Query(`
+		SELECT `+elementColumns+`, COALESCE(NULLIF(d.display_title, ''), d.title), d.url,
+		       a.kind, COALESCE(a.grade, ''), a.created_at
+		FROM activity_log a
+		JOIN elements e ON e.id = a.element_id
+		JOIN documents d ON d.id = e.document_id
+		WHERE a.occurred_on = ?
+		ORDER BY a.created_at`,
+		day.Format(dateFormat),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: activity on %s: %w", day.Format(dateFormat), err)
+	}
+	defer rows.Close()
+
+	var entries []ActivityEntry
+	for rows.Next() {
+		var (
+			row        ActivityEntry
+			nullable   nullableElement
+			occurredAt sql.NullString
+		)
+		targets := append(scanTargets(&row.Element, &nullable),
+			&row.DocumentTitle, &row.DocumentURL, &row.Kind, &row.Grade, &occurredAt)
+		if err := rows.Scan(targets...); err != nil {
+			return nil, fmt.Errorf("store: scan activity row: %w", err)
+		}
+		nullable.apply(&row.Element)
+		row.OccurredAt = parseTime(occurredAt)
+		entries = append(entries, row)
+	}
+	return entries, rows.Err()
+}

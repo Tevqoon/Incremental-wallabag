@@ -35,7 +35,7 @@ var assets embed.FS
 // block and parsing them into one set would make those definitions collide.
 var pageNames = []string{
 	"dashboard.html", "queue.html", "reader.html", "library.html", "extracts.html",
-	"import.html", "document.html", "triage.html",
+	"import.html", "document.html", "triage.html", "calendar.html", "calendar_day.html",
 }
 
 // Server holds everything the handlers need. Dependencies arrive through this
@@ -138,6 +138,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /documents/{id}", s.handleDeleteDocument)
 	mux.HandleFunc("GET /documents/{id}/images/{imageID}", s.handleDocumentImage)
 	mux.HandleFunc("GET /extracts", s.handleExtracts)
+	mux.HandleFunc("GET /calendar", s.handleCalendar)
+	mux.HandleFunc("GET /calendar/day/{date}", s.handleCalendarDay)
 	mux.HandleFunc("GET /read/{id}", s.handleRead)
 
 	mux.HandleFunc("POST /elements/{id}/extract", s.handleExtract)
@@ -523,6 +525,12 @@ var templateFuncs = template.FuncMap{
 		}
 		return t.Format("2 Jan 2006")
 	},
+
+	// isoDate renders a date the way it appears in a calendar URL —
+	// /calendar/day/{date} and the heatmap's own links use it, so both stay
+	// consistent with the store's own YYYY-MM-DD convention without every
+	// caller having to spell out the layout string itself.
+	"isoDate": func(t time.Time) string { return t.Format("2006-01-02") },
 
 	"days": func(interval float64) string {
 		if interval < 1 {
