@@ -430,6 +430,15 @@ func (s *Store) CreateExtract(extract NewExtract, now time.Time) (int64, error) 
 				return err
 			}
 		}
+
+		// Only a passage the reader actively pulled out while reading counts
+		// as activity — a highlight arriving from a bulk sync (OriginImport)
+		// is not something that happened today, whatever day it lands on.
+		if extract.Origin == OriginManual {
+			if err := logActivity(tx, ActivityExtract, id, "", now); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -445,13 +454,33 @@ func (s *Store) CreateExtract(extract NewExtract, now time.Time) (int64, error) 
 // rank belongs to whatever is due when it gets there, not a leftover from
 // wherever it happened to sit before. assignQueueRanks fills it back in the
 // next time this element is actually due and read.
+//
+// This also runs Backlog's reschedule, which is deliberately not a grade —
+// see SaveScheduleReviewed for the write path that also logs activity.
 func (s *Store) SaveSchedule(id int64, schedule ir.Schedule, now time.Time) error {
+	return saveSchedule(s.db, id, schedule, now)
+}
+
+// SaveScheduleReviewed is SaveSchedule plus an activity_log row — the write
+// path for an actual grading decision, as opposed to a backlog reschedule.
+// Both happen in one transaction, so a review is never recorded without its
+// schedule change landing, or vice versa.
+func (s *Store) SaveScheduleReviewed(id int64, schedule ir.Schedule, now time.Time) error {
+	return s.inTransaction(func(tx *sql.Tx) error {
+		if err := saveSchedule(tx, id, schedule, now); err != nil {
+			return err
+		}
+		return logActivity(tx, ActivityReview, id, string(schedule.State), now)
+	})
+}
+
+func saveSchedule(db dbtx, id int64, schedule ir.Schedule, now time.Time) error {
 	var dueOn any
 	if !schedule.DueOn.IsZero() {
 		dueOn = schedule.DueOn.Format(dateFormat)
 	}
 
-	_, err := s.db.Exec(`
+	_, err := db.Exec(`
 		UPDATE elements SET
 		    state = ?, due_on = ?, interval_days = ?, afactor = ?, reps = ?,
 		    priority = ?, queue_rank = NULL, updated_at = ?

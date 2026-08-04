@@ -221,8 +221,8 @@ func (s *Store) FailWrite(id int64, cause error) error {
 func (s *Store) CountPendingWrites(sourceName string) (queued, abandoned int, err error) {
 	err = s.db.QueryRow(`
 		SELECT
-		    SUM(CASE WHEN attempts <  ? THEN 1 ELSE 0 END),
-		    SUM(CASE WHEN attempts >= ? THEN 1 ELSE 0 END)
+		    COALESCE(SUM(CASE WHEN attempts <  ? THEN 1 ELSE 0 END), 0),
+		    COALESCE(SUM(CASE WHEN attempts >= ? THEN 1 ELSE 0 END), 0)
 		FROM pending_writes WHERE source = ?`,
 		maxWriteAttempts, maxWriteAttempts, sourceName,
 	).Scan(&queued, &abandoned)

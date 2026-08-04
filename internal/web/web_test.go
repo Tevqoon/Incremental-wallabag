@@ -140,7 +140,7 @@ func del(t *testing.T, server *Server, path string) *httptest.ResponseRecorder {
 func TestQueueListsTheArticle(t *testing.T) {
 	server, _, _ := newTestServer(t, true)
 
-	response := get(t, server, "/")
+	response := get(t, server, "/queue")
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", response.Code)
 	}
@@ -151,6 +151,26 @@ func TestQueueListsTheArticle(t *testing.T) {
 	}
 	if !strings.Contains(body, "1 due today") {
 		t.Errorf("queue does not report the article as due:\n%s", body)
+	}
+}
+
+// TestDashboardListsThePreview covers the home page's queue preview — the
+// same due material the full queue page shows, just capped to a handful of
+// items rather than everything due.
+func TestDashboardListsThePreview(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	response := get(t, server, "/")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.Code)
+	}
+
+	body := response.Body.String()
+	if !strings.Contains(body, "A test article") {
+		t.Error("dashboard does not preview the article")
+	}
+	if !strings.Contains(body, `class="tile-value">1<`) {
+		t.Errorf("dashboard does not show the due-today tile:\n%s", body)
 	}
 }
 
@@ -949,8 +969,8 @@ func TestNextFallsBackToQueueWhenEmpty(t *testing.T) {
 	post(t, server, "/elements/1/grade", url.Values{"grade": {"done"}})
 
 	response := get(t, server, "/next")
-	if got := response.Header().Get("Location"); got != "/" {
-		t.Errorf("Location = %q, want / when nothing is due", got)
+	if got := response.Header().Get("Location"); got != "/queue" {
+		t.Errorf("Location = %q, want /queue when nothing is due", got)
 	}
 }
 
