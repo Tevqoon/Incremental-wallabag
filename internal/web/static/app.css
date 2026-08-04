@@ -366,9 +366,17 @@ button:hover, .button:hover { border-color: var(--accent); color: var(--accent);
    already moves along, not a separate decision. Ten buttons is a lot for
    one row, so the presets are deliberately tighter than Sooner/Next — no
    flex-column, no reserved space for a second line, smaller type, since a
-   preset button is just its label — to give the whole footer the best
-   chance of fitting on one line before it has to wrap. */
-.schedule-buttons { flex-wrap: wrap; gap: 0.2rem; }
+   preset button is just its label.
+
+   Scrolling rather than wrapping, deliberately: this footer is sticky at
+   the bottom of the viewport, and desktop trackpad pinch-zoom (unlike
+   iOS's, which only magnifies what is already rendered) shrinks the
+   effective CSS viewport width, which used to make a flex-wrap row grow
+   new lines and the whole sticky footer balloon in height right as the
+   window is doing the opposite of getting bigger. A row that can only
+   scroll horizontally has a fixed height no matter how narrow that
+   effective width gets. */
+.schedule-buttons { flex-wrap: nowrap; overflow-x: auto; gap: 0.2rem; }
 .schedule-buttons .preset {
   display: inline-block;
   min-width: 2.1rem;
