@@ -2514,6 +2514,35 @@ func TestLibraryFilterTabs(t *testing.T) {
 	}
 }
 
+// TestLibraryNavPreservesOtherParams covers setParams: switching the state
+// filter must not drop a search or a tag already active, and vice versa —
+// each nav link changes exactly one dimension of the view rather than
+// resetting the others, which is what makes the presets composable with an
+// arbitrary search instead of each being its own dead end.
+func TestLibraryNavPreservesOtherParams(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	body := get(t, server, "/library?q=test&tag=philosophy").Body.String()
+	if !strings.Contains(body, `href="/library?q=test&amp;state=unread&amp;tag=philosophy"`) {
+		t.Errorf("the Unread tab does not preserve the active search and tag:\n%s", body)
+	}
+	if !strings.Contains(body, `href="/library?q=test&amp;tag=philosophy"`) {
+		t.Errorf("the All tab does not preserve the active search and tag:\n%s", body)
+	}
+}
+
+// TestExtractsNavPreservesOtherParams is TestLibraryNavPreservesOtherParams'
+// counterpart for the extracts page: origin, clozes and missing are mutually
+// exclusive, but none of them should touch an active search or sort.
+func TestExtractsNavPreservesOtherParams(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	body := get(t, server, "/extracts?q=test&sort=due").Body.String()
+	if !strings.Contains(body, `href="/extracts?origin=manual&amp;q=test&amp;sort=due"`) {
+		t.Errorf("the Mine tab does not preserve the active search and sort:\n%s", body)
+	}
+}
+
 // TestLibraryScheduledFilterFindsGradedArticles: "scheduled" is for finding
 // something pushed out further than intended — distinct from a still-fresh
 // import (never touched) and from archived (wallabag's own "already read").

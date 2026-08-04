@@ -849,6 +849,7 @@ type extractsData struct {
 	Imported    int
 	Manual      int
 	Missing     int
+	CurrentURL  string
 }
 
 // handleExtracts lists everything harvested, independently of what is due.
@@ -911,5 +912,6 @@ func (s *Server) handleExtracts(w http.ResponseWriter, r *http.Request) {
 		Imported:    imported,
 		Manual:      manual,
 		Missing:     missing,
+		CurrentURL:  r.URL.RequestURI(),
 	})
 }

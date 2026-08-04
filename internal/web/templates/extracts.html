@@ -19,17 +19,21 @@
     <button type="submit">Search</button>
   </form>
 
+  <!-- Origin, clozes and missing are mutually exclusive tabs — each preset
+       clears the other two as well as setting its own, the same "change one
+       dimension, keep the rest" rule library.html's nav follows, via the
+       same setParams helper. -->
   <nav class="filters">
-    <a href="/extracts?q={{.Query}}&sort={{.Sort}}"
+    <a href="{{setParams .CurrentURL "origin" "" "clozes" "" "missing" ""}}"
        class="{{if and (not .Origin) (not .WithClozes) (not .MissingOnly)}}on{{end}}">All</a>
-    <a href="/extracts?origin=manual&q={{.Query}}&sort={{.Sort}}"
+    <a href="{{setParams .CurrentURL "origin" "manual" "clozes" "" "missing" ""}}"
        class="{{if eq .Origin "manual"}}on{{end}}">Mine</a>
-    <a href="/extracts?origin=import&q={{.Query}}&sort={{.Sort}}"
+    <a href="{{setParams .CurrentURL "origin" "import" "clozes" "" "missing" ""}}"
        class="{{if eq .Origin "import"}}on{{end}}">Imported</a>
-    <a href="/extracts?clozes=1&q={{.Query}}&sort={{.Sort}}"
+    <a href="{{setParams .CurrentURL "clozes" "1" "origin" "" "missing" ""}}"
        class="{{if .WithClozes}}on{{end}}">With clozes</a>
     {{if .Missing}}
-      <a href="/extracts?missing=1&q={{.Query}}&sort={{.Sort}}"
+      <a href="{{setParams .CurrentURL "missing" "1" "origin" "" "clozes" ""}}"
          class="{{if .MissingOnly}}on{{end}}">Missing {{.Missing}}</a>
     {{end}}
   </nav>
