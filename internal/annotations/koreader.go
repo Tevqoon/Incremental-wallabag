@@ -18,9 +18,13 @@ import (
 // as though it were the other imports every comment as a passage and throws
 // away every passage, and does so silently.
 type koreaderExport struct {
-	Title     string `json:"title"`
-	Author    string `json:"author"`
-	CreatedOn string `json:"created_on"`
+	Title  string `json:"title"`
+	Author string `json:"author"`
+
+	// CreatedOn is a formatted string from KOReader's "Export highlights"
+	// plugin, but a bare Unix timestamp from its built-in highlight exporter
+	// — decoded loosely, like Page below, and resolved by parseTimestamp.
+	CreatedOn json.RawMessage `json:"created_on"`
 
 	Entries []koreaderEntry `json:"entries"`
 }
@@ -28,12 +32,20 @@ type koreaderExport struct {
 type koreaderEntry struct {
 	// Page is a number for a PDF and an xpointer string for an epub, so it
 	// is decoded loosely rather than as an int.
-	Page     json.RawMessage `json:"page"`
-	Chapter  string          `json:"chapter"`
-	Text     string          `json:"text"`
-	Note     string          `json:"note"`
-	Datetime string          `json:"datetime"`
-	Drawer   string          `json:"drawer"`
+	Page    json.RawMessage `json:"page"`
+	Chapter string          `json:"chapter"`
+	Text    string          `json:"text"`
+	Note    string          `json:"note"`
+
+	// Datetime and Time are the same field under two names, for the same
+	// reason CreatedOn above needs loose decoding: the "Export highlights"
+	// plugin writes a formatted Datetime, the built-in exporter writes a
+	// numeric Time instead. A single export only ever carries one of the
+	// two; parseKOReader falls back to Time when Datetime is absent.
+	Datetime json.RawMessage `json:"datetime"`
+	Time     json.RawMessage `json:"time"`
+
+	Drawer string `json:"drawer"`
 }
 
 func parseKOReader(data []byte, now time.Time) (Parsed, error) {
@@ -48,7 +60,7 @@ func parseKOReader(data []byte, now time.Time) (Parsed, error) {
 		return Parsed{}, fmt.Errorf("annotations: KOReader export has no title")
 	}
 
-	updatedAt := parseTimestamp(export.CreatedOn)
+	updatedAt := parseTimestamp(scalarString(export.CreatedOn))
 	if updatedAt.IsZero() {
 		updatedAt = now
 	}
@@ -72,15 +84,20 @@ func parseKOReader(data []byte, now time.Time) (Parsed, error) {
 		}
 
 		page := scalarString(entry.Page)
-		created := parseTimestamp(entry.Datetime)
+		timestamp := entry.Datetime
+		if len(strings.TrimSpace(string(timestamp))) == 0 {
+			timestamp = entry.Time
+		}
+		timestampText := scalarString(timestamp)
+		created := parseTimestamp(timestampText)
 
 		document.Highlights = append(document.Highlights, source.Highlight{
 			// Two things about this ref.
 			//
-			// The note is part of it because KOReader leaves datetime alone
-			// when a note is edited. Without it, editing a note in KOReader
-			// and re-exporting produces a file the import cannot tell from
-			// the one before it, and the edit never lands.
+			// The note is part of it because KOReader leaves the timestamp
+			// alone when a note is edited. Without it, editing a note in
+			// KOReader and re-exporting produces a file the import cannot
+			// tell from the one before it, and the edit never lands.
 			//
 			// It is scoped by the document's own derived identity rather
 			// than by the title as spelled in this file. The two are the
@@ -88,7 +105,7 @@ func parseKOReader(data []byte, now time.Time) (Parsed, error) {
 			// re-exporting a book whose metadata now capitalises its title
 			// differently updates the annotations already stored instead of
 			// importing every one of them again.
-			ExternalID: annotationID("koreader", identity, page, entry.Datetime, entry.Text, entry.Note),
+			ExternalID: annotationID("koreader", identity, page, timestampText, entry.Text, entry.Note),
 			Quote:      quote,
 			Note:       note,
 			Chapter:    collapseSpace(entry.Chapter),

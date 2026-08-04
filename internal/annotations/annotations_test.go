@@ -73,6 +73,53 @@ func TestParseKOReader(t *testing.T) {
 	}
 }
 
+// koreaderBuiltinJSON is the shape KOReader's built-in highlight exporter
+// writes, as opposed to koreaderJSON above (the "Export highlights" plugin):
+// created_on and each entry's timestamp arrive as bare Unix seconds under
+// the key `time`, not a formatted string under `datetime`, and there is no
+// per-entry `note` key at all rather than an empty one.
+const koreaderBuiltinJSON = `{
+  "title": "Zero to One",
+  "author": "Thiel Peter",
+  "created_on": 1784735097,
+  "entries": [
+    {"page": 10, "time": 1782765390, "text": "a passage worth keeping",
+     "chapter": "1. The Challenge of the Future", "color": "gray"}
+  ]
+}`
+
+// TestParseKOReaderBuiltinExport covers the numeric-timestamp shape a real
+// KOReader install produced (github.com/Tevqoon/increader issue: "cannot
+// unmarshal number into Go struct field koreaderExport.created_on of type
+// string") — the same top-level field and the same per-entry timestamp, both
+// spelled as a number under a different key instead of a formatted string.
+func TestParseKOReaderBuiltinExport(t *testing.T) {
+	parsed, err := Parse("Zero to One.json", []byte(koreaderBuiltinJSON), now)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := len(parsed.Document.Highlights); got != 1 {
+		t.Fatalf("imported %d highlights, want 1", got)
+	}
+
+	// created_on: 1784735097 is 2026-07-22T15:44:57Z.
+	wantUpdated := time.Unix(1784735097, 0)
+	if !parsed.Document.UpdatedAt.Equal(wantUpdated) {
+		t.Errorf("document UpdatedAt = %v, want %v (the numeric created_on decoded as Unix seconds)",
+			parsed.Document.UpdatedAt, wantUpdated)
+	}
+
+	first := parsed.Document.Highlights[0]
+	wantCreated := time.Unix(1782765390, 0)
+	if !first.CreatedAt.Equal(wantCreated) {
+		t.Errorf("highlight CreatedAt = %v, want %v (the numeric `time` field, not the zero value a missing `datetime` would give)",
+			first.CreatedAt, wantCreated)
+	}
+	if first.Page != "10" {
+		t.Errorf("page = %q, want %q", first.Page, "10")
+	}
+}
+
 const envelopeJSON = `{
   "title": "Discipline and Punish",
   "author": "Michel Foucault",

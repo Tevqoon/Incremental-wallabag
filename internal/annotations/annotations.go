@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -193,10 +194,12 @@ func cleanPassage(text string) string {
 
 // parseTimestamp reads the several spellings these files use for a time.
 //
-// KOReader writes "2024-03-01 09:12:41", the extractor writes RFC3339, and a
-// PDF writes "D:20240301091241+01'00'". None of them is worth failing an
-// import over, so an unparseable value yields the zero time and the caller
-// falls back to the upload's own clock.
+// KOReader's own "Export highlights" plugin writes "2024-03-01 09:12:41",
+// but KOReader's built-in highlight exporter writes a bare Unix timestamp
+// instead — the same field, two installations, two shapes. The extractor
+// writes RFC3339, and a PDF writes "D:20240301091241+01'00'". None of them is
+// worth failing an import over, so an unparseable value yields the zero time
+// and the caller falls back to the upload's own clock.
 func parseTimestamp(value string) time.Time {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -205,6 +208,13 @@ func parseTimestamp(value string) time.Time {
 
 	if strings.HasPrefix(value, "D:") {
 		return parsePDFDate(value)
+	}
+
+	// A bare run of digits is never a valid match for any layout below, so
+	// trying it first cannot shadow a real date — it can only catch what
+	// would otherwise fall through to the zero-time case anyway.
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
+		return time.Unix(seconds, 0)
 	}
 
 	for _, layout := range []string{
