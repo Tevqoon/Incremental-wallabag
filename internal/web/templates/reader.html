@@ -16,6 +16,8 @@
           delete
         </button>
       {{end}}
+      {{if .Element.Chapter}}<span class="source">{{.Element.Chapter}}</span>{{end}}
+      {{if .Element.Page}}<span class="badge" title="page">p. {{.Element.Page}}</span>{{end}}
       {{if .Document.URL}}
         <a href="{{.Document.URL}}" rel="noopener noreferrer" target="_blank">source ↗</a>
       {{end}}

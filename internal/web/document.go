@@ -124,11 +124,16 @@ func groupByChapter(annotations []store.ExtractRow) []chapterGroup {
 	return groups
 }
 
-// handleDocumentTitles saves the reader's own name for a work.
+// handleDocumentTitles saves the reader's own name for a work, and — for an
+// uploaded one — its author.
 func (s *Server) handleDocumentTitles(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		http.Error(w, "bad document id", http.StatusBadRequest)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
 		return
 	}
 
@@ -138,6 +143,16 @@ func (s *Server) handleDocumentTitles(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.notFoundOrFail(w, err)
 		return
+	}
+
+	// author is only ever posted by the rename form for an uploaded work
+	// (see document.html) — absent for anything else, so a document whose
+	// author a regular sync still owns is never touched here.
+	if _, present := r.PostForm["author"]; present {
+		if err := s.store.UpdateDocumentAuthor(id, strings.TrimSpace(r.FormValue("author"))); err != nil {
+			s.notFoundOrFail(w, err)
+			return
+		}
 	}
 
 	s.redirect(w, r, "/documents/"+strconv.FormatInt(id, 10))

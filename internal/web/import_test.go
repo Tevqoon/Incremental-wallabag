@@ -296,6 +296,27 @@ func TestTriagePageOffersTheScheduleRow(t *testing.T) {
 	}
 }
 
+// TestReaderShowsChapterAndPage covers the gap where a book-imported
+// extract's chapter and page — already shown on the contents and triage
+// pages — never made it onto the reader page itself.
+func TestReaderShowsChapterAndPage(t *testing.T) {
+	server, db, _ := newTestServer(t, false)
+	id := importedDocumentID(t, server, "triage")
+
+	element, err := db.NextUntriaged(id)
+	if err != nil {
+		t.Fatalf("NextUntriaged: %v", err)
+	}
+
+	body := get(t, server, "/read/"+strconv.FormatInt(element.ID, 10)).Body.String()
+	if !strings.Contains(body, "Las Meninas") {
+		t.Errorf("reader page does not show the chapter:\n%s", body)
+	}
+	if !strings.Contains(body, "p. 42") {
+		t.Errorf("reader page does not show the page:\n%s", body)
+	}
+}
+
 func TestTriageResetOffersThePassAgain(t *testing.T) {
 	server, db, _ := newTestServer(t, false)
 	id := importedDocumentID(t, server, "queue")
@@ -354,6 +375,67 @@ func TestDocumentTitlesAreEditable(t *testing.T) {
 	}
 	if body := get(t, server, "/library").Body.String(); !strings.Contains(body, "Les mots et les choses") {
 		t.Error("the library does not show the override")
+	}
+}
+
+// TestDocumentAuthorIsEditableForUploads covers the field the rename form
+// only offers for a source-upload document — see document.html and
+// Store.UpdateDocumentAuthor.
+func TestDocumentAuthorIsEditableForUploads(t *testing.T) {
+	server, db, _ := newTestServer(t, false)
+	id := importedDocumentID(t, server, "triage")
+	path := "/documents/" + strconv.FormatInt(id, 10)
+
+	if body := get(t, server, path).Body.String(); !strings.Contains(body, `name="author"`) {
+		t.Error("the rename form does not offer an author field for an uploaded work")
+	}
+
+	response := post(t, server, path+"/titles", url.Values{
+		"display_title": {""},
+		"subtitle":      {""},
+		"author":        {"Corrected Name"},
+	})
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status %d", response.Code)
+	}
+
+	document, err := db.DocumentByID(id)
+	if err != nil {
+		t.Fatalf("DocumentByID: %v", err)
+	}
+	if document.Author != "Corrected Name" {
+		t.Errorf("author = %q, want the edit to have taken", document.Author)
+	}
+}
+
+// TestDocumentAuthorFieldHiddenForWallabag guards the reason the field is
+// conditional in the first place: a wallabag document's author is
+// overwritten by the next sync, with no override column protecting an edit
+// to it the way display_title protects a title edit, so offering it here
+// would be a trap.
+func TestDocumentAuthorFieldHiddenForWallabag(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	body := get(t, server, "/documents/1").Body.String()
+	if strings.Contains(body, `name="author"`) {
+		t.Error("the rename form offers an author field for a wallabag document, which the next sync would silently discard")
+	}
+
+	// Posting the rename form without an author key — exactly what the
+	// template above sends for a wallabag document — must not touch it.
+	response := post(t, server, "/documents/1/titles", url.Values{
+		"display_title": {"A renamed article"},
+		"subtitle":      {""},
+	})
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status %d", response.Code)
+	}
+	document, err := db.DocumentByID(1)
+	if err != nil {
+		t.Fatalf("DocumentByID: %v", err)
+	}
+	if document.Author != "Someone" {
+		t.Errorf("author = %q, want it left exactly as synced", document.Author)
 	}
 }
 

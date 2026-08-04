@@ -211,6 +211,27 @@ func (s *Store) UpdateDocumentTitles(id int64, displayTitle, subtitle string) er
 	return nil
 }
 
+// UpdateDocumentAuthor sets a document's author directly, overwriting
+// whatever the import parsed.
+//
+// Safe only for an uploaded work, and document.html only offers this field
+// for one: a wallabag document's author is overwritten wholesale by the next
+// sync, the same as its title, and unlike title there is no display_author
+// override column protecting an edit from that. An upload has no such sync
+// to lose an edit to — the only thing that could overwrite it again is the
+// reader re-uploading the same file, a deliberate act rather than a
+// background one.
+func (s *Store) UpdateDocumentAuthor(id int64, author string) error {
+	result, err := s.db.Exec(`UPDATE documents SET author = ? WHERE id = ?`, author, id)
+	if err != nil {
+		return fmt.Errorf("store: update author of document %d: %w", id, err)
+	}
+	if n, _ := result.RowsAffected(); n == 0 {
+		return fmt.Errorf("store: document %d: %w", id, ErrNotFound)
+	}
+	return nil
+}
+
 // DocumentAnnotations lists everything harvested from one document, in the
 // order it appears in the original.
 //

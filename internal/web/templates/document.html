@@ -44,6 +44,16 @@
         <span>Subtitle</span>
         <input type="text" name="subtitle" value="{{.Document.Subtitle}}">
       </label>
+      {{if eq .Document.Source "upload"}}
+        <!-- Only offered here: a wallabag document's author is overwritten
+             by the next sync, same as its title, and there is no
+             display_author column protecting an edit the way display_title
+             protects one — see Store.UpdateDocumentAuthor. -->
+        <label class="field">
+          <span>Author</span>
+          <input type="text" name="author" value="{{.Document.Author}}">
+        </label>
+      {{end}}
       <button type="submit" class="tiny">Save</button>
     </form>
   </details>

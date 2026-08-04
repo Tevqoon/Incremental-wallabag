@@ -468,6 +468,35 @@ func TestDisplayTitleOverridesWithoutTouchingTheSyncedTitle(t *testing.T) {
 	}
 }
 
+// TestUpdateDocumentAuthor covers the direct-overwrite path that backs the
+// rename form's Author field, offered only for an uploaded work — see
+// document.html and Store.UpdateDocumentAuthor's own doc comment for why a
+// wallabag document does not get the same field.
+func TestUpdateDocumentAuthor(t *testing.T) {
+	db := testStore(t)
+
+	result, err := db.ImportAnnotations(book(), ImportOptions{Triage: true}, time.Now())
+	if err != nil {
+		t.Fatalf("ImportAnnotations: %v", err)
+	}
+
+	if err := db.UpdateDocumentAuthor(result.DocumentID, "Corrected Name"); err != nil {
+		t.Fatalf("UpdateDocumentAuthor: %v", err)
+	}
+
+	document, err := db.DocumentByID(result.DocumentID)
+	if err != nil {
+		t.Fatalf("DocumentByID: %v", err)
+	}
+	if document.Author != "Corrected Name" {
+		t.Errorf("author = %q, want the edit to have taken", document.Author)
+	}
+
+	if err := db.UpdateDocumentAuthor(9999, "nobody"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("error = %v, want ErrNotFound for a missing document", err)
+	}
+}
+
 // TestWallabagHighlightsAreUnaffected pins the sync path's behaviour, since
 // insertHighlights now serves two callers with different needs.
 func TestWallabagHighlightsAreUnaffected(t *testing.T) {
