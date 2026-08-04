@@ -2514,6 +2514,37 @@ func TestLibraryFilterTabs(t *testing.T) {
 	}
 }
 
+// TestLibrarySorts is TestExtractsPageSorts' counterpart for the library:
+// the same due/priority/oldest choices, now available for documents too
+// instead of just extracts, so the two pages' sort controls actually match.
+func TestLibrarySorts(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "2", Title: "Second article", UpdatedAt: time.Now()},
+	}, 0, time.Now()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Push the second document's root element (id 2) out well past the
+	// first's, so a due-date sort can tell them apart.
+	if response := post(t, server, "/elements/2/backlog", url.Values{"days": {"30"}}); response.Code != http.StatusSeeOther && response.Code != http.StatusOK {
+		t.Fatalf("backlog: status = %d: %s", response.Code, response.Body.String())
+	}
+
+	body := get(t, server, "/library?sort=due").Body.String()
+	if strings.Index(body, "A test article") > strings.Index(body, "Second article") || !strings.Contains(body, "A test article") {
+		t.Errorf("sort=due did not put the soonest-due document first:\n%s", body)
+	}
+	if !strings.Contains(body, `value="due" selected`) {
+		t.Errorf("sort select did not remember sort=due:\n%s", body)
+	}
+
+	if response := get(t, server, "/library?sort=bogus"); response.Code != http.StatusBadRequest {
+		t.Errorf("unknown sort: status = %d, want 400", response.Code)
+	}
+}
+
 // TestLibraryNavPreservesOtherParams covers setParams: switching the state
 // filter must not drop a search or a tag already active, and vice versa —
 // each nav link changes exactly one dimension of the view rather than

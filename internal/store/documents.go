@@ -433,12 +433,18 @@ type LibraryFilter struct {
 	// Tag restricts to documents carrying this label.
 	Tag string
 
+	// Sort is "" (most recently updated first — or, when State is
+	// "scheduled", furthest due date first instead, unchanged from before
+	// Sort existed), "due" (soonest due first, NULLs last — done, dismissed
+	// and suspended articles have no due date), "priority" (most important
+	// first) or "oldest" (least recently updated first).
+	Sort string
+
 	Limit int
 }
 
-// SearchDocuments lists documents matching a filter, most recently updated
-// first — except filter.State "scheduled", which sorts furthest due date
-// first instead; see LibraryFilter.State. An empty filter lists everything.
+// SearchDocuments lists documents matching a filter; see LibraryFilter.Sort
+// for the ordering options. An empty filter lists everything.
 //
 // today decides what "scheduled" means: due later than today, which is
 // exactly the articles worth checking whether they drifted out further than
@@ -454,6 +460,24 @@ func (s *Store) SearchDocuments(filter LibraryFilter, today time.Time) ([]Librar
 	// personal-library scale and avoids carrying an FTS5 table that would have
 	// to be kept in step with every write.
 	pattern := "%" + filter.Query + "%"
+
+	// filter.Sort and filter.State each select one of a fixed set of Go
+	// string literals, so splicing the result directly into the query is
+	// safe — neither ever carries user input as SQL text, only through the
+	// ordinary bound ? parameters elsewhere in the query. Mirrors how
+	// Extracts builds its own orderBy.
+	orderBy := "d.source_updated_at DESC"
+	if filter.State == "scheduled" {
+		orderBy = "root.due_on DESC, d.source_updated_at DESC"
+	}
+	switch filter.Sort {
+	case "due":
+		orderBy = "(root.due_on IS NULL) ASC, root.due_on ASC, d.id DESC"
+	case "priority":
+		orderBy = "root.priority ASC, d.id DESC"
+	case "oldest":
+		orderBy = "d.source_updated_at ASC"
+	}
 
 	rows, err := s.db.Query(`
 		SELECT d.id, d.source, d.external_id, d.url, d.title, d.author,
@@ -484,8 +508,7 @@ func (s *Store) SearchDocuments(filter LibraryFilter, today time.Time) ([]Librar
 		          SELECT 1 FROM document_tags dt
 		          JOIN tags t ON t.id = dt.tag_id
 		          WHERE dt.document_id = d.id AND t.label = ?))
-		ORDER BY CASE WHEN ? = 'scheduled' THEN root.due_on END DESC,
-		         d.source_updated_at DESC
+		ORDER BY `+orderBy+`
 		LIMIT ?`,
 		filter.Query, pattern, pattern, pattern, pattern, pattern,
 		filter.State, filter.State, filter.State, filter.State, filter.State,
@@ -494,7 +517,6 @@ func (s *Store) SearchDocuments(filter LibraryFilter, today time.Time) ([]Librar
 		filter.State,
 		filter.State,
 		filter.Tag, filter.Tag,
-		filter.State,
 		filter.Limit,
 	)
 	if err != nil {

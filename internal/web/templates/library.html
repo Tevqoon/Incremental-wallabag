@@ -7,6 +7,12 @@
            placeholder="Search title, subtitle, author or URL" autofocus>
     {{if .State}}<input type="hidden" name="state" value="{{.State}}">{{end}}
     {{if .Tag}}<input type="hidden" name="tag" value="{{.Tag}}">{{end}}
+    <select name="sort" onchange="this.form.submit()" title="Sort">
+      <option value="" {{if not .Sort}}selected{{end}}>Recently updated</option>
+      <option value="due" {{if eq .Sort "due"}}selected{{end}}>Due soonest</option>
+      <option value="priority" {{if eq .Sort "priority"}}selected{{end}}>Priority</option>
+      <option value="oldest" {{if eq .Sort "oldest"}}selected{{end}}>Least recently updated</option>
+    </select>
     <button type="submit">Search</button>
   </form>
 

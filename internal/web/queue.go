@@ -629,6 +629,7 @@ type libraryData struct {
 	Query       string
 	State       string
 	Tag         string
+	Sort        string
 	Entries     []store.LibraryEntry
 	Counts      map[string]int
 	Tags        []store.Tag
@@ -706,11 +707,18 @@ func (s *Server) handleLibrary(w http.ResponseWriter, r *http.Request) {
 		Query: strings.TrimSpace(query.Get("q")),
 		State: query.Get("state"),
 		Tag:   query.Get("tag"),
+		Sort:  query.Get("sort"),
 	}
 	switch filter.State {
 	case "", "books", "unread", "starred", "archived", "annotated", "missing", "scheduled", "suspended", "done":
 	default:
 		http.Error(w, "unknown state filter", http.StatusBadRequest)
+		return
+	}
+	switch filter.Sort {
+	case "", "due", "priority", "oldest":
+	default:
+		http.Error(w, "unknown sort", http.StatusBadRequest)
 		return
 	}
 
@@ -738,6 +746,7 @@ func (s *Server) handleLibrary(w http.ResponseWriter, r *http.Request) {
 		Query:       filter.Query,
 		State:       filter.State,
 		Tag:         filter.Tag,
+		Sort:        filter.Sort,
 		Entries:     entries,
 		Counts:      counts,
 		Tags:        tags,
