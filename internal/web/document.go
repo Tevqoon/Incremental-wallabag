@@ -2,12 +2,15 @@ package web
 
 import (
 	"errors"
+	"fmt"
 	"html/template"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/Tevqoon/increader/internal/ir"
 	"github.com/Tevqoon/increader/internal/store"
 )
 
@@ -153,6 +156,13 @@ type triageData struct {
 	// sanitiser anyway, because "we wrote it" is a property of today's code
 	// and the render path must not depend on it.
 	Body template.HTML
+
+	// Intervals and Backlog are the same schedule-panel data the reader page
+	// computes for its own grade buttons (see readerData) — triage's "keep"
+	// offers exactly the same choices grading does, so it needs exactly the
+	// same previews, not a second calculation that could drift from them.
+	Intervals map[string]string
+	Backlog   []ir.BacklogOption
 }
 
 // handleTriage offers the next annotation awaiting a decision.
@@ -194,30 +204,79 @@ func (s *Server) handleTriage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	previews := ir.Previews(element.Schedule, s.today())
+	intervals := map[string]string{
+		"next":   previews[ir.GradeNext].Interval,
+		"sooner": previews[ir.GradeSooner].Interval,
+	}
+
 	s.render(w, "triage.html", triageData{
-		Title:    "Triage · " + document.Heading(),
-		Document: document,
-		Element:  element,
-		Counts:   counts,
-		Body:     template.HTML(s.sanitize(element.ContentHTML)),
+		Title:     "Triage · " + document.Heading(),
+		Document:  document,
+		Element:   element,
+		Counts:    counts,
+		Body:      template.HTML(s.sanitize(element.ContentHTML)),
+		Intervals: intervals,
+		Backlog:   ir.BacklogOptions(element.ID),
 	})
 }
 
-// triageDecisions are the choices a triage pass offers, in the order their
-// buttons appear.
+// triageSchedule resolves the schedule a "keep" decision applies, from the
+// same form values the reader's own grade and backlog buttons send: grade=
+// next or grade=sooner for the schedule row's two grade buttons, days=N for
+// a backlog preset. Triage's "keep" is meant to offer exactly the choices
+// grading does, not a cruder version of them.
 //
-// Deliberately four and not the eight the reading queue has. Triage is not
-// grading: nothing has been read yet, and the only question is whether this
-// passage is worth having in the queue at all. Every one of them records the
-// decision, so the pass always advances — an action that left the annotation
-// undecided would show it again immediately and the pass would not move.
-var triageDecisions = map[string]func(*Server, store.Element) error{
-	// Keep puts it in the queue on the ordinary extract delay, the same as a
-	// passage pulled out while reading.
-	"keep": func(s *Server, element store.Element) error {
-		return s.store.KeepTriaged(element.ID, s.extractDelay, time.Now())
-	},
+// The interval comes from ir.Next, the same computation behind the button's
+// own label (see handleTriage's Intervals) — the preview is the behaviour,
+// same rule ir.Previews itself follows. But only the interval survives: it
+// is carried over via ir.Backlog rather than by persisting ir.Next's own
+// result, because triage is a sorting pass, not an engagement with the
+// material. Reps and A-Factor stay exactly what they were, same as an
+// ordinary "not now" reschedule already leaves them — grading this for real
+// still lies ahead, whenever it actually comes up in the queue.
+//
+// State becomes 'new' regardless of choice, the one thing that is not left
+// alone: an untriaged import starts suspended (see ImportOptions.Triage),
+// and "keep" is precisely the decision that ends that — the same transition
+// KeepTriaged has always made.
+func triageSchedule(current ir.Schedule, r *http.Request, today time.Time) (ir.Schedule, error) {
+	var next ir.Schedule
 
+	if days := r.FormValue("days"); days != "" {
+		n, err := strconv.Atoi(days)
+		if err != nil {
+			return ir.Schedule{}, fmt.Errorf("bad backlog days %q", days)
+		}
+		next = ir.Backlog(current, n, today)
+	} else {
+		var grade ir.Grade
+		switch r.FormValue("grade") {
+		case "next":
+			grade = ir.GradeNext
+		case "sooner":
+			grade = ir.GradeSooner
+		default:
+			return ir.Schedule{}, fmt.Errorf("unknown keep grade %q", r.FormValue("grade"))
+		}
+		computed := ir.Next(current, grade, today)
+		next = ir.Backlog(current, int(math.Round(computed.IntervalDays)), today)
+	}
+
+	next.State = ir.StateNew
+	return next, nil
+}
+
+// triageDecisions are the choices a triage pass offers besides "keep",
+// which needs the request's own form values to resolve a schedule and so is
+// handled separately in handleTriageDecision.
+//
+// Triage is not grading: nothing has been read yet, and the only question is
+// whether this passage is worth having in the queue at all. Every one of
+// these records the decision, so the pass always advances — an action that
+// left the annotation undecided would show it again immediately and the pass
+// would not move.
+var triageDecisions = map[string]func(*Server, store.Element) error{
 	// Suspend parks it. It stays in the library and on this contents page,
 	// and can be queued later from either — the point of a triage pass is
 	// that most of a book's annotations end here.
@@ -249,10 +308,12 @@ func (s *Server) handleTriageDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	decide, ok := triageDecisions[r.FormValue("decision")]
-	if !ok {
-		http.Error(w, "unknown triage decision", http.StatusBadRequest)
-		return
+	decision := r.FormValue("decision")
+	if decision != "keep" {
+		if _, ok := triageDecisions[decision]; !ok {
+			http.Error(w, "unknown triage decision", http.StatusBadRequest)
+			return
+		}
 	}
 
 	element, err := s.store.ElementByID(id)
@@ -265,7 +326,17 @@ func (s *Server) handleTriageDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := decide(s, element); err != nil {
+	if decision == "keep" {
+		schedule, err := triageSchedule(element.Schedule, r, s.today())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := s.store.KeepTriaged(element.ID, schedule, time.Now()); err != nil {
+			s.fail(w, err)
+			return
+		}
+	} else if err := triageDecisions[decision](s, element); err != nil {
 		s.fail(w, err)
 		return
 	}

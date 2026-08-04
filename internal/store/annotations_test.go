@@ -327,7 +327,11 @@ func TestTriagePassWalksInReadingOrder(t *testing.T) {
 
 		switch len(walked) {
 		case 1:
-			if err := db.KeepTriaged(element.ID, 10, now); err != nil {
+			// An untriaged import starts suspended; "keep" is the decision
+			// that ends that, same as web.triageSchedule makes explicit.
+			kept := ir.Backlog(element.Schedule, 10, now)
+			kept.State = ir.StateNew
+			if err := db.KeepTriaged(element.ID, kept, now); err != nil {
 				t.Fatalf("KeepTriaged: %v", err)
 			}
 		case 2:
@@ -388,7 +392,9 @@ func TestResetTriageForgetsDecisionsButNotSchedules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextUntriaged: %v", err)
 	}
-	if err := db.KeepTriaged(element.ID, 10, now); err != nil {
+	schedule := ir.Backlog(element.Schedule, 10, now)
+	schedule.State = ir.StateNew
+	if err := db.KeepTriaged(element.ID, schedule, now); err != nil {
 		t.Fatalf("KeepTriaged: %v", err)
 	}
 

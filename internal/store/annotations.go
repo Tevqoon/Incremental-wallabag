@@ -348,29 +348,27 @@ func (s *Store) MarkTriaged(id int64, now time.Time) error {
 	return nil
 }
 
-// KeepTriaged puts an annotation into the reading queue and records the
-// decision, in one transaction.
+// KeepTriaged puts an annotation into the reading queue on the given
+// schedule and records the decision, in one transaction.
 //
 // The two belong together: a decision recorded without the schedule change
 // silently drops the passage, and a schedule change recorded without the
 // decision offers it again on the next pass.
 //
-// It comes back after delayDays rather than today for the same reason a fresh
-// extract does — the value of a passage is re-reading it once its context has
-// faded, not twice in one sitting, and triage is that first sitting.
-func (s *Store) KeepTriaged(id int64, delayDays int, now time.Time) error {
+// schedule is computed by the caller the same way an ordinary grade or
+// backlog button computes one — see triageSchedule in the web package — so
+// "keep" offers exactly those choices rather than a single fixed delay. It
+// still comes back later rather than today, same as before: the value of a
+// passage is re-reading it once its context has faded, not twice in one
+// sitting, and triage is that first sitting.
+func (s *Store) KeepTriaged(id int64, schedule ir.Schedule, now time.Time) error {
 	return s.inTransaction(func(tx *sql.Tx) error {
-		result, err := tx.Exec(`
-			UPDATE elements SET
-			    state = ?, due_on = ?, queue_rank = NULL,
-			    triaged_at = ?, updated_at = ?
-			WHERE id = ?`,
-			string(ir.StateNew),
-			now.AddDate(0, 0, delayDays).Format(dateFormat),
-			formatTime(now), formatTime(now), id,
-		)
+		if err := saveSchedule(tx, id, schedule, now); err != nil {
+			return err
+		}
+		result, err := tx.Exec(`UPDATE elements SET triaged_at = ? WHERE id = ?`, formatTime(now), id)
 		if err != nil {
-			return fmt.Errorf("store: keep element %d: %w", id, err)
+			return fmt.Errorf("store: mark element %d triaged: %w", id, err)
 		}
 		if n, _ := result.RowsAffected(); n == 0 {
 			return fmt.Errorf("store: element %d: %w", id, ErrNotFound)

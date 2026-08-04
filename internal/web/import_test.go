@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Tevqoon/increader/internal/ir"
 	"github.com/Tevqoon/increader/internal/store"
@@ -166,8 +167,14 @@ func TestTriagePassEmptiesItself(t *testing.T) {
 	id := importedDocumentID(t, server, "triage")
 	path := "/documents/" + strconv.FormatInt(id, 10) + "/triage"
 
-	decisions := []string{"keep", "suspend", "drop"}
-	for step, decision := range decisions {
+	decisions := []url.Values{
+		// "keep" needs a schedule choice now, the same as a grade or backlog
+		// button would send — see triageSchedule.
+		{"decision": {"keep"}, "grade": {"next"}},
+		{"decision": {"suspend"}},
+		{"decision": {"drop"}},
+	}
+	for step, form := range decisions {
 		response := get(t, server, path)
 		if response.Code != http.StatusOK {
 			t.Fatalf("step %d: status %d, want another annotation to decide about", step, response.Code)
@@ -178,8 +185,7 @@ func TestTriagePassEmptiesItself(t *testing.T) {
 			t.Fatalf("step %d: NextUntriaged: %v", step, err)
 		}
 
-		decided := post(t, server, "/elements/"+strconv.FormatInt(element.ID, 10)+"/triage",
-			url.Values{"decision": {decision}})
+		decided := post(t, server, "/elements/"+strconv.FormatInt(element.ID, 10)+"/triage", form)
 		if decided.Code != http.StatusSeeOther {
 			t.Fatalf("step %d: status %d, body %s", step, decided.Code, decided.Body.String())
 		}
@@ -217,6 +223,76 @@ func TestTriagePassEmptiesItself(t *testing.T) {
 	}
 	if annotations[1].Schedule.State != ir.StateSuspended {
 		t.Errorf("parked annotation state = %q", annotations[1].Schedule.State)
+	}
+}
+
+// TestTriageKeepAcceptsAScheduleChoice covers the point of reusing the
+// reader's own schedule panel here: "keep" is not a single fixed delay any
+// more, it applies whichever choice was actually pressed — a backlog preset
+// in this case, the same param a preset button in the reader sends.
+func TestTriageKeepAcceptsAScheduleChoice(t *testing.T) {
+	server, db, _ := newTestServer(t, false)
+	id := importedDocumentID(t, server, "triage")
+
+	element, err := db.NextUntriaged(id)
+	if err != nil {
+		t.Fatalf("NextUntriaged: %v", err)
+	}
+
+	response := post(t, server, "/elements/"+strconv.FormatInt(element.ID, 10)+"/triage",
+		url.Values{"decision": {"keep"}, "days": {"14"}})
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status %d, body %s", response.Code, response.Body.String())
+	}
+
+	kept, err := db.ElementByID(element.ID)
+	if err != nil {
+		t.Fatalf("ElementByID: %v", err)
+	}
+	if kept.Schedule.State != ir.StateNew {
+		t.Errorf("state = %q, want new — an untriaged import starts suspended, and keeping it ends that", kept.Schedule.State)
+	}
+	wantDue := ir.Day(time.Now()).AddDate(0, 0, 14)
+	if !kept.Schedule.DueOn.Equal(wantDue) {
+		t.Errorf("due = %v, want %v (the chosen preset, not the old fixed extract delay)",
+			kept.Schedule.DueOn, wantDue)
+	}
+}
+
+// TestTriageKeepRejectsAnUnknownGrade guards the 400 path: a "keep" with
+// neither days nor a recognised grade must not silently schedule something
+// nobody actually chose.
+func TestTriageKeepRejectsAnUnknownGrade(t *testing.T) {
+	server, db, _ := newTestServer(t, false)
+	id := importedDocumentID(t, server, "triage")
+
+	element, err := db.NextUntriaged(id)
+	if err != nil {
+		t.Fatalf("NextUntriaged: %v", err)
+	}
+
+	response := post(t, server, "/elements/"+strconv.FormatInt(element.ID, 10)+"/triage",
+		url.Values{"decision": {"keep"}})
+	if response.Code != http.StatusBadRequest {
+		t.Errorf("status %d, want 400 for a keep with no schedule choice", response.Code)
+	}
+}
+
+// TestTriagePageOffersTheScheduleRow checks the page actually renders the
+// reader's own schedule panel rather than the old flat Keep button.
+func TestTriagePageOffersTheScheduleRow(t *testing.T) {
+	server, _, _ := newTestServer(t, false)
+	id := importedDocumentID(t, server, "triage")
+
+	body := get(t, server, "/documents/"+strconv.FormatInt(id, 10)+"/triage").Body.String()
+	for _, want := range []string{
+		`"decision":"keep","grade":"sooner"`,
+		`"decision":"keep","grade":"next"`,
+		`decision: 'keep', days:`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("triage page is missing %q:\n%s", want, body)
+		}
 	}
 }
 

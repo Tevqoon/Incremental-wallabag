@@ -22,13 +22,42 @@
     </p>
   </article>
 
+  <!-- The same schedule panel the reader's own grading footer uses (see
+       "schedule-buttons" in reader.html) — "keep" is meant to offer exactly
+       the choices grading does, not a single fixed delay, so this is that
+       same row wired to /elements/{id}/triage instead of /grade and /backlog:
+       triage's "keep" must land in the same transaction as triaged_at (see
+       Store.KeepTriaged) or a crash between the two would offer this
+       passage again on the next pass despite it already being queued. -->
   <footer class="grades">
-    <div class="grade-buttons">
-      <button class="primary" hx-post="/elements/{{.Element.ID}}/triage"
-              hx-vals='{"decision":"keep"}'
-              title="Put this passage in the reading queue.">
-        Keep<small>queue it</small>
-      </button>
+    <div class="grade-groups">
+      <div class="grade-group">
+        <span class="grade-label">Keep</span>
+        <div class="grade-buttons schedule-buttons">
+          <button hx-post="/elements/{{.Element.ID}}/triage"
+                  hx-vals='{"decision":"keep","grade":"sooner"}'
+                  title="Queue it, due back sooner than usual">
+            Sooner<small>{{index .Intervals "sooner"}}</small>
+          </button>
+          {{range .Backlog}}
+            <button class="preset"
+                    hx-post="/elements/{{$.Element.ID}}/triage"
+                    hx-vals="js:{decision: 'keep', days: {{.Days}}}"
+                    title="Queue it, due back in {{.Label}}">
+              {{.Label}}
+            </button>
+          {{end}}
+          <button class="primary"
+                  hx-post="/elements/{{.Element.ID}}/triage"
+                  hx-vals='{"decision":"keep","grade":"next"}'
+                  title="Queue it, due back on the normal interval">
+            Next<small>{{index .Intervals "next"}}</small>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="grade-secondary">
       <button hx-post="/elements/{{.Element.ID}}/triage"
               hx-vals='{"decision":"suspend"}'
               title="Park it. It stays on the contents page and can be queued later.">
@@ -39,8 +68,6 @@
               title="Leave its schedule exactly as it is and move on.">
         Leave<small>as is</small>
       </button>
-    </div>
-    <div class="grade-secondary">
       <button class="danger" hx-post="/elements/{{.Element.ID}}/triage"
               hx-vals='{"decision":"drop"}'
               hx-confirm="Delete this annotation permanently?"
