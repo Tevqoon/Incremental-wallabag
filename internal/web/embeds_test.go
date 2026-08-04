@@ -25,7 +25,7 @@ const substackTweetEmbed = `<a href="https://x.com/nabeelqu/status/1" target="_b
 func TestRewriteEmbedsProducesAWorkingLink(t *testing.T) {
 	got := rewriteEmbeds("<p>Before.</p>" + substackTweetEmbed + "<p>After.</p>")
 
-	if !strings.Contains(got, `<blockquote><a href="https://x.com/nabeelqu/status/1">`) {
+	if !strings.Contains(got, `<blockquote><a href="https://xcancel.com/nabeelqu/status/1">`) {
 		t.Errorf("rewriteEmbeds did not produce the expected blockquote+link, got:\n%s", got)
 	}
 	if !strings.Contains(got, "Nabeel S. Qureshi @nabeelqu") {
@@ -91,7 +91,25 @@ func TestSanitizeRewritesTweetEmbeds(t *testing.T) {
 
 	got := server.sanitize(substackTweetEmbed)
 
-	if !strings.Contains(got, `<blockquote><a href="https://x.com/nabeelqu/status/1"`) {
+	if !strings.Contains(got, `<blockquote><a href="https://xcancel.com/nabeelqu/status/1"`) {
 		t.Errorf("sanitize did not rewrite the embed, got:\n%s", got)
+	}
+}
+
+// TestRedirectToXcancel covers x.com and the older twitter.com domain, both
+// with and without a www prefix, and leaves an unrelated URL alone.
+func TestRedirectToXcancel(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"https://x.com/nabeelqu/status/1", "https://xcancel.com/nabeelqu/status/1"},
+		{"https://www.x.com/nabeelqu/status/1", "https://xcancel.com/nabeelqu/status/1"},
+		{"https://twitter.com/nabeelqu/status/1", "https://xcancel.com/nabeelqu/status/1"},
+		{"https://www.twitter.com/nabeelqu/status/1", "https://xcancel.com/nabeelqu/status/1"},
+		{"https://example.com/nabeelqu/status/1", "https://example.com/nabeelqu/status/1"},
+		{"not a url at all", "not a url at all"},
+	}
+	for _, test := range tests {
+		if got := redirectToXcancel(test.in); got != test.want {
+			t.Errorf("redirectToXcancel(%q) = %q, want %q", test.in, got, test.want)
+		}
 	}
 }

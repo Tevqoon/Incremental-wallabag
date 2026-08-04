@@ -1,6 +1,7 @@
 package web
 
 import (
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -71,7 +72,7 @@ func tweetEmbedReplacement(node *html.Node) *html.Node {
 	if node.Type != html.ElementNode || node.DataAtom != atom.A || attrValue(node, "data-component-name") != embedTweetComponent {
 		return nil
 	}
-	href := attrValue(node, "href")
+	href := redirectToXcancel(attrValue(node, "href"))
 	if href == "" {
 		return nil
 	}
@@ -94,6 +95,24 @@ func tweetEmbedReplacement(node *html.Node) *html.Node {
 	quote := &html.Node{Type: html.ElementNode, Data: "blockquote", DataAtom: atom.Blockquote}
 	quote.AppendChild(link)
 	return quote
+}
+
+// redirectToXcancel points a tweet's link at xcancel.com — a read-only
+// mirror with no login wall — instead of x.com itself. Everything else
+// about the URL (the path carrying the author and status id) is unchanged,
+// so it still resolves to the same tweet.
+func redirectToXcancel(href string) string {
+	parsed, err := url.Parse(href)
+	if err != nil {
+		return href
+	}
+	switch strings.ToLower(parsed.Host) {
+	case "x.com", "www.x.com", "twitter.com", "www.twitter.com":
+		parsed.Host = "xcancel.com"
+		return parsed.String()
+	default:
+		return href
+	}
 }
 
 func attrValue(node *html.Node, key string) string {
