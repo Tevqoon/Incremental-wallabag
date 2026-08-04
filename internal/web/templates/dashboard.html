@@ -1,0 +1,154 @@
+{{define "content"}}
+<section class="queue">
+  <div class="queue-head">
+    <h1>Dashboard</h1>
+  </div>
+
+  <div class="tiles">
+    <div class="tile">
+      <span class="tile-value">{{.Due}}</span>
+      <span class="tile-label">due today</span>
+    </div>
+    <div class="tile">
+      <span class="tile-value">{{.Total}}</span>
+      <span class="tile-label">elements total</span>
+    </div>
+    <div class="tile">
+      <span class="tile-value">{{.Streak}}</span>
+      <span class="tile-label">day streak</span>
+    </div>
+    <div class="tile">
+      <span class="tile-value">{{.WeekReviews}}</span>
+      <span class="tile-label">reviews this week</span>
+    </div>
+  </div>
+
+  {{if .Preview}}
+    <ol class="items">
+      {{range .Preview}}
+        <li class="item {{if .IsRoot}}is-article{{else}}is-extract{{end}}">
+          <a class="item-title" href="/read/{{.ID}}">
+            {{if .IsRoot}}
+              {{.DocumentTitle}}
+            {{else}}
+              {{.Title}}
+            {{end}}
+          </a>
+          <div class="item-meta">
+            <span class="badge">{{if .IsRoot}}article{{else}}extract{{end}}</span>
+            <span title="priority: lower is more important">p{{percent .Schedule.Priority}}</span>
+            {{if not .IsRoot}}<span class="source">from {{.DocumentTitle}}</span>{{end}}
+          </div>
+        </li>
+      {{end}}
+    </ol>
+    <p class="continue">
+      <a class="button primary" href="/next">Start reading</a>
+      <a class="button" href="/queue">Full queue ({{.Due}} due)</a>
+    </p>
+  {{else}}
+    <div class="empty">
+      <p>Nothing is due today.</p>
+    </div>
+  {{end}}
+
+  <section class="dash-section">
+    <h2>Backlog</h2>
+    <ul class="breakdown">
+      <li>
+        <a href="/library?state=unread">
+          <span class="breakdown-label">Unread</span>
+          <span class="breakdown-track"><span style="width: {{pct (index .Counts "unread") (index .Counts "all")}}%"></span></span>
+          <span class="breakdown-count">{{index .Counts "unread"}}</span>
+        </a>
+      </li>
+      <li>
+        <a href="/library?state=scheduled">
+          <span class="breakdown-label">Scheduled</span>
+          <span class="breakdown-track"><span style="width: {{pct (index .Counts "scheduled") (index .Counts "all")}}%"></span></span>
+          <span class="breakdown-count">{{index .Counts "scheduled"}}</span>
+        </a>
+      </li>
+      <li>
+        <a href="/library?state=suspended">
+          <span class="breakdown-label">Suspended</span>
+          <span class="breakdown-track"><span style="width: {{pct (index .Counts "suspended") (index .Counts "all")}}%"></span></span>
+          <span class="breakdown-count">{{index .Counts "suspended"}}</span>
+        </a>
+      </li>
+      <li>
+        <a href="/library?state=done">
+          <span class="breakdown-label">Done</span>
+          <span class="breakdown-track"><span style="width: {{pct (index .Counts "done") (index .Counts "all")}}%"></span></span>
+          <span class="breakdown-count">{{index .Counts "done"}}</span>
+        </a>
+      </li>
+      {{if index .Counts "missing"}}
+        <li>
+          <a href="/library?state=missing">
+            <span class="breakdown-label">Missing</span>
+            <span class="breakdown-track"><span style="width: {{pct (index .Counts "missing") (index .Counts "all")}}%"></span></span>
+            <span class="breakdown-count">{{index .Counts "missing"}}</span>
+          </a>
+        </li>
+      {{end}}
+    </ul>
+  </section>
+
+  <section class="dash-section">
+    <h2>Composition</h2>
+    {{if .Tags}}
+      <nav class="filters tag-filters">
+        {{range .Tags}}
+          <a href="/library?tag={{.Label}}">{{.Label}} {{.Documents}}</a>
+        {{end}}
+      </nav>
+    {{end}}
+    {{if .ExtractsTotal}}
+      <ul class="breakdown">
+        <li>
+          <a href="/extracts?origin=manual">
+            <span class="breakdown-label">Manual extracts</span>
+            <span class="breakdown-track"><span style="width: {{pct .ManualExtracts .ExtractsTotal}}%"></span></span>
+            <span class="breakdown-count">{{.ManualExtracts}}</span>
+          </a>
+        </li>
+        <li>
+          <a href="/extracts?origin=import">
+            <span class="breakdown-label">Imported extracts</span>
+            <span class="breakdown-track"><span style="width: {{pct .ImportExtracts .ExtractsTotal}}%"></span></span>
+            <span class="breakdown-count">{{.ImportExtracts}}</span>
+          </a>
+        </li>
+      </ul>
+    {{end}}
+    {{if .Missing}}
+      <p class="meta"><span class="badge badge-danger">{{.Missing}} missing highlight{{if ne .Missing 1}}s{{end}}</span></p>
+    {{end}}
+  </section>
+
+  <section class="dash-section">
+    <h2>Activity</h2>
+    <div class="heatmap" title="last 12 weeks">
+      {{range .Heatmap}}
+        <span class="heatmap-cell" style="--level: {{level .Reviews .Extracts}}"
+              title="{{date .Date}}: {{.Reviews}} reviews, {{.Extracts}} extracts"></span>
+      {{end}}
+    </div>
+    <div class="weekbars">
+      {{range .Weeks}}
+        <span class="weekbar" title="{{date .From}}–{{date .To}}: {{.Reviews}} reviews">
+          <span style="height: {{.Percent}}%"></span>
+        </span>
+      {{end}}
+    </div>
+  </section>
+
+  {{if or .PendingWrites .AbandonedWrites}}
+    <p class="meta">
+      {{.PendingWrites}} pending write{{if ne .PendingWrites 1}}s{{end}} to wallabag
+      {{if .AbandonedWrites}}· {{.AbandonedWrites}} abandoned{{end}}
+    </p>
+  {{end}}
+</section>
+{{end}}

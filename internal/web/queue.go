@@ -29,7 +29,7 @@ func (s *Server) handleSyncNow(w http.ResponseWriter, r *http.Request) {
 			s.logger.Error("manual sync failed", "error", err)
 		}
 	}
-	s.redirect(w, r, "/")
+	s.redirect(w, r, "/queue")
 }
 
 // queueData is what the queue page renders.
@@ -83,7 +83,7 @@ func (s *Server) handleNext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(items) == 0 {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+		http.Redirect(w, r, "/queue", http.StatusSeeOther)
 		return
 	}
 	http.Redirect(w, r, "/read/"+strconv.FormatInt(items[0].ID, 10), http.StatusSeeOther)
@@ -154,7 +154,7 @@ func (s *Server) applyGrade(element store.Element, grade ir.Grade) error {
 	// stateful — reading the row, writing it back — stays here.
 	updated := ir.Next(element.Schedule, grade, s.today())
 
-	if err := s.store.SaveSchedule(element.ID, updated, time.Now()); err != nil {
+	if err := s.store.SaveScheduleReviewed(element.ID, updated, time.Now()); err != nil {
 		return err
 	}
 

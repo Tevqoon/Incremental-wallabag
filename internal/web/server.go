@@ -33,7 +33,7 @@ var assets embed.FS
 // pageNames are the full-page templates. Each is parsed together with the
 // layout into its own template set, because they all define a "content"
 // block and parsing them into one set would make those definitions collide.
-var pageNames = []string{"queue.html", "reader.html", "library.html", "extracts.html"}
+var pageNames = []string{"dashboard.html", "queue.html", "reader.html", "library.html", "extracts.html"}
 
 // Server holds everything the handlers need. Dependencies arrive through this
 // struct rather than package-level variables, so a test can build a Server with
@@ -120,7 +120,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.Handle("GET /static/", http.FileServerFS(assets))
 
-	mux.HandleFunc("GET /{$}", s.handleQueue)
+	mux.HandleFunc("GET /{$}", s.handleDashboard)
+	mux.HandleFunc("GET /queue", s.handleQueue)
 	mux.HandleFunc("POST /sync", s.handleSyncNow)
 	mux.HandleFunc("GET /next", s.handleNext)
 	mux.HandleFunc("GET /library", s.handleLibrary)
@@ -487,6 +488,16 @@ var templateFuncs = template.FuncMap{
 	// percent renders a 0..1 priority as a whole number for display.
 	"percent": func(value float64) int { return int(value*100 + 0.5) },
 
+	// pct is part/total as a whole-number percentage, for the dashboard's bar
+	// breakdowns — 0 rather than a division panic when total is 0, since an
+	// empty library is an ordinary state for this app, not an error.
+	"pct": func(part, total int) int {
+		if total == 0 {
+			return 0
+		}
+		return part * 100 / total
+	},
+
 	// build is a function rather than per-page data so every template can
 	// show it without each handler having to remember to pass it.
 	"build": func() string { return version.Current().Short() },
@@ -509,4 +520,22 @@ var templateFuncs = template.FuncMap{
 	// panel uses, so a list row's reschedule control offers exactly the same
 	// choices — see ir.BacklogOptions.
 	"backlogOptions": ir.BacklogOptions,
+
+	// level buckets a day's activity count into a handful of discrete shades
+	// for the heatmap grid — a raw count would make two different days look
+	// like two different colours for no perceptible reason.
+	"level": func(reviews, extracts int) int {
+		switch n := reviews + extracts; {
+		case n == 0:
+			return 0
+		case n == 1:
+			return 1
+		case n <= 2:
+			return 2
+		case n <= 4:
+			return 3
+		default:
+			return 4
+		}
+	},
 }

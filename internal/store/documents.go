@@ -507,10 +507,10 @@ func (s *Store) CountByState(sourceName string, today time.Time) (map[string]int
 	row := s.db.QueryRow(`
 		SELECT
 		    COUNT(*),
-		    SUM(CASE WHEN is_archived = 0 THEN 1 ELSE 0 END),
-		    SUM(CASE WHEN is_starred  = 1 THEN 1 ELSE 0 END),
-		    SUM(CASE WHEN is_archived = 1 THEN 1 ELSE 0 END),
-		    SUM(CASE WHEN missing_upstream = 1 THEN 1 ELSE 0 END),
+		    COALESCE(SUM(CASE WHEN is_archived = 0 THEN 1 ELSE 0 END), 0),
+		    COALESCE(SUM(CASE WHEN is_starred  = 1 THEN 1 ELSE 0 END), 0),
+		    COALESCE(SUM(CASE WHEN is_archived = 1 THEN 1 ELSE 0 END), 0),
+		    COALESCE(SUM(CASE WHEN missing_upstream = 1 THEN 1 ELSE 0 END), 0),
 		    (SELECT COUNT(DISTINCT document_id) FROM elements WHERE origin = 'import'),
 		    (SELECT COUNT(*) FROM elements root
 		     WHERE root.parent_id IS NULL AND root.due_on > ?
