@@ -58,6 +58,25 @@ func TestDashboardShowsBacklogComposition(t *testing.T) {
 	}
 }
 
+// TestDashboardBacklogCountsUploadedBooks guards against the dashboard
+// naming "wallabag" explicitly when counting backlog state — CountByState
+// itself supports every source via an empty sourceName (see its own doc
+// comment), and a book imported by upload must be as visible here as an
+// article synced from wallabag, not silently dropped from the breakdown.
+func TestDashboardBacklogCountsUploadedBooks(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	importedDocumentID(t, server, "triage")
+
+	body := get(t, server, "/").Body.String()
+	// The seeded wallabag article plus the freshly imported book: both
+	// default to unread (neither is archived), so this must read 2 — 1
+	// would mean the book was left out.
+	if !strings.Contains(body, `class="breakdown-count">2<`) {
+		t.Errorf("dashboard backlog does not count the uploaded book alongside the wallabag article:\n%s", body)
+	}
+}
+
 // TestDashboardShowsStreakAfterGrading exercises the real write path — a
 // grade posted through /elements/{id}/grade, the same route the reader's
 // buttons use — and confirms the dashboard reflects it, so the

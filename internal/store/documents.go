@@ -14,12 +14,24 @@ var ErrNotFound = errors.New("store: not found")
 
 // Document is a stored document, as read back from the database.
 type Document struct {
-	ID              int64
-	Source          string
-	ExternalID      string
-	URL             string
-	Title           string
-	Author          string
+	ID         int64
+	Source     string
+	ExternalID string
+	URL        string
+	Title      string
+	Author     string
+
+	// DisplayTitle overrides Title everywhere a document is named, when it is
+	// set. It exists rather than simply editing Title because a synced
+	// document's Title is overwritten wholesale on every sync — see
+	// updateDocument — so an edit there would last until the next one. Read
+	// it through Heading rather than directly.
+	DisplayTitle string
+
+	// Subtitle is the reader's own second line for a work. No provider has a
+	// counterpart, and books need one far more than articles do.
+	Subtitle string
+
 	Language        string
 	ContentHTML     string
 	HasContent      bool
@@ -37,6 +49,23 @@ type Document struct {
 	// document that stopped existing.
 	MissingUpstream bool
 }
+
+// Heading is what this document should be called.
+//
+// Every template that names a document goes through this rather than reading
+// Title, so that an override set once is honoured everywhere without each
+// caller having to remember the rule.
+func (d Document) Heading() string {
+	if d.DisplayTitle != "" {
+		return d.DisplayTitle
+	}
+	return d.Title
+}
+
+// IsUpload reports whether this document came from an uploaded annotation
+// file rather than from a synced provider — which is what decides whether
+// there is anything to read behind it.
+func (d Document) IsUpload() bool { return d.Source == SourceUpload }
 
 // UpsertResult reports what a batch import changed.
 type UpsertResult struct {
@@ -144,7 +173,8 @@ func (s *Store) UpsertDocuments(sourceName string, documents []source.Document, 
 			return result, err
 		}
 
-		imported, err := insertHighlights(transaction, documentID, rootID, document.Highlights, delayDays, now)
+		imported, err := insertHighlights(transaction, documentID, rootID, document.Highlights,
+			highlightImport{delayDays: delayDays}, now)
 		if err != nil {
 			return result, err
 		}
@@ -235,7 +265,8 @@ func (s *Store) DocumentByID(id int64) (Document, error) {
 	err := s.db.QueryRow(`
 		SELECT id, source, external_id, url, title, author, language,
 		       content_html, has_content, is_archived, is_starred, reading_time,
-		       published_at, source_updated_at, imported_at, missing_upstream
+		       published_at, source_updated_at, imported_at, missing_upstream,
+		       display_title, subtitle
 		FROM documents WHERE id = ?`, id,
 	).Scan(
 		&document.ID, &document.Source, &document.ExternalID, &document.URL,
@@ -243,6 +274,7 @@ func (s *Store) DocumentByID(id int64) (Document, error) {
 		&document.ContentHTML, &document.HasContent,
 		&document.IsArchived, &document.IsStarred, &document.ReadingTime,
 		&published, &updated, &imported, &document.MissingUpstream,
+		&document.DisplayTitle, &document.Subtitle,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Document{}, fmt.Errorf("store: document %d: %w", id, ErrNotFound)
@@ -354,14 +386,26 @@ type LibraryEntry struct {
 	State         string
 	DueOn         time.Time
 	ExtractCount  int
+
+	// UntriagedCount is how many of those extracts have not been decided
+	// about in a triage pass — the number that makes a row worth opening.
+	UntriagedCount int
 }
 
 // LibraryFilter selects which documents the library lists.
 type LibraryFilter struct {
 	Query string
 
-	// State is "", "unread", "starred", "archived", "annotated", "missing",
-	// "scheduled", "suspended" or "done" — the first four are the same
+	// State is "", "books", "unread", "starred", "archived", "annotated",
+	// "missing", "scheduled", "suspended" or "done".
+	//
+	// "books" is everything that arrived as an uploaded annotation file
+	// rather than over a sync. It is a source filter wearing a state's
+	// clothes, and it is here rather than as its own field because it
+	// belongs in the same row of tabs: it answers the same question the
+	// others do, which is "show me this part of the library".
+	//
+	// Of the rest, the first four are the same
 	// divisions wallabag's own sidebar offers, so the two read the same way.
 	// The rest are increader's own: "missing" is documents the last
 	// reconciliation could not find upstream any more; "scheduled" is
@@ -415,13 +459,17 @@ func (s *Store) SearchDocuments(filter LibraryFilter, today time.Time) ([]Librar
 		SELECT d.id, d.source, d.external_id, d.url, d.title, d.author,
 		       d.language, d.has_content, d.is_archived, d.is_starred,
 		       d.reading_time, d.published_at, d.source_updated_at,
-		       d.missing_upstream,
+		       d.missing_upstream, d.display_title, d.subtitle,
 		       root.id, root.state, root.due_on,
-		       (SELECT COUNT(*) FROM elements child WHERE child.parent_id = root.id)
+		       (SELECT COUNT(*) FROM elements child WHERE child.parent_id = root.id),
+		       (SELECT COUNT(*) FROM elements child
+		        WHERE child.parent_id = root.id AND child.triaged_at IS NULL)
 		FROM documents d
 		JOIN elements root ON root.document_id = d.id AND root.parent_id IS NULL
-		WHERE (? = '' OR d.title LIKE ? OR d.author LIKE ? OR d.url LIKE ?)
+		WHERE (? = '' OR d.title LIKE ? OR d.display_title LIKE ? OR d.subtitle LIKE ?
+		       OR d.author LIKE ? OR d.url LIKE ?)
 		  AND (? = ''
+		       OR (? = 'books'     AND d.source = '`+SourceUpload+`')
 		       OR (? = 'unread'    AND d.is_archived = 0)
 		       OR (? = 'starred'   AND d.is_starred  = 1)
 		       OR (? = 'archived'  AND d.is_archived = 1)
@@ -439,9 +487,9 @@ func (s *Store) SearchDocuments(filter LibraryFilter, today time.Time) ([]Librar
 		ORDER BY CASE WHEN ? = 'scheduled' THEN root.due_on END DESC,
 		         d.source_updated_at DESC
 		LIMIT ?`,
-		filter.Query, pattern, pattern, pattern,
+		filter.Query, pattern, pattern, pattern, pattern, pattern,
 		filter.State, filter.State, filter.State, filter.State, filter.State,
-		filter.State, today.Format(dateFormat),
+		filter.State, filter.State, today.Format(dateFormat),
 		filter.State,
 		filter.State,
 		filter.State,
@@ -467,7 +515,9 @@ func (s *Store) SearchDocuments(filter LibraryFilter, today time.Time) ([]Librar
 			&entry.Author, &entry.Language, &entry.HasContent,
 			&entry.IsArchived, &entry.IsStarred, &entry.ReadingTime,
 			&published, &updated, &entry.MissingUpstream,
-			&entry.RootElementID, &entry.State, &dueOn, &entry.ExtractCount,
+			&entry.DisplayTitle, &entry.Subtitle,
+			&entry.RootElementID, &entry.State, &dueOn,
+			&entry.ExtractCount, &entry.UntriagedCount,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("store: scan library row: %w", err)
@@ -500,6 +550,12 @@ func (s *Store) SearchDocuments(filter LibraryFilter, today time.Time) ([]Librar
 // CountByState returns the library counts behind the filter tabs — the same
 // numbers wallabag shows in its own sidebar.
 //
+// An empty sourceName counts every source, which is what the library itself
+// passes. It used to name wallabag, from when that was the only way in; once
+// uploads could create documents too, that made the tabs disagree with the
+// list underneath them — SearchDocuments has never filtered by source — and a
+// book would be listed but not counted.
+//
 // today decides the "scheduled" count the same way SearchDocuments does: due
 // later than today, not a state — see LibraryFilter.State.
 func (s *Store) CountByState(sourceName string, today time.Time) (map[string]int, error) {
@@ -511,24 +567,29 @@ func (s *Store) CountByState(sourceName string, today time.Time) (map[string]int
 		    COALESCE(SUM(CASE WHEN is_starred  = 1 THEN 1 ELSE 0 END), 0),
 		    COALESCE(SUM(CASE WHEN is_archived = 1 THEN 1 ELSE 0 END), 0),
 		    COALESCE(SUM(CASE WHEN missing_upstream = 1 THEN 1 ELSE 0 END), 0),
+		    COALESCE(SUM(CASE WHEN source = '`+SourceUpload+`' THEN 1 ELSE 0 END), 0),
 		    (SELECT COUNT(DISTINCT document_id) FROM elements WHERE origin = 'import'),
 		    (SELECT COUNT(*) FROM elements root
 		     WHERE root.parent_id IS NULL AND root.due_on > ?
-		       AND root.document_id IN (SELECT id FROM documents WHERE source = ?)),
+		       AND root.document_id IN (SELECT id FROM documents WHERE ? = '' OR source = ?)),
 		    (SELECT COUNT(*) FROM elements root
 		     WHERE root.parent_id IS NULL AND root.state = 'suspended'
-		       AND root.document_id IN (SELECT id FROM documents WHERE source = ?)),
+		       AND root.document_id IN (SELECT id FROM documents WHERE ? = '' OR source = ?)),
 		    (SELECT COUNT(*) FROM elements root
 		     WHERE root.parent_id IS NULL AND root.state = 'done'
-		       AND root.document_id IN (SELECT id FROM documents WHERE source = ?))
-		FROM documents WHERE source = ?`,
-		today.Format(dateFormat), sourceName, sourceName, sourceName, sourceName)
+		       AND root.document_id IN (SELECT id FROM documents WHERE ? = '' OR source = ?))
+		FROM documents WHERE ? = '' OR source = ?`,
+		today.Format(dateFormat),
+		sourceName, sourceName, sourceName, sourceName,
+		sourceName, sourceName, sourceName, sourceName)
 
-	var all, unread, starred, archived, missing, annotated, scheduled, suspended, done int
-	if err := row.Scan(&all, &unread, &starred, &archived, &missing, &annotated, &scheduled, &suspended, &done); err != nil {
+	var all, unread, starred, archived, missing, books, annotated, scheduled, suspended, done int
+	if err := row.Scan(&all, &unread, &starred, &archived, &missing, &books,
+		&annotated, &scheduled, &suspended, &done); err != nil {
 		return nil, fmt.Errorf("store: count documents by state: %w", err)
 	}
 	counts["all"] = all
+	counts["books"] = books
 	counts["unread"] = unread
 	counts["starred"] = starred
 	counts["archived"] = archived

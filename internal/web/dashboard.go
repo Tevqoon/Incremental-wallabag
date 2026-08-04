@@ -79,7 +79,10 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	counts, err := s.store.CountByState("wallabag", today)
+	// Empty, not "wallabag": once uploaded books exist too, naming one
+	// source here would silently drop them from the backlog breakdown — see
+	// CountByState's own doc comment for why "" means every source.
+	counts, err := s.store.CountByState("", today)
 	if err != nil {
 		s.fail(w, err)
 		return

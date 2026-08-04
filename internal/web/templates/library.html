@@ -4,7 +4,7 @@
 
   <form class="search" method="get" action="/library">
     <input type="search" name="q" value="{{.Query}}"
-           placeholder="Search title, author or URL" autofocus>
+           placeholder="Search title, subtitle, author or URL" autofocus>
     {{if .State}}<input type="hidden" name="state" value="{{.State}}">{{end}}
     {{if .Tag}}<input type="hidden" name="tag" value="{{.Tag}}">{{end}}
     <button type="submit">Search</button>
@@ -13,6 +13,10 @@
   <nav class="filters">
     <a href="/library" class="{{if and (not .State) (not .Tag)}}on{{end}}">All {{index .Counts "all"}}</a>
     <a href="/library?state=unread" class="{{if eq .State "unread"}}on{{end}}">Unread {{index .Counts "unread"}}</a>
+    {{if index .Counts "books"}}
+      <a href="/library?state=books" class="{{if eq .State "books"}}on{{end}}"
+         title="Works whose annotations were uploaded as a file rather than synced">Books {{index .Counts "books"}}</a>
+    {{end}}
     <a href="/library?state=starred" class="{{if eq .State "starred"}}on{{end}}">Starred {{index .Counts "starred"}}</a>
     <a href="/library?state=archived" class="{{if eq .State "archived"}}on{{end}}">Archive {{index .Counts "archived"}}</a>
     <a href="/library?state=suspended" class="{{if eq .State "suspended"}}on{{end}}"
@@ -67,9 +71,13 @@
       {{range .Entries}}
         <li class="item item-selectable" id="document-{{.ID}}">
           <input type="checkbox" name="ids" value="{{.RootElementID}}" form="bulk-form"
-                 class="item-select" aria-label="Select “{{.Title}}”">
+                 class="item-select" aria-label="Select “{{.Heading}}”">
           <div class="item-body">
-          <a class="item-title" href="/read/{{.RootElementID}}">{{.Title}}</a>
+          <!-- An uploaded work has no body to read, so its title leads to
+               its contents page instead of to a reader that would only be
+               able to report that its source is not configured. -->
+          <a class="item-title" href="{{if .IsUpload}}/documents/{{.ID}}{{else}}/read/{{.RootElementID}}{{end}}">{{.Heading}}</a>
+          {{if .Subtitle}}<p class="item-subtitle">{{.Subtitle}}</p>{{end}}
           <div class="item-meta">
             <span class="badge">{{.State}}</span>
             {{if .IsArchived}}<span class="badge">archived</span>{{end}}
@@ -107,9 +115,13 @@
             {{if .ReadingTime}}<span>{{.ReadingTime}} min</span>{{end}}
             {{range .Tags}}<a class="tag" href="/library?tag={{.}}">{{.}}</a>{{end}}
             {{if .ExtractCount}}
-              <span>{{.ExtractCount}} extract{{if ne .ExtractCount 1}}s{{end}}</span>
+              <a href="/documents/{{.ID}}">{{.ExtractCount}} extract{{if ne .ExtractCount 1}}s{{end}}</a>
             {{end}}
-            {{if not .HasContent}}<span title="fetched on first open">not yet fetched</span>{{end}}
+            {{if .UntriagedCount}}
+              <a class="badge badge-item" href="/documents/{{.ID}}/triage"
+                 title="Annotations not yet gone through">{{.UntriagedCount}} to sort</a>
+            {{end}}
+            {{if and (not .HasContent) (not .IsUpload)}}<span title="fetched on first open">not yet fetched</span>{{end}}
             {{if .URL}}
               <a href="{{.URL}}" rel="noopener noreferrer" target="_blank">source ↗</a>
             {{end}}
@@ -117,7 +129,7 @@
               <button class="tiny danger"
                       hx-delete="/documents/{{.ID}}?swap_only=1"
                       hx-target="#document-{{.ID}}" hx-swap="outerHTML"
-                      hx-confirm="Delete “{{.Title}}” from increader? It no longer exists in wallabag, and this cannot be undone.">
+                      hx-confirm="Delete “{{.Heading}}” from increader? It no longer exists in wallabag, and this cannot be undone.">
                 delete
               </button>
             {{end}}

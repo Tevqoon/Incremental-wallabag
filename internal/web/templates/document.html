@@ -1,0 +1,115 @@
+{{define "content"}}
+<section class="queue">
+  <header class="doc-head">
+    <h1>{{.Document.Heading}}</h1>
+    {{if .Document.Subtitle}}<p class="doc-subtitle">{{.Document.Subtitle}}</p>{{end}}
+    <p class="meta">
+      {{if .Document.Author}}{{.Document.Author}} · {{end}}
+      {{.Counts.Total}} annotation{{if ne .Counts.Total 1}}s{{end}}
+      {{if .Counts.Untriaged}}
+        · <strong>{{.Counts.Untriaged}}</strong> not yet gone through
+      {{end}}
+      {{if .Document.URL}}
+        · <a class="source" href="{{.Document.URL}}" rel="noreferrer">original</a>
+      {{end}}
+    </p>
+
+    <div class="doc-actions">
+      {{if .Readable}}
+        <a class="button" href="/read/{{.RootID}}">Read</a>
+      {{end}}
+      {{if .Counts.Untriaged}}
+        <a class="button primary" href="/documents/{{.Document.ID}}/triage">
+          Go through {{.Counts.Untriaged}}
+        </a>
+      {{else if .Counts.Total}}
+        <button class="tiny" hx-post="/documents/{{.Document.ID}}/triage/reset"
+                hx-confirm="Go through this work’s annotations again? Nothing already scheduled changes.">
+          Go through it again
+        </button>
+      {{end}}
+    </div>
+  </header>
+
+  <details class="doc-titles">
+    <summary>Rename</summary>
+    <form method="post" action="/documents/{{.Document.ID}}/titles">
+      <label class="field">
+        <span>Title</span>
+        <input type="text" name="display_title" value="{{.Document.DisplayTitle}}"
+               placeholder="{{.Document.Title}}">
+        <small>Empty falls back to “{{.Document.Title}}”, the name the file itself carried.</small>
+      </label>
+      <label class="field">
+        <span>Subtitle</span>
+        <input type="text" name="subtitle" value="{{.Document.Subtitle}}">
+      </label>
+      <button type="submit" class="tiny">Save</button>
+    </form>
+  </details>
+
+  {{if .Groups}}
+    <nav class="toc">
+      <h2>Contents</h2>
+      <ol>
+        {{range $index, $group := .Groups}}
+          <li>
+            <a href="#chapter-{{$index}}">{{if $group.Chapter}}{{$group.Chapter}}{{else}}Without a chapter{{end}}</a>
+            <span class="toc-count">{{len $group.Annotations}}</span>
+          </li>
+        {{end}}
+      </ol>
+    </nav>
+  {{end}}
+
+  {{range $index, $group := .Groups}}
+    <section class="chapter" id="chapter-{{$index}}">
+      <h2 class="chapter-title">
+        {{if $group.Chapter}}{{$group.Chapter}}{{else}}Without a chapter{{end}}
+      </h2>
+      <ol class="items">
+        {{range $group.Annotations}}
+          <li class="item is-extract" id="element-{{.ID}}">
+            <a class="item-title" href="/read/{{.ID}}">
+              {{if .Quote}}{{.Quote}}{{else}}{{.Note}}{{end}}
+            </a>
+            {{if and .Quote .Note}}
+              <p class="item-note">{{.Note}}</p>
+            {{end}}
+            <div class="item-meta">
+              {{if .Page}}<span class="badge">p. {{.Page}}</span>{{end}}
+              {{if .Color}}
+                <span class="swatch" style="--swatch: {{.Color}}" title="{{.Color}}"></span>
+              {{end}}
+              {{if eq .Schedule.State "suspended"}}
+                <span class="badge">suspended</span>
+              {{else}}
+                <span>due {{date .Schedule.DueOn}}</span>
+              {{end}}
+              {{if not .Triaged}}<span class="badge badge-item">new</span>{{end}}
+              {{if .ClozeCount}}<span class="badge badge-item">{{.ClozeCount}} cloze</span>{{end}}
+              <span>p{{percent .Schedule.Priority}}</span>
+              {{if eq .Schedule.State "suspended"}}
+                <button class="tiny" hx-post="/elements/{{.ID}}/unsuspend"
+                        hx-vals='{"redirect":"/documents/{{$.Document.ID}}"}'>queue it</button>
+              {{else}}
+                <select class="reschedule" hx-post="/elements/{{.ID}}/backlog"
+                        hx-trigger="change" name="days"
+                        hx-vals='{"redirect":"/documents/{{$.Document.ID}}"}'>
+                  <option value="">reschedule…</option>
+                  {{range backlogOptions .ID}}<option value="{{.Days}}">{{.Label}}</option>{{end}}
+                </select>
+              {{end}}
+              <button class="link-danger" hx-delete="/elements/{{.ID}}?swap_only=1"
+                      hx-target="closest li" hx-swap="outerHTML swap:200ms"
+                      hx-confirm="Delete this annotation permanently?">delete</button>
+            </div>
+          </li>
+        {{end}}
+      </ol>
+    </section>
+  {{else}}
+    <div class="empty">Nothing has been harvested from this work yet.</div>
+  {{end}}
+</section>
+{{end}}

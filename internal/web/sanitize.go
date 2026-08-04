@@ -1,6 +1,7 @@
 package web
 
 import (
+	"regexp"
 	"strings"
 
 	"github.com/microcosm-cc/bluemonday"
@@ -67,6 +68,19 @@ func newPolicy() *bluemonday.Policy {
 
 	// Structural elements a readable article needs and UGCPolicy omits.
 	policy.AllowElements("figure", "figcaption", "picture", "section", "article")
+
+	// store.annotationHTML marks a reader's own note on an imported passage
+	// with this class, so the note can be told apart from the passage when
+	// rendered. UGCPolicy drops class attributes wholesale and would take
+	// that one with it.
+	//
+	// Matched against the exact literal rather than a pattern, and on the one
+	// element that ever carries it: the policy also runs over article HTML
+	// from the open web, and an article able to give itself any class it
+	// liked could dress a paragraph up as part of the interface.
+	policy.AllowAttrs("class").
+		Matching(regexp.MustCompile(`^annotation-note$`)).
+		OnElements("p")
 
 	// Images are worth keeping — many articles are unreadable without their
 	// diagrams. The cost is that loading one tells its host you are reading

@@ -719,3 +719,146 @@ button.link-danger:hover { color: var(--danger); }
   background: var(--accent);
   border-radius: 2px 2px 0 0;
 }
+
+/* ---- Import, contents and triage ---------------------------------------
+   Three views that all deal with a work whose annotations arrived as a file
+   rather than as an article. They lean on the existing .queue / .items /
+   .item primitives; what is here is only what those could not already say. */
+
+.import-form { max-width: var(--measure); }
+.field {
+  display: block;
+  margin-bottom: 1.1rem;
+}
+.field > span,
+.field > legend {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 0.3rem;
+}
+.field input[type="text"],
+.field input[type="file"],
+.field select {
+  width: 100%;
+  padding: 0.45rem 0.5rem;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+.field small {
+  display: block;
+  margin-top: 0.3rem;
+  color: var(--muted);
+}
+fieldset.field { border: 0; padding: 0; margin-inline: 0; }
+
+.choice {
+  display: flex;
+  gap: 0.6rem;
+  align-items: flex-start;
+  padding: 0.5rem 0;
+}
+.choice input { margin-top: 0.25rem; }
+.choice small { display: block; color: var(--muted); }
+
+.warnings {
+  margin: 0.5rem 0 0;
+  padding-left: 1.2rem;
+  color: var(--muted);
+}
+.warnings li { margin-bottom: 0.2rem; }
+
+/* .notice already exists for the suspended banner; these are its two other
+   moods. Colour-mixed into the page background rather than set flat, so both
+   themes get a tint that stays legible. */
+.notice-warn   { border-color: var(--mark-edge); background: color-mix(in srgb, var(--mark) 35%, var(--bg)); }
+.notice-danger { border-color: var(--danger);    background: color-mix(in srgb, var(--danger) 10%, var(--bg)); }
+
+.doc-head { margin-bottom: 1.5rem; }
+.doc-subtitle {
+  margin: -0.4rem 0 0.4rem;
+  color: var(--muted);
+  font-size: 1.05rem;
+}
+.doc-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.8rem;
+}
+.doc-titles { margin-bottom: 1.5rem; }
+.doc-titles summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+.doc-titles form { margin-top: 0.8rem; max-width: var(--measure); }
+
+/* The table of contents. A plain ordered list with the count pushed right,
+   so a chapter with forty passages is visible as such at a glance. */
+.toc { margin-bottom: 2rem; }
+.toc h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.toc ol { list-style: none; padding: 0; margin: 0.5rem 0 0; }
+.toc li {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.2rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+.toc-count { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.chapter { margin-bottom: 2rem; }
+.chapter-title {
+  font-size: 1.05rem;
+  padding-bottom: 0.3rem;
+  border-bottom: 2px solid var(--rule);
+}
+.item-note,
+.item-subtitle {
+  margin: 0.2rem 0 0;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+/* An annotation's own colour, shown as a dot rather than applied to the text:
+   whatever the colour meant to the reader in their PDF reader, it did not
+   mean "render this passage in yellow". */
+.swatch {
+  display: inline-block;
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 50%;
+  border: 1px solid var(--rule);
+  background: var(--swatch, transparent);
+  vertical-align: middle;
+}
+
+.triage { max-width: calc(var(--measure) + 6rem); }
+.triage-head { margin-bottom: 1rem; }
+.triage-progress {
+  height: 3px;
+  background: var(--rule);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.triage-progress span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+.triage-card {
+  padding: 1.2rem 0;
+  border-bottom: 1px solid var(--rule);
+  margin-bottom: 1.2rem;
+}
+.triage-body { font-size: 1.1rem; line-height: 1.6; }
+/* The reader's own note under a passage, as annotationHTML marks it up. */
+.triage-body .annotation-note,
+#article .annotation-note {
+  color: var(--muted);
+  border-left: 2px solid var(--rule);
+  padding-left: 0.7rem;
+}

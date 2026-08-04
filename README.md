@@ -12,7 +12,7 @@ and a refined extract can carry **cloze deletions** that become Anki cards.
 The point is being able to read a thousand articles at once by refusing to finish
 any of them.
 
-One static Go binary, SQLite, no runtime, four dependencies, a ~13 MB container
+One static Go binary, SQLite, no runtime, five dependencies, a ~13 MB container
 image. Any device with a browser is a client.
 
 ## What it does and does not do
@@ -27,8 +27,9 @@ change is recorded in an outbox in the same transaction as the local change, so
 a wallabag outage delays a write rather than losing it.
 
 Wallabag is one source behind a `Source` interface, and Anki/org-roam are targets
-behind a `Target` interface, so adding KOReader or Zotero later is an addition
-rather than a rewrite.
+behind a `Target` interface, so adding Zotero later is an addition rather than a
+rewrite. KOReader and PDF annotations arrive by a second route — an uploaded
+file rather than a synced server — parsed in `internal/annotations`.
 
 ## Setup
 
@@ -89,7 +90,8 @@ no image rebuild. `config.local.yaml` is gitignored.
 | **Queue** | What is due today, most important first. Articles and extracts interleave by priority. |
 | **Read next** | Jumps straight to the most important due element. |
 | **Extracts** | Everything harvested, filterable by origin — your own extracts and the ones imported from wallabag highlights. |
-| **Library** | Everything synced, searchable — for finding a specific article, or putting an archived one back in the queue. |
+| **Library** | Everything synced or uploaded, searchable — for finding a specific work, or putting an archived one back in the queue. |
+| **Import** | Upload a book's annotations: a KOReader JSON export, the JSON an annotation extractor produced, or a PDF still carrying its own annotations. |
 
 Articles you have **archived in wallabag do not enter the queue**: they stay in
 the Library, keep their extracts, and can be put back with one click. Their
@@ -134,6 +136,47 @@ out of sight.
 Highlights you already made in wallabag's own reader are imported as extracts
 during sync, and located in the article text the first time you open it.
 
+### Books and papers
+
+Not everything worth reading incrementally comes from wallabag. **Import** takes
+an annotation file and turns a work into a library entry whose passages all live
+in one place:
+
+- a **KOReader JSON export**, from its "Export highlights" plugin;
+- the **JSON envelope** written by `org-roam-annotation-import`'s PyMuPDF
+  extractor;
+- a **PDF** still carrying its own annotations, read in-process.
+
+There is no text behind these — the work is not stored, only what you marked in
+it — so instead of a reader they get a **contents page**: every passage in the
+order it appears in the original, grouped by chapter, with the chapter list on
+top. A passage's page, colour and your own note on it are all kept.
+
+A book yields far more passages than an article, so by default they arrive
+**suspended** and a **triage pass** gates them: one at a time, in the book's own
+order, each one kept (into the queue on the usual delay), parked, left as it is,
+or deleted. That is a different thing from the reading queue, which interleaves
+everything by priority — going through a work means going through it front to
+back, with the chapter you were just in still in mind. A short piece can skip
+the pass and go straight into the queue; the upload form asks.
+
+Re-uploading is how these are corrected. A work is identified by its normalised
+title and author, and each passage by a content hash, so exporting a book again
+after adding highlights imports the new ones, updates chapters and notes that
+changed, and leaves everything else alone. Where two exports of the same work
+disagree about its title — a book read on an ereader and annotated in a PDF
+reader — the form offers to merge into the work already stored.
+
+Titles from these files are unreliable: KOReader reads one out of ebook
+metadata, a PDF carries whatever produced it. Every document therefore has an
+optional **title override** and a **subtitle** you set yourself, which a sync
+never overwrites.
+
+PDF annotations record *where* a highlight is, not what it covers, so the
+passage is recovered from the glyphs underneath it. That works on a PDF with a
+text layer and not at all on a scan; a highlight whose text cannot be recovered
+is still imported with its page, colour and note, and the import says so.
+
 Tags and the star toggle sit above the article and write straight through to
 wallabag. The Library's filter tabs carry the same counts as wallabag's own
 sidebar — Unread, Starred, Archive, Annotated — plus per-tag filters.
@@ -149,13 +192,14 @@ functions — no database, no HTTP, no clock beyond what callers pass in.
 
 ```
 internal/
-  source/     the Source interface           ← seam in
-  wallabag/   API client + Source adapter
-  ir/         addressing, extracts, clozes, scheduling   (stdlib only)
-  store/      SQLite, hand-written SQL
-  export/     the Target interface           ← seam out
-  syncer/     source → store
-  web/        handlers, templates, assets
+  source/       the Source interface         ← seam in
+  wallabag/     API client + Source adapter
+  annotations/  KOReader / PDF file parsers  ← the other seam in
+  ir/           addressing, extracts, clozes, scheduling (stdlib only)
+  store/        SQLite, hand-written SQL
+  export/       the Target interface         ← seam out
+  syncer/       source → store
+  web/          handlers, templates, assets
 ```
 
 Two things are worth knowing before changing anything:
@@ -183,7 +227,13 @@ and every date would otherwise silently be UTC.
 
 Working: two-way wallabag sync (archive state, tags, stars, reading time), the
 reading queue, extracts and clozes, scheduling with read points and suspension,
-annotation import, library and extract browsing.
+annotation import from wallabag and from uploaded KOReader/PDF files, per-work
+contents pages and triage passes, library and extract browsing.
+
+Not yet built, but the schema is ready for it: editing a passage by hand.
+PDF extraction is imperfect enough that correcting one should be possible, and
+annotation colour is already recorded so that "this colour means a chapter
+heading" can become a bulk chapter override later.
 
 `increader sync -full` ignores the watermark and re-reads everything. Needed
 after a release that starts storing a field it did not before, since incremental

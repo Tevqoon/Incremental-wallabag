@@ -121,9 +121,15 @@ type Document struct {
 	// rather than duplicates.
 	ExternalID string
 
-	URL      string
-	Title    string
-	Author   string
+	URL    string
+	Title  string
+	Author string
+
+	// Subtitle is a secondary title, when the provider knows one. Books
+	// routinely have one and articles essentially never do, so this is
+	// empty for everything that arrives over a sync.
+	Subtitle string
+
 	Language string
 
 	// ContentHTML is the article body. It may be empty when the document came
@@ -169,6 +175,30 @@ type Highlight struct {
 
 	// Note is the reader's comment on the passage, usually empty.
 	Note string
+
+	// Chapter is the section of the work the passage sits in, when the
+	// provider knows one — KOReader records it per highlight, a PDF's
+	// outline gives it per page. Empty for a provider with no such notion,
+	// which is every article source.
+	Chapter string
+
+	// Page is where in the work the passage sits, as the provider spells it.
+	// A string rather than a number because the spelling genuinely varies:
+	// KOReader numbers PDF pages but addresses an epub with an xpointer.
+	Page string
+
+	// Color is the annotation's colour as "#rrggbb", when the provider
+	// records one. Readers use colour to mean something — one for a claim,
+	// another for a chapter heading in a document with no outline — and
+	// that meaning cannot be recovered later from a file already imported
+	// without it, so it is carried even though nothing reads it yet.
+	Color string
+
+	// Ordinal is the passage's position in reading order within the
+	// document, counting from one. Providers list annotations in that order
+	// but nothing else preserves it, and re-importing an edited export can
+	// introduce a passage belonging in the middle of ones already stored.
+	Ordinal int
 
 	// HasLocation reports whether the provider already has this highlight
 	// anchored somewhere in its own rendering of the document — wallabag's
