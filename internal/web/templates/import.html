@@ -1,0 +1,98 @@
+{{define "content"}}
+<section class="queue">
+  <h1>Import annotations</h1>
+  <p class="meta">
+    A KOReader JSON export, an annotation JSON envelope, or a PDF still
+    carrying its own annotations.
+  </p>
+
+  {{if .Error}}
+    <div class="notice notice-danger">
+      <strong>{{.Filename}}</strong> could not be imported: {{.Error}}
+    </div>
+  {{end}}
+
+  {{if .Result}}
+    <div class="notice">
+      Imported <strong>{{.Result.Imported}}</strong> of {{.Result.Offered}}
+      annotations from <strong>{{.Filename}}</strong>{{if not .Result.Created}},
+      into a work already in the library{{end}}.
+      <a href="/documents/{{.Result.DocumentID}}">Open its contents</a>.
+    </div>
+  {{end}}
+
+  {{if .Warnings}}
+    <div class="notice notice-warn">
+      <p>
+        {{len .Warnings}} annotation{{if ne (len .Warnings) 1}}s{{end}} did not
+        come through cleanly. They were imported anyway, with whatever could be
+        read — a passage whose text is missing can still be found by its page.
+      </p>
+      <ul class="warnings">
+        {{range .Warnings}}<li>{{.}}</li>{{end}}
+      </ul>
+    </div>
+  {{end}}
+
+  <form class="import-form" method="post" action="/import" enctype="multipart/form-data">
+    <label class="field">
+      <span>File</span>
+      <input type="file" name="file" accept=".json,.pdf,application/json,application/pdf" required>
+    </label>
+
+    <label class="field">
+      <span>Title</span>
+      <input type="text" name="title" placeholder="leave empty to use the file’s own">
+      <small>
+        KOReader takes a title from ebook metadata and a PDF from whatever
+        produced it. Neither is often what you would call the work.
+      </small>
+    </label>
+
+    <label class="field">
+      <span>Subtitle</span>
+      <input type="text" name="subtitle" placeholder="optional">
+    </label>
+
+    <label class="field">
+      <span>Add to</span>
+      <select name="into">
+        <option value="">a new work, or one matching this file</option>
+        {{range .Existing}}
+          <option value="{{.ID}}">{{.Heading}}{{if .Author}} — {{.Author}}{{end}}</option>
+        {{end}}
+      </select>
+      <small>
+        Pick an existing work when two exports of the same book disagree about
+        its title, so the annotations stay together.
+      </small>
+    </label>
+
+    <fieldset class="field">
+      <legend>What to do with the annotations</legend>
+      <label class="choice">
+        <input type="radio" name="mode" value="triage" checked>
+        <span>
+          <strong>Go through them first</strong>
+          <small>
+            They arrive suspended, and a triage pass over the work decides
+            which ones join the queue. What a book wants.
+          </small>
+        </span>
+      </label>
+      <label class="choice">
+        <input type="radio" name="mode" value="queue">
+        <span>
+          <strong>Queue them all now</strong>
+          <small>
+            They enter the reading queue straight away, spread over the usual
+            delay. For a short piece, where triage is more ceremony than help.
+          </small>
+        </span>
+      </label>
+    </fieldset>
+
+    <button type="submit" class="primary">Import</button>
+  </form>
+</section>
+{{end}}

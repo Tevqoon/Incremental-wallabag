@@ -93,9 +93,38 @@ type Element struct {
 	// ordered or arithmetic'd.
 	BuriedOn string
 
+	// Note is the reader's own comment on the passage, as opposed to the
+	// passage itself. Articles rarely have one; a book annotation often is
+	// one, with no passage at all.
+	Note string
+
+	// Chapter and Page are where in the work the passage came from. Both are
+	// empty for anything that did not arrive from a book — see
+	// source.Highlight for why Page is a string.
+	Chapter string
+	Page    string
+
+	// Color is the annotation's own colour as "#rrggbb", when its provider
+	// recorded one. Stored but not yet acted on.
+	Color string
+
+	// Ordinal is reading order within the document, counting from one, for
+	// imported annotations. Zero for everything else, which sorts them ahead
+	// of the imports on a contents page — where a manual extract, having been
+	// made while reading rather than while exporting, has no place in the
+	// original's own order anyway.
+	Ordinal int
+
+	// TriagedAt is when this element was last decided about in a document's
+	// triage pass, zero if never. See Store.UntriagedAnnotations.
+	TriagedAt time.Time
+
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
+
+// Triaged reports whether this element has been through a triage pass.
+func (e Element) Triaged() bool { return !e.TriagedAt.IsZero() }
 
 // IsRoot reports whether this element is a whole document rather than an
 // extract taken from one.
@@ -118,7 +147,8 @@ const elementColumns = `
 	e.start_block, e.start_offset, e.end_block, e.end_offset,
 	e.priority, e.state, e.due_on, e.interval_days, e.afactor, e.reps,
 	e.read_block, e.origin, COALESCE(e.external_ref, ''), e.missing_upstream,
-	e.buried_on, COALESCE(e.ranges, ''), e.created_at, e.updated_at`
+	e.buried_on, COALESCE(e.ranges, ''), e.created_at, e.updated_at,
+	e.note, e.chapter, e.page, e.color, e.ordinal, e.triaged_at`
 
 // nullableElement holds the columns that can be NULL, which cannot be scanned
 // straight into the Element fields they populate.
@@ -131,6 +161,7 @@ type nullableElement struct {
 	buriedOn    sql.NullString
 	createdAt   sql.NullString
 	updatedAt   sql.NullString
+	triagedAt   sql.NullString
 }
 
 // scanTargets returns Scan destinations for a row laid out as elementColumns,
@@ -150,6 +181,8 @@ func scanTargets(element *Element, nullable *nullableElement) []any {
 		&element.Schedule.IntervalDays, &element.Schedule.AFactor, &element.Schedule.Reps,
 		&element.ReadBlock, &element.Origin, &element.ExternalRef, &element.MissingUpstream,
 		&nullable.buriedOn, &element.Ranges, &nullable.createdAt, &nullable.updatedAt,
+		&element.Note, &element.Chapter, &element.Page, &element.Color,
+		&element.Ordinal, &nullable.triagedAt,
 	}
 }
 
@@ -172,6 +205,7 @@ func (n nullableElement) apply(element *Element) {
 	}
 	element.CreatedAt = parseTime(n.createdAt)
 	element.UpdatedAt = parseTime(n.updatedAt)
+	element.TriagedAt = parseTime(n.triagedAt)
 }
 
 // Queue returns the elements due on the given day, most important first.
@@ -201,7 +235,7 @@ func (s *Store) Queue(day time.Time, limit int) ([]QueueItem, error) {
 	}
 
 	rows, err := s.db.Query(`
-		SELECT `+elementColumns+`, d.title, d.url, d.reading_time
+		SELECT `+elementColumns+`, COALESCE(NULLIF(d.display_title, ''), d.title), d.url, d.reading_time
 		FROM elements e
 		JOIN documents d ON d.id = e.document_id
 		WHERE e.state NOT IN ('done', 'dismissed', 'suspended')
@@ -683,6 +717,29 @@ func suspendIfActive(tx *sql.Tx, id int64, now time.Time) error {
 	return nil
 }
 
+// highlightImport carries the choices insertHighlights needs beyond the
+// highlights themselves.
+//
+// A sync leaves this zero: an annotation made in wallabag's own reader is one
+// the reader already decided to make, and it goes straight into the queue on
+// the usual delay. An uploaded book is the case this exists for. A single
+// export routinely carries several hundred passages, and putting all of them
+// in the queue at once buries everything else behind one book — the same
+// failure importedPriority softens, at a scale it cannot. Parking them
+// instead makes going through the book its own deliberate act.
+type highlightImport struct {
+	// delayDays is how far ahead a queued annotation first becomes due.
+	delayDays int
+
+	// suspended parks new annotations out of the queue, awaiting triage.
+	suspended bool
+
+	// triaged marks new annotations as already decided about, so a triage
+	// pass over the document does not offer them. Set when the reader chose
+	// to queue the whole import outright, which is itself the decision.
+	triaged bool
+}
+
 // insertHighlights turns a provider's annotations into extracts, skipping any
 // already imported.
 //
@@ -690,11 +747,18 @@ func suspendIfActive(tx *sql.Tx, id int64, now time.Time) error {
 // and the listing that carries annotations deliberately omits it. That costs
 // nothing while the parent stays archived, and AnchorExtract fills the position
 // in later if the article is ever opened.
-func insertHighlights(tx *sql.Tx, documentID, parentID int64, highlights []source.Highlight, delayDays int, now time.Time) (int, error) {
+func insertHighlights(tx *sql.Tx, documentID, parentID int64, highlights []source.Highlight, options highlightImport, now time.Time) (int, error) {
 	imported := 0
 
 	for _, highlight := range highlights {
-		if strings.TrimSpace(highlight.Quote) == "" || highlight.ExternalID == "" {
+		quote := strings.TrimSpace(highlight.Quote)
+		note := strings.TrimSpace(highlight.Note)
+
+		// A passage-less annotation is still an annotation: a PDF sticky
+		// note, or a highlight over a scanned page whose text could not be
+		// recovered but which the reader wrote a comment on. Only one with
+		// nothing in it at all is skipped.
+		if (quote == "" && note == "") || highlight.ExternalID == "" {
 			continue
 		}
 
@@ -730,6 +794,25 @@ func insertHighlights(tx *sql.Tx, documentID, parentID int64, highlights []sourc
 					return imported, fmt.Errorf("store: backfill ranges for highlight %s: %w", highlight.ExternalID, err)
 				}
 			}
+
+			// Chapter, page, note and colour are refreshed rather than left
+			// alone, because re-uploading is how these are corrected: an
+			// export redone after fixing a note in KOReader, or a PDF
+			// re-read once its outline was added, should land those
+			// corrections rather than be recognised as "already imported"
+			// and discarded. The passage itself is deliberately not
+			// refreshed — that is the reader's to edit here, and the
+			// external ref already changes when the source's own text does.
+			//
+			// Guarded on the highlight actually carrying some of it, so a
+			// wallabag sync — which carries none — does not issue a pointless
+			// UPDATE per highlight per run, bumping updated_at on the whole
+			// library every half hour.
+			if hasBookMetadata(highlight) {
+				if err := refreshAnnotation(tx, documentID, highlight, now); err != nil {
+					return imported, err
+				}
+			}
 			continue
 		}
 
@@ -743,13 +826,21 @@ func insertHighlights(tx *sql.Tx, documentID, parentID int64, highlights []sourc
 		// highlight and duplicate it. Adopting the new ref onto the row
 		// that is already here instead keeps one local row per highlight no
 		// matter how many times its upstream id churns underneath it.
+		//
+		// Skipped entirely for a passage-less annotation: matching on an
+		// empty quote would make every note-only annotation in a document
+		// look like every other one, and the first note imported would
+		// swallow the ref of each one after it.
 		var existingID int64
-		err = tx.QueryRow(`
-			SELECT id FROM elements
-			WHERE document_id = ? AND parent_id = ? AND quote = ?
-			LIMIT 1`,
-			documentID, parentID, highlight.Quote,
-		).Scan(&existingID)
+		err = sql.ErrNoRows
+		if quote != "" {
+			err = tx.QueryRow(`
+				SELECT id FROM elements
+				WHERE document_id = ? AND parent_id = ? AND quote = ?
+				LIMIT 1`,
+				documentID, parentID, quote,
+			).Scan(&existingID)
+		}
 		switch {
 		case err == nil:
 			if _, err := tx.Exec(`
@@ -769,24 +860,44 @@ func insertHighlights(tx *sql.Tx, documentID, parentID int64, highlights []sourc
 			ranges = string(highlight.Ranges)
 		}
 
-		_, err = tx.Exec(`
-			INSERT INTO elements
-			    (document_id, parent_id, kind, title, content_html, quote,
-			     priority, state, due_on, interval_days, afactor, reps,
-			     read_block, origin, external_ref, ranges, created_at, updated_at)
-			VALUES (?, ?, 'topic', ?, ?, ?, ?, 'new', ?, 0, 2.0, 0, 0, 'import', ?, ?, ?, ?)`,
-			documentID, parentID,
-			SummariseQuote(highlight.Quote),
-			"<p>"+html.EscapeString(highlight.Quote)+"</p>",
-			highlight.Quote,
-			importedPriority,
+		// A parked annotation is suspended rather than merely undated,
+		// because suspension already means exactly this everywhere else in
+		// the application — present in the library, out of the queue, keeping
+		// everything it knows — and triage's "keep this" is then an ordinary
+		// unsuspend rather than a second concept.
+		state, dueOn := string(ir.StateNew), any(
 			// Spread across the window rather than all landing on the same
 			// day: a library's import is hundreds of highlights at once, and
 			// stacking them on one date moves the pile instead of clearing it.
 			// The multiplier matches the queue's tie-break so the two agree.
-			now.AddDate(0, 0, spreadOffset(documentID, delayDays)).Format(dateFormat),
+			now.AddDate(0, 0, spreadOffset(documentID, options.delayDays)).Format(dateFormat))
+		if options.suspended {
+			state, dueOn = string(ir.StateSuspended), nil
+		}
+
+		var triagedAt any
+		if options.triaged {
+			triagedAt = formatTime(now)
+		}
+
+		_, err = tx.Exec(`
+			INSERT INTO elements
+			    (document_id, parent_id, kind, title, content_html, quote,
+			     priority, state, due_on, interval_days, afactor, reps,
+			     read_block, origin, external_ref, ranges, created_at, updated_at,
+			     note, chapter, page, color, ordinal, triaged_at)
+			VALUES (?, ?, 'topic', ?, ?, ?, ?, ?, ?, 0, 2.0, 0, 0, 'import', ?, ?, ?, ?,
+			        ?, ?, ?, ?, ?, ?)`,
+			documentID, parentID,
+			annotationTitle(highlight),
+			annotationHTML(quote, note),
+			quote,
+			importedPriority,
+			state, dueOn,
 			highlight.ExternalID, ranges,
 			formatTime(now), formatTime(now),
+			note, highlight.Chapter, highlight.Page, highlight.Color,
+			highlight.Ordinal, triagedAt,
 		)
 		if err != nil {
 			return imported, fmt.Errorf("store: import highlight %s: %w", highlight.ExternalID, err)
@@ -795,6 +906,90 @@ func insertHighlights(tx *sql.Tx, documentID, parentID int64, highlights []sourc
 	}
 
 	return imported, nil
+}
+
+// annotationTitle names an imported annotation for a list.
+//
+// A book annotation's chapter is a far better label than the first eighty
+// characters of the passage, which is already shown directly underneath it —
+// the same objection that made the reader's heading the article's title
+// rather than the extract's. The passage is the fallback, and a note-only
+// annotation falls back to the note.
+func annotationTitle(highlight source.Highlight) string {
+	if chapter := strings.TrimSpace(highlight.Chapter); chapter != "" {
+		return SummariseQuote(chapter)
+	}
+	if quote := strings.TrimSpace(highlight.Quote); quote != "" {
+		return SummariseQuote(quote)
+	}
+	return SummariseQuote(highlight.Note)
+}
+
+// annotationHTML renders a passage and the reader's note on it as the
+// element's body.
+//
+// The note is marked up as a distinct block rather than run together with the
+// passage: they are different kinds of thing — one the author's words, one the
+// reader's — and a cloze deletion taken over the pair should be able to tell
+// them apart.
+func annotationHTML(quote, note string) string {
+	var body strings.Builder
+	if quote != "" {
+		body.WriteString("<p>" + html.EscapeString(quote) + "</p>")
+	}
+	if note != "" {
+		body.WriteString(`<p class="annotation-note">` + html.EscapeString(note) + "</p>")
+	}
+	return body.String()
+}
+
+// hasBookMetadata reports whether a highlight carries anything only a book
+// import produces — the signal that re-importing it is worth a write.
+func hasBookMetadata(highlight source.Highlight) bool {
+	return highlight.Chapter != "" || highlight.Page != "" ||
+		highlight.Color != "" || highlight.Ordinal > 0 ||
+		strings.TrimSpace(highlight.Note) != ""
+}
+
+// refreshAnnotation updates an already-imported annotation's book metadata.
+//
+// Deliberately narrow about what it touches.
+//
+// Scoped to origin = 'import': a manual extract that adopted this ref carries
+// a passage the reader chose by hand, and a re-import has no business
+// rewriting it.
+//
+// Scoped to start_block IS NULL — an extract that has never been located in
+// an article — because content_html for an anchored one is the article's own
+// markup, links and all, recovered by AnchorExtract. Replacing that with an
+// escaped plain-text paragraph would quietly downgrade every wallabag
+// highlight the reader has ever opened.
+//
+// The stored title is left alone. Nothing here can tell a title increader
+// generated from one a reader will eventually be able to edit, and the
+// contents page groups on the chapter column rather than on titles, so
+// refreshing it would buy nothing and cost that distinction.
+func refreshAnnotation(tx *sql.Tx, documentID int64, highlight source.Highlight, now time.Time) error {
+	quote := strings.TrimSpace(highlight.Quote)
+	note := strings.TrimSpace(highlight.Note)
+
+	_, err := tx.Exec(`
+		UPDATE elements SET
+		    note = ?, chapter = ?, page = ?, color = ?,
+		    ordinal = CASE WHEN ? > 0 THEN ? ELSE ordinal END,
+		    content_html = CASE WHEN start_block IS NULL THEN ? ELSE content_html END,
+		    updated_at = ?
+		WHERE document_id = ? AND external_ref = ? AND origin = 'import'`,
+		note, highlight.Chapter, highlight.Page, highlight.Color,
+		highlight.Ordinal, highlight.Ordinal,
+		annotationHTML(quote, note),
+		formatTime(now),
+		documentID, highlight.ExternalID,
+	)
+	if err != nil {
+		return fmt.Errorf("store: refresh annotation %s: %w", highlight.ExternalID, err)
+	}
+	return nil
 }
 
 // spreadOffset scatters a batch of imports deterministically across a window.
@@ -1247,7 +1442,7 @@ func (s *Store) Extracts(filter ExtractFilter) ([]ExtractRow, error) {
 	}
 
 	rows, err := s.db.Query(`
-		SELECT `+elementColumns+`, d.title, d.url,
+		SELECT `+elementColumns+`, COALESCE(NULLIF(d.display_title, ''), d.title), d.url,
 		       (SELECT COUNT(*) FROM cloze_ranges c WHERE c.element_id = e.id)
 		FROM elements e
 		JOIN documents d ON d.id = e.document_id

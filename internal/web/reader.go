@@ -66,6 +66,17 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A document that arrived as an uploaded annotation file has no body and
+	// no provider to fetch one from, so there is nothing here to read. Its
+	// contents page is the equivalent view, and sending the reader there is
+	// better than the 500 that fetching a body from an unconfigured source
+	// would otherwise produce. Only for the root: an extract from such a
+	// document carries its own text and reads perfectly well.
+	if element.IsRoot() && !s.readable(document) {
+		http.Redirect(w, r, "/documents/"+strconv.FormatInt(document.ID, 10), http.StatusSeeOther)
+		return
+	}
+
 	article, marks, imageURLs, err := s.parseArticle(r.Context(), element)
 	if err != nil {
 		s.fail(w, err)
@@ -142,7 +153,7 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 	// stored title: that field is a truncated echo of the passage, which is
 	// already right there in the body below — showing it again as the
 	// heading just repeats it.
-	title := document.Title
+	title := document.Heading()
 
 	s.render(w, "reader.html", readerData{
 		Title:    title,

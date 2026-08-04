@@ -1,0 +1,53 @@
+{{define "content"}}
+<section class="queue triage">
+  <header class="triage-head">
+    <p class="meta">
+      <a href="/documents/{{.Document.ID}}">{{.Document.Heading}}</a>
+      · {{.Counts.Untriaged}} of {{.Counts.Total}} left
+    </p>
+    <div class="triage-progress" role="presentation">
+      <span style="width: {{pct (sub .Counts.Total .Counts.Untriaged) .Counts.Total}}%"></span>
+    </div>
+  </header>
+
+  <article class="triage-card">
+    {{if .Element.Chapter}}<h1 class="chapter-title">{{.Element.Chapter}}</h1>{{end}}
+    <div class="triage-body">{{.Body}}</div>
+    <p class="item-meta">
+      {{if .Element.Page}}<span class="badge">p. {{.Element.Page}}</span>{{end}}
+      {{if .Element.Color}}
+        <span class="swatch" style="--swatch: {{.Element.Color}}" title="{{.Element.Color}}"></span>
+      {{end}}
+      <a class="source" href="/read/{{.Element.ID}}">open on its own</a>
+    </p>
+  </article>
+
+  <footer class="grades">
+    <div class="grade-buttons">
+      <button class="primary" hx-post="/elements/{{.Element.ID}}/triage"
+              hx-vals='{"decision":"keep"}'
+              title="Put this passage in the reading queue.">
+        Keep<small>queue it</small>
+      </button>
+      <button hx-post="/elements/{{.Element.ID}}/triage"
+              hx-vals='{"decision":"suspend"}'
+              title="Park it. It stays on the contents page and can be queued later.">
+        Park<small>suspend</small>
+      </button>
+      <button hx-post="/elements/{{.Element.ID}}/triage"
+              hx-vals='{"decision":"skip"}'
+              title="Leave its schedule exactly as it is and move on.">
+        Leave<small>as is</small>
+      </button>
+    </div>
+    <div class="grade-secondary">
+      <button class="danger" hx-post="/elements/{{.Element.ID}}/triage"
+              hx-vals='{"decision":"drop"}'
+              hx-confirm="Delete this annotation permanently?"
+              title="Remove it altogether — a slipped highlight, or text that came out malformed.">
+        Delete
+      </button>
+    </div>
+  </footer>
+</section>
+{{end}}

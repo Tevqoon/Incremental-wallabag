@@ -33,7 +33,10 @@ var assets embed.FS
 // pageNames are the full-page templates. Each is parsed together with the
 // layout into its own template set, because they all define a "content"
 // block and parsing them into one set would make those definitions collide.
-var pageNames = []string{"dashboard.html", "queue.html", "reader.html", "library.html", "extracts.html"}
+var pageNames = []string{
+	"dashboard.html", "queue.html", "reader.html", "library.html", "extracts.html",
+	"import.html", "document.html", "triage.html",
+}
 
 // Server holds everything the handlers need. Dependencies arrive through this
 // struct rather than package-level variables, so a test can build a Server with
@@ -126,6 +129,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /next", s.handleNext)
 	mux.HandleFunc("GET /library", s.handleLibrary)
 	mux.HandleFunc("POST /library/bulk", s.handleLibraryBulk)
+	mux.HandleFunc("GET /import", s.handleImportForm)
+	mux.HandleFunc("POST /import", s.handleImport)
+	mux.HandleFunc("GET /documents/{id}", s.handleDocument)
+	mux.HandleFunc("POST /documents/{id}/titles", s.handleDocumentTitles)
+	mux.HandleFunc("GET /documents/{id}/triage", s.handleTriage)
+	mux.HandleFunc("POST /documents/{id}/triage/reset", s.handleTriageReset)
 	mux.HandleFunc("DELETE /documents/{id}", s.handleDeleteDocument)
 	mux.HandleFunc("GET /documents/{id}/images/{imageID}", s.handleDocumentImage)
 	mux.HandleFunc("GET /extracts", s.handleExtracts)
@@ -141,6 +150,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /elements/{id}/star", s.handleStar)
 	mux.HandleFunc("POST /elements/{id}/tags", s.handleAddTag)
 	mux.HandleFunc("POST /elements/{id}/tags/remove", s.handleRemoveTag)
+	mux.HandleFunc("POST /elements/{id}/triage", s.handleTriageDecision)
 	mux.HandleFunc("DELETE /elements/{id}", s.handleDeleteExtract)
 
 	return mux
@@ -485,6 +495,11 @@ func (s *Server) parseArticle(ctx context.Context, element store.Element) (*ir.A
 
 // templateFuncs are the helpers available inside templates.
 var templateFuncs = template.FuncMap{
+	// sub subtracts, for the one place a template needs a difference: how
+	// much of a triage pass is behind you, which is the total less what is
+	// left. Kept this narrow deliberately — arithmetic belongs in handlers.
+	"sub": func(a, b int) int { return a - b },
+
 	// percent renders a 0..1 priority as a whole number for display.
 	"percent": func(value float64) int { return int(value*100 + 0.5) },
 

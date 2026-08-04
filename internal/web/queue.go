@@ -221,16 +221,10 @@ func (s *Server) handleDeleteExtract(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.store.DeleteExtract(id); err != nil {
+	if err := s.deleteExtract(element); err != nil {
 		s.fail(w, err)
 		return
 	}
-
-	// If the extract came from an imported wallabag highlight, DeleteExtract
-	// queued its removal upstream in the same transaction. That queued write
-	// wants to reach wallabag promptly, same as any other write-back, rather
-	// than sit until the next scheduled sync.
-	s.publishSoon()
 
 	// The extracts browse page deletes a row in place — swap_only tells the
 	// handler to answer with an empty 200 so htmx's outerHTML swap on the
@@ -242,6 +236,26 @@ func (s *Server) handleDeleteExtract(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.redirect(w, r, "/read/"+strconv.FormatInt(element.ParentID, 10))
+}
+
+// deleteExtract removes one extract and pushes the removal upstream.
+//
+// Split out from the handler so the triage pass can drop a passage through
+// exactly the same path — the same convention applyGrade and applyUnsuspend
+// follow, and for the same reason: a second caller must not be a second
+// implementation. Getting this wrong for an imported highlight is not a
+// cosmetic bug, it is the extract coming back on the next sync.
+func (s *Server) deleteExtract(element store.Element) error {
+	if err := s.store.DeleteExtract(element.ID); err != nil {
+		return err
+	}
+
+	// If the extract came from an imported wallabag highlight, DeleteExtract
+	// queued its removal upstream in the same transaction. That queued write
+	// wants to reach wallabag promptly, same as any other write-back, rather
+	// than sit until the next scheduled sync.
+	s.publishSoon()
+	return nil
 }
 
 // archiveUpstream records an article's read state locally and queues it for the
@@ -673,7 +687,7 @@ func (s *Server) handleLibrary(w http.ResponseWriter, r *http.Request) {
 		Tag:   query.Get("tag"),
 	}
 	switch filter.State {
-	case "", "unread", "starred", "archived", "annotated", "missing", "scheduled", "suspended", "done":
+	case "", "books", "unread", "starred", "archived", "annotated", "missing", "scheduled", "suspended", "done":
 	default:
 		http.Error(w, "unknown state filter", http.StatusBadRequest)
 		return
@@ -684,7 +698,10 @@ func (s *Server) handleLibrary(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	counts, err := s.store.CountByState("wallabag", s.today())
+	// Counted across every source, not just wallabag. SearchDocuments has
+	// never filtered by source, so naming one here made the tabs disagree
+	// with the list under them the moment uploads could create documents.
+	counts, err := s.store.CountByState("", s.today())
 	if err != nil {
 		s.fail(w, err)
 		return
