@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -33,6 +34,11 @@ type writingSource struct {
 
 	failWith error
 	calls    int
+
+	// delay, if set, is slept through on each write — used to widen the
+	// window in which two concurrent drains could otherwise both claim the
+	// same pending row.
+	delay time.Duration
 }
 
 func newWritingSource() *writingSource {
@@ -47,6 +53,9 @@ func (w *writingSource) Fetch(context.Context, time.Time) ([]source.Document, er
 func (w *writingSource) Content(context.Context, string) (string, error) { return "", nil }
 
 func (w *writingSource) SetArchived(_ context.Context, id string, archived bool) error {
+	if w.delay > 0 {
+		time.Sleep(w.delay)
+	}
 	w.calls++
 	if w.failWith != nil {
 		return w.failWith
@@ -454,6 +463,42 @@ func TestReadOnlySourcesAreSkipped(t *testing.T) {
 	provider := readOnlySource{}
 	if published := New(db, logger, provider).drainWrites(context.Background(), provider); published != 0 {
 		t.Errorf("published %d writes to a read-only source", published)
+	}
+}
+
+// TestConcurrentDrainsDoNotDoublePublish covers the outbox drain race: a
+// scheduled tick and a manual "sync now" request run drainWrites from
+// different goroutines, and without serialization both can read the same
+// pending row before either clears it, publishing it upstream twice.
+func TestConcurrentDrainsDoNotDoublePublish(t *testing.T) {
+	db, logger := testSetup(t)
+	seed(t, db)
+
+	if err := db.SetArchived(1, "wallabag", "77", true, time.Now()); err != nil {
+		t.Fatalf("SetArchived: %v", err)
+	}
+
+	provider := newWritingSource()
+	provider.delay = 20 * time.Millisecond
+	syncer := New(db, logger, provider)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			defer wg.Done()
+			syncer.drainWrites(context.Background(), provider)
+		}()
+	}
+	wg.Wait()
+
+	if provider.calls != 1 {
+		t.Errorf("provider was called %d times for one queued write, want exactly 1", provider.calls)
+	}
+
+	remaining, _ := db.PendingWrites("wallabag", 10)
+	if len(remaining) != 0 {
+		t.Errorf("%d writes still queued after two concurrent drains", len(remaining))
 	}
 }
 

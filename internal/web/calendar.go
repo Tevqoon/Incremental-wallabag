@@ -15,6 +15,8 @@ type calendarDay struct {
 	IsToday  bool
 	Reviews  int
 	Extracts int
+	Articles int
+	Words    int
 	Total    int
 }
 
@@ -32,12 +34,14 @@ type calendarData struct {
 // calendarDayData is one day's own page: everything logged that day, in the
 // order it happened.
 type calendarDayData struct {
-	Title   string
-	Day     time.Time
-	Entries []store.ActivityEntry
-	PrevDay string
-	NextDay string
-	Month   string
+	Title    string
+	Day      time.Time
+	Entries  []store.ActivityEntry
+	Articles int
+	Words    int
+	PrevDay  string
+	NextDay  string
+	Month    string
 }
 
 // handleCalendar shows a month of activity, prev/next navigable, each day
@@ -76,6 +80,8 @@ func (s *Server) handleCalendar(w http.ResponseWriter, r *http.Request) {
 			IsToday:  d.Date.Equal(today),
 			Reviews:  d.Reviews,
 			Extracts: d.Extracts,
+			Articles: d.Articles,
+			Words:    d.Words,
 			Total:    d.Reviews + d.Extracts,
 		}
 	}
@@ -116,13 +122,24 @@ func (s *Server) handleCalendarDay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	articles := map[int64]bool{}
+	words := 0
+	for _, entry := range entries {
+		if entry.Kind == store.ActivityReview {
+			articles[entry.DocumentID] = true
+		}
+		words += entry.Words
+	}
+
 	s.render(w, "calendar_day.html", calendarDayData{
-		Title:   "Calendar · " + day.Format("2 Jan 2006"),
-		Day:     day,
-		Entries: entries,
-		PrevDay: day.AddDate(0, 0, -1).Format(dateLayout),
-		NextDay: day.AddDate(0, 0, 1).Format(dateLayout),
-		Month:   day.Format("2006-01"),
+		Title:    "Calendar · " + day.Format("2 Jan 2006"),
+		Day:      day,
+		Entries:  entries,
+		Articles: len(articles),
+		Words:    words,
+		PrevDay:  day.AddDate(0, 0, -1).Format(dateLayout),
+		NextDay:  day.AddDate(0, 0, 1).Format(dateLayout),
+		Month:    day.Format("2006-01"),
 	})
 }
 

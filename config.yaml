@@ -6,7 +6,9 @@
 
 # Listen address. 0.0.0.0 is correct inside a container: 127.0.0.1 there is the
 # container's own loopback and would be unreachable. Exposure is controlled by
-# the port mapping in compose.yaml, which publishes to the host's loopback only.
+# the port mapping in compose.yaml, which currently publishes on all host
+# interfaces (LAN/Tailscale-reachable, not just loopback) — see the comment
+# there. The app has no auth, so treat that binding as the real perimeter.
 bind: 0.0.0.0:8080
 
 # Path to the SQLite database. Under compose this is the mounted volume.

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/Tevqoon/increader/internal/source"
@@ -47,6 +48,14 @@ type Syncer struct {
 	// lock. It gates how often the scheduled loop pays for a full listing;
 	// the manual "sync now" path reconciles unconditionally instead.
 	lastReconcile time.Time
+
+	// drainMu serializes drainWrites across providers and callers. Run's own
+	// loop only ever drains from one goroutine at a time, but a request
+	// handler's "sync now" runs on its own goroutine and can overlap a
+	// scheduled tick or nudge. Without this, two overlapping drains can both
+	// read the same pending row before either completes it, publishing the
+	// same change upstream twice.
+	drainMu sync.Mutex
 }
 
 // New builds a syncer over the given sources.
@@ -355,11 +364,20 @@ func watermarkForLog(watermark time.Time) string {
 // locally, undoing the reader's action until the following sync.
 //
 // A provider that cannot write has nothing queued and nothing to do.
+//
+// The read-act-complete sequence below (PendingWrites, then a provider call
+// per row, then CompleteWrite) is not itself atomic, so two overlapping
+// calls — the scheduled loop and a manual "sync now" request, say — could
+// otherwise both claim the same pending row and publish it upstream twice.
+// drainMu makes the whole sequence run one call at a time.
 func (s *Syncer) drainWrites(ctx context.Context, provider source.Source) int {
 	writer, ok := provider.(source.Writer)
 	if !ok {
 		return 0
 	}
+
+	s.drainMu.Lock()
+	defer s.drainMu.Unlock()
 
 	writes, err := s.store.PendingWrites(provider.Name(), writeBatch)
 	if err != nil {

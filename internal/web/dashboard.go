@@ -25,6 +25,8 @@ const dashboardTagLimit = 8
 type weekBar struct {
 	From, To time.Time
 	Reviews  int
+	Articles int
+	Words    int
 	Percent  int
 }
 
@@ -47,10 +49,12 @@ type dashboardData struct {
 	Missing        int
 
 	// Reading activity & streaks
-	Streak      int
-	WeekReviews int
-	Heatmap     []store.DayCount
-	Weeks       []weekBar
+	Streak       int
+	WeekReviews  int
+	WeekArticles int
+	WeekWords    int
+	Heatmap      []store.DayCount
+	Weeks        []weekBar
 
 	// Sync — a minor line, not a headline section
 	PendingWrites   int
@@ -122,9 +126,10 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	weeks := weeklyBars(heatmap)
-	weekReviews := 0
+	var weekReviews, weekArticles, weekWords int
 	if len(weeks) > 0 {
-		weekReviews = weeks[len(weeks)-1].Reviews
+		last := weeks[len(weeks)-1]
+		weekReviews, weekArticles, weekWords = last.Reviews, last.Articles, last.Words
 	}
 
 	queued, abandoned, err := s.store.CountPendingWrites("wallabag")
@@ -147,6 +152,8 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		Missing:         missing,
 		Streak:          streak,
 		WeekReviews:     weekReviews,
+		WeekArticles:    weekArticles,
+		WeekWords:       weekWords,
 		Heatmap:         heatmap,
 		Weeks:           weeks,
 		PendingWrites:   queued,
@@ -184,17 +191,25 @@ func weeklyBars(days []store.DayCount) []weekBar {
 			end = len(days)
 		}
 		bucket := days[i:end]
-		reviews := 0
+		// Articles sums each day's distinct-document count across the week,
+		// so an article reviewed on two different days counts twice — once
+		// per day it was actually touched, which is what "articles this
+		// week" means here, as opposed to "distinct articles this week".
+		var reviews, articles, words int
 		for _, d := range bucket {
 			reviews += d.Reviews
+			articles += d.Articles
+			words += d.Words
 		}
 		if reviews > max {
 			max = reviews
 		}
 		weeks = append(weeks, weekBar{
-			From:    bucket[0].Date,
-			To:      bucket[len(bucket)-1].Date,
-			Reviews: reviews,
+			From:     bucket[0].Date,
+			To:       bucket[len(bucket)-1].Date,
+			Reviews:  reviews,
+			Articles: articles,
+			Words:    words,
 		})
 	}
 	if max == 0 {

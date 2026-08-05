@@ -15,6 +15,7 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -133,11 +134,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /import", s.handleImport)
 	mux.HandleFunc("GET /documents/{id}", s.handleDocument)
 	mux.HandleFunc("POST /documents/{id}/titles", s.handleDocumentTitles)
+	mux.HandleFunc("POST /documents/{id}/chapters", s.handleSetChapters)
 	mux.HandleFunc("GET /documents/{id}/triage", s.handleTriage)
 	mux.HandleFunc("POST /documents/{id}/triage/reset", s.handleTriageReset)
 	mux.HandleFunc("DELETE /documents/{id}", s.handleDeleteDocument)
 	mux.HandleFunc("GET /documents/{id}/images/{imageID}", s.handleDocumentImage)
 	mux.HandleFunc("GET /extracts", s.handleExtracts)
+	mux.HandleFunc("POST /extracts/bulk", s.handleExtractsBulk)
 	mux.HandleFunc("GET /calendar", s.handleCalendar)
 	mux.HandleFunc("GET /calendar/day/{date}", s.handleCalendarDay)
 	mux.HandleFunc("GET /read/{id}", s.handleRead)
@@ -153,6 +156,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /elements/{id}/tags", s.handleAddTag)
 	mux.HandleFunc("POST /elements/{id}/tags/remove", s.handleRemoveTag)
 	mux.HandleFunc("POST /elements/{id}/triage", s.handleTriageDecision)
+	mux.HandleFunc("POST /elements/{id}/annotation", s.handleEditAnnotation)
 	mux.HandleFunc("DELETE /elements/{id}", s.handleDeleteExtract)
 
 	return mux
@@ -543,6 +547,31 @@ var templateFuncs = template.FuncMap{
 	// panel uses, so a list row's reschedule control offers exactly the same
 	// choices — see ir.BacklogOptions.
 	"backlogOptions": ir.BacklogOptions,
+
+	// setParams builds a nav link out of the page's current URL by applying
+	// key/value pairs to its query string — an empty value deletes the key,
+	// anything else sets it — and leaves every other existing param alone.
+	// This is what lets the library and extracts filter/tag/sort links each
+	// change exactly one dimension of the view (elfeed-style presets) without
+	// silently dropping whatever search or other filter was already active,
+	// which building each href by hand used to do.
+	"setParams": func(current string, pairs ...string) string {
+		parsed, err := url.Parse(current)
+		if err != nil {
+			return current
+		}
+		values := parsed.Query()
+		for i := 0; i+1 < len(pairs); i += 2 {
+			key, value := pairs[i], pairs[i+1]
+			if value == "" {
+				values.Del(key)
+			} else {
+				values.Set(key, value)
+			}
+		}
+		parsed.RawQuery = values.Encode()
+		return parsed.String()
+	},
 
 	// level buckets a day's activity count into a handful of discrete shades
 	// for the heatmap grid — a raw count would make two different days look

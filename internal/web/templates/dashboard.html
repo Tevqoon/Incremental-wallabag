@@ -21,6 +21,14 @@
       <span class="tile-value">{{.WeekReviews}}</span>
       <span class="tile-label">reviews this week</span>
     </div>
+    <div class="tile">
+      <span class="tile-value">{{.WeekArticles}}</span>
+      <span class="tile-label">articles this week</span>
+    </div>
+    <div class="tile">
+      <span class="tile-value">{{.WeekWords}}</span>
+      <span class="tile-label">words extracted this week</span>
+    </div>
   </div>
 
   {{if .Preview}}
@@ -136,12 +144,12 @@
       {{range .Heatmap}}
         <a class="heatmap-cell" href="/calendar/day/{{isoDate .Date}}"
            style="--level: {{level .Reviews .Extracts}}"
-           title="{{date .Date}}: {{.Reviews}} reviews, {{.Extracts}} extracts"></a>
+           title="{{date .Date}}: {{.Reviews}} reviews, {{.Extracts}} extracts, {{.Articles}} article{{if ne .Articles 1}}s{{end}}, {{.Words}} word{{if ne .Words 1}}s{{end}}"></a>
       {{end}}
     </div>
     <div class="weekbars">
       {{range .Weeks}}
-        <span class="weekbar" title="{{date .From}}–{{date .To}}: {{.Reviews}} reviews">
+        <span class="weekbar" title="{{date .From}}–{{date .To}}: {{.Reviews}} reviews, {{.Articles}} article{{if ne .Articles 1}}s{{end}}, {{.Words}} word{{if ne .Words 1}}s{{end}}">
           <span style="height: {{.Percent}}%"></span>
         </span>
       {{end}}

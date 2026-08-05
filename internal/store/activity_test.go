@@ -196,6 +196,12 @@ func TestActivityHeatmapBucketsByDay(t *testing.T) {
 	if last.Reviews != 1 || last.Extracts != 1 {
 		t.Errorf("today = %+v, want 1 review and 1 extract", last)
 	}
+	if last.Articles != 1 {
+		t.Errorf("today's articles = %d, want 1 (the one document reviewed)", last.Articles)
+	}
+	if last.Words != 1 {
+		t.Errorf("today's words = %d, want 1 (the one-word extract quote \"mine\")", last.Words)
+	}
 }
 
 // TestActivityOnListsTheDaysEvents covers the calendar's day view: both
@@ -247,6 +253,12 @@ func TestActivityOnListsTheDaysEvents(t *testing.T) {
 	}
 	if extract.Quote != "a passage worth keeping" || extract.DocumentTitle != "Article" {
 		t.Errorf("extract entry = %+v, want its own quote and the parent's title", extract)
+	}
+	if extract.Words != 4 {
+		t.Errorf("extract word count = %d, want 4", extract.Words)
+	}
+	if review.Words != 0 {
+		t.Errorf("review word count = %d, want 0 — a root topic has no quote to count", review.Words)
 	}
 
 	empty, err := db.ActivityOn(ir.Day(now).AddDate(0, 0, -1))

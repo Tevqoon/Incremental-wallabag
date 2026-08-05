@@ -2158,17 +2158,134 @@ func TestExtractsPageOffersRescheduling(t *testing.T) {
 	}
 }
 
+// TestExtractsShowsBulkControls: the extracts page's selection bar and its
+// checkboxes should be reachable by browsing there, not just by a client
+// that already knows /extracts/bulk exists — same guard as
+// TestLibraryShowsBulkControls.
+func TestExtractsShowsBulkControls(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	post(t, server, "/elements/1/extract", url.Values{
+		"start_block": {"0"}, "start_offset": {"4"},
+		"end_block": {"0"}, "end_offset": {"15"}, "quote": {"quick brown"},
+	})
+
+	body := get(t, server, "/extracts").Body.String()
+	if !strings.Contains(body, `id="bulk-form"`) {
+		t.Error("the extracts page has no bulk-form")
+	}
+	if !strings.Contains(body, `name="ids" value="2" form="bulk-form"`) {
+		t.Error("the extract's row has no checkbox tied to the bulk form")
+	}
+	if !strings.Contains(body, `value="delete"`) {
+		t.Error("the bulk bar is missing the delete action")
+	}
+}
+
+// TestExtractsBulkDelete is the mass version of the per-row delete button:
+// several extracts checked at once, all removed in a single request,
+// including queuing the upstream removal for the one that came from wallabag.
+func TestExtractsBulkDelete(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	manualID, err := db.CreateExtract(store.NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "mine", ContentHTML: "<p>mine</p>",
+		Origin: store.OriginManual,
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+	importedID, err := db.CreateExtract(store.NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "theirs", ContentHTML: "<p>theirs</p>",
+		Origin: store.OriginImport, ExternalRef: "h1",
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+
+	response := post(t, server, "/extracts/bulk", url.Values{
+		"action": {"delete"},
+		"ids":    {itoa(manualID), itoa(importedID)},
+	})
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303: %s", response.Code, response.Body.String())
+	}
+	if got := response.Header().Get("Location"); got != "/extracts" {
+		t.Errorf("Location = %q, want /extracts (the default with no redirect field)", got)
+	}
+
+	if _, err := db.ElementByID(manualID); err == nil {
+		t.Error("the manual extract was not deleted")
+	}
+	if _, err := db.ElementByID(importedID); err == nil {
+		t.Error("the imported extract was not deleted")
+	}
+
+	writes, _ := db.PendingWrites("wallabag", 10)
+	var sawHighlightDelete bool
+	for _, write := range writes {
+		if write.Operation == store.OpHighlightDelete && write.ExternalID == "h1" {
+			sawHighlightDelete = true
+		}
+	}
+	if !sawHighlightDelete {
+		t.Errorf("queued writes = %+v, want a highlight_delete for the imported extract", writes)
+	}
+}
+
+// TestExtractsBulkIgnoresRootElements guards the same tampering case
+// handleDeleteExtract already rejects for a single id: the selection bar
+// only ever lists extracts, and a whole article slipped into "ids" — a
+// tampered request, since no checkbox on the page can produce one — must not
+// be treated as one.
+func TestExtractsBulkIgnoresRootElements(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	response := post(t, server, "/extracts/bulk", url.Values{
+		"action": {"delete"},
+		"ids":    {"1"},
+	})
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303: %s", response.Code, response.Body.String())
+	}
+
+	if _, err := db.ElementByID(1); err != nil {
+		t.Errorf("the root article element was deleted: %v", err)
+	}
+}
+
+// TestExtractsBulkRejectsUnknownAction mirrors
+// TestLibraryBulkRejectsUnknownAction for the extracts page's own bulk endpoint.
+func TestExtractsBulkRejectsUnknownAction(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	response := post(t, server, "/extracts/bulk", url.Values{
+		"action": {"launch-the-missiles"},
+		"ids":    {"1"},
+	})
+	if response.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", response.Code)
+	}
+}
+
 // TestDoneArchivesUpstream is what the reader asked for: finishing an article
-// here finishes it in wallabag, so the two views stop drifting. Done also
-// pushes a "done" tag upstream — Dismiss does not, since that is abandoning
-// the article unread rather than actually working through it.
+// here finishes it in wallabag, so the two views stop drifting. Done and
+// Dismiss both archive upstream, but each pushes its own tag too — "done" or
+// "dismissed" — since wallabag's archive flag alone cannot tell "read to the
+// end and annotated" from "abandoned unread" apart.
 func TestDoneArchivesUpstream(t *testing.T) {
-	for _, grade := range []string{"done", "dismiss"} {
-		t.Run(grade, func(t *testing.T) {
+	for _, tc := range []struct {
+		grade string
+		tag   string
+	}{
+		{"done", "done"},
+		{"dismiss", "dismissed"},
+	} {
+		t.Run(tc.grade, func(t *testing.T) {
 			server, db, _ := newTestServer(t, true)
 
 			if response := post(t, server, "/elements/1/grade", url.Values{
-				"grade": {grade},
+				"grade": {tc.grade},
 			}); response.Code != http.StatusSeeOther {
 				t.Fatalf("status = %d", response.Code)
 			}
@@ -2193,32 +2310,70 @@ func TestDoneArchivesUpstream(t *testing.T) {
 					}
 				case store.OpTagAdd:
 					tagAdds++
-					if write.Payload != "done" {
-						t.Errorf("queued tag = %q, want %q", write.Payload, "done")
+					if write.Payload != tc.tag {
+						t.Errorf("queued tag = %q, want %q", write.Payload, tc.tag)
 					}
 				}
 			}
 			if archives != 1 {
 				t.Fatalf("queued %+v, want exactly one archive write", writes)
 			}
-
-			wantTagAdds := 0
-			if grade == "done" {
-				wantTagAdds = 1
-			}
-			if tagAdds != wantTagAdds {
-				t.Errorf("queued %+v, want %d tag_add write(s)", writes, wantTagAdds)
+			if tagAdds != 1 {
+				t.Errorf("queued %+v, want exactly one tag_add write", writes)
 			}
 
 			tags, _ := db.TagsOf(document.ID)
-			hasDoneTag := slices.Contains(tags, "done")
-			if grade == "done" && !hasDoneTag {
-				t.Error("the article was not tagged done locally")
+			if !slices.Contains(tags, tc.tag) {
+				t.Errorf("the article was not tagged %q locally, tags = %v", tc.tag, tags)
 			}
-			if grade == "dismiss" && hasDoneTag {
-				t.Error("dismissing tagged the article done")
+			other := map[string]string{"done": "dismissed", "dismissed": "done"}[tc.tag]
+			if slices.Contains(tags, other) {
+				t.Errorf("grading %q also attached the %q tag", tc.grade, other)
 			}
 		})
+	}
+}
+
+// TestSuspendPushesSuspendedTag: parking an article should be visible
+// upstream too, the same as Done and Dismiss, but without archiving it —
+// suspended material is still unread, just not currently in circulation.
+func TestSuspendPushesSuspendedTag(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if response := post(t, server, "/library/bulk", url.Values{
+		"action": {"suspend"}, "ids": {"1"},
+	}); response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d", response.Code)
+	}
+
+	document, _ := db.DocumentByID(1)
+	if document.IsArchived {
+		t.Error("suspending archived the article; it should stay unread upstream")
+	}
+
+	writes, err := db.PendingWrites("wallabag", 10)
+	if err != nil {
+		t.Fatalf("PendingWrites: %v", err)
+	}
+	var tagAdds int
+	for _, write := range writes {
+		if write.Operation == store.OpArchive {
+			t.Errorf("suspending queued an archive write: %+v", write)
+		}
+		if write.Operation == store.OpTagAdd {
+			tagAdds++
+			if write.Payload != "suspended" {
+				t.Errorf("queued tag = %q, want %q", write.Payload, "suspended")
+			}
+		}
+	}
+	if tagAdds != 1 {
+		t.Errorf("queued %+v, want exactly one tag_add write", writes)
+	}
+
+	tags, _ := db.TagsOf(document.ID)
+	if !slices.Contains(tags, "suspended") {
+		t.Errorf("the article was not tagged suspended locally, tags = %v", tags)
 	}
 }
 
@@ -2466,6 +2621,66 @@ func TestLibraryFilterTabs(t *testing.T) {
 
 	if response := get(t, server, "/library?state=bogus"); response.Code != http.StatusBadRequest {
 		t.Errorf("unknown state filter: status = %d, want 400", response.Code)
+	}
+}
+
+// TestLibrarySorts is TestExtractsPageSorts' counterpart for the library:
+// the same due/priority/oldest choices, now available for documents too
+// instead of just extracts, so the two pages' sort controls actually match.
+func TestLibrarySorts(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "2", Title: "Second article", UpdatedAt: time.Now()},
+	}, 0, time.Now()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Push the second document's root element (id 2) out well past the
+	// first's, so a due-date sort can tell them apart.
+	if response := post(t, server, "/elements/2/backlog", url.Values{"days": {"30"}}); response.Code != http.StatusSeeOther && response.Code != http.StatusOK {
+		t.Fatalf("backlog: status = %d: %s", response.Code, response.Body.String())
+	}
+
+	body := get(t, server, "/library?sort=due").Body.String()
+	if strings.Index(body, "A test article") > strings.Index(body, "Second article") || !strings.Contains(body, "A test article") {
+		t.Errorf("sort=due did not put the soonest-due document first:\n%s", body)
+	}
+	if !strings.Contains(body, `value="due" selected`) {
+		t.Errorf("sort select did not remember sort=due:\n%s", body)
+	}
+
+	if response := get(t, server, "/library?sort=bogus"); response.Code != http.StatusBadRequest {
+		t.Errorf("unknown sort: status = %d, want 400", response.Code)
+	}
+}
+
+// TestLibraryNavPreservesOtherParams covers setParams: switching the state
+// filter must not drop a search or a tag already active, and vice versa —
+// each nav link changes exactly one dimension of the view rather than
+// resetting the others, which is what makes the presets composable with an
+// arbitrary search instead of each being its own dead end.
+func TestLibraryNavPreservesOtherParams(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	body := get(t, server, "/library?q=test&tag=philosophy").Body.String()
+	if !strings.Contains(body, `href="/library?q=test&amp;state=unread&amp;tag=philosophy"`) {
+		t.Errorf("the Unread tab does not preserve the active search and tag:\n%s", body)
+	}
+	if !strings.Contains(body, `href="/library?q=test&amp;tag=philosophy"`) {
+		t.Errorf("the All tab does not preserve the active search and tag:\n%s", body)
+	}
+}
+
+// TestExtractsNavPreservesOtherParams is TestLibraryNavPreservesOtherParams'
+// counterpart for the extracts page: origin, clozes and missing are mutually
+// exclusive, but none of them should touch an active search or sort.
+func TestExtractsNavPreservesOtherParams(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	body := get(t, server, "/extracts?q=test&sort=due").Body.String()
+	if !strings.Contains(body, `href="/extracts?origin=manual&amp;q=test&amp;sort=due"`) {
+		t.Errorf("the Mine tab does not preserve the active search and sort:\n%s", body)
 	}
 }
 

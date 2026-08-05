@@ -19,25 +19,54 @@
     <button type="submit">Search</button>
   </form>
 
+  <!-- Origin, clozes and missing are mutually exclusive tabs — each preset
+       clears the other two as well as setting its own, the same "change one
+       dimension, keep the rest" rule library.html's nav follows, via the
+       same setParams helper. -->
   <nav class="filters">
-    <a href="/extracts?q={{.Query}}&sort={{.Sort}}"
+    <a href="{{setParams .CurrentURL "origin" "" "clozes" "" "missing" ""}}"
        class="{{if and (not .Origin) (not .WithClozes) (not .MissingOnly)}}on{{end}}">All</a>
-    <a href="/extracts?origin=manual&q={{.Query}}&sort={{.Sort}}"
+    <a href="{{setParams .CurrentURL "origin" "manual" "clozes" "" "missing" ""}}"
        class="{{if eq .Origin "manual"}}on{{end}}">Mine</a>
-    <a href="/extracts?origin=import&q={{.Query}}&sort={{.Sort}}"
+    <a href="{{setParams .CurrentURL "origin" "import" "clozes" "" "missing" ""}}"
        class="{{if eq .Origin "import"}}on{{end}}">Imported</a>
-    <a href="/extracts?clozes=1&q={{.Query}}&sort={{.Sort}}"
+    <a href="{{setParams .CurrentURL "clozes" "1" "origin" "" "missing" ""}}"
        class="{{if .WithClozes}}on{{end}}">With clozes</a>
     {{if .Missing}}
-      <a href="/extracts?missing=1&q={{.Query}}&sort={{.Sort}}"
+      <a href="{{setParams .CurrentURL "missing" "1" "origin" "" "clozes" ""}}"
          class="{{if .MissingOnly}}on{{end}}">Missing {{.Missing}}</a>
     {{end}}
   </nav>
 
+  <!-- Same pattern as library.html's own bulk-form: a plain form sitting
+       outside the <ol>, tied to each row's checkbox and to the bulk-bar's
+       buttons via the "form" attribute, so nesting is never an issue and
+       bulk actions work with no JavaScript at all. app.js's selection
+       handling is written generically against #select-all/#bulk-count/
+       input[name="ids"], so it applies here unchanged. -->
+  <form id="bulk-form" method="post" action="/extracts/bulk">
+    <input type="hidden" name="redirect" value="{{.CurrentURL}}">
+  </form>
+
   {{if .Extracts}}
+    <div class="bulk-bar">
+      <label><input type="checkbox" id="select-all"> select all</label>
+      <span id="bulk-count" class="bulk-count"></span>
+      {{range .BulkActions}}
+        <button type="submit" form="bulk-form" name="action" value="{{.Value}}"
+                class="tiny{{if .Danger}} danger{{end}}"
+                {{if .Confirm}}data-confirm="{{.Confirm}}"{{end}}>
+          {{.Label}}
+        </button>
+      {{end}}
+    </div>
+
     <ol class="items">
       {{range .Extracts}}
-        <li class="item is-extract">
+        <li class="item item-selectable is-extract">
+          <input type="checkbox" name="ids" value="{{.ID}}" form="bulk-form"
+                 class="item-select" aria-label="Select extract">
+          <div class="item-body">
           <a class="item-title" href="/read/{{.ID}}">{{.Quote}}</a>
           <div class="item-meta">
             {{if eq .Origin "import"}}<span class="badge">wallabag</span>{{end}}
@@ -81,6 +110,7 @@
                     hx-confirm="Delete this extract?{{if eq .Origin "import"}} It will also be removed from wallabag.{{end}}">
               delete
             </button>
+          </div>
           </div>
         </li>
       {{end}}

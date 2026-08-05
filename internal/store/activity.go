@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -19,6 +20,19 @@ type DayCount struct {
 	Date     time.Time
 	Reviews  int
 	Extracts int
+
+	// Articles is how many distinct documents had a review logged that day —
+	// "how many things did I touch", as opposed to Reviews, which counts
+	// every grade including several on the same article in one sitting.
+	Articles int
+
+	// Words is the word count of every extract harvested that day, summed.
+	// Extracts rather than whole articles: an extract's quote is stored
+	// verbatim plain text (see elements.quote), so this is exact and needs no
+	// HTML parsing, unlike a root topic's content_html. It reads as "how much
+	// did I pull out today" — the incremental-reading counterpart to a
+	// reading-time estimate.
+	Words int
 }
 
 // logActivity records one activity_log row. It takes a dbtx rather than the
@@ -89,13 +103,15 @@ func (s *Store) CurrentStreak(today time.Time) (int, error) {
 // caller can lay out a fixed grid rather than reasoning about gaps.
 func (s *Store) ActivityHeatmap(from, to time.Time) ([]DayCount, error) {
 	rows, err := s.db.Query(`
-		SELECT occurred_on,
-		    SUM(CASE WHEN kind = ? THEN 1 ELSE 0 END),
-		    SUM(CASE WHEN kind = ? THEN 1 ELSE 0 END)
-		FROM activity_log
-		WHERE occurred_on BETWEEN ? AND ?
-		GROUP BY occurred_on`,
-		ActivityReview, ActivityExtract,
+		SELECT a.occurred_on,
+		    SUM(CASE WHEN a.kind = ? THEN 1 ELSE 0 END),
+		    SUM(CASE WHEN a.kind = ? THEN 1 ELSE 0 END),
+		    COUNT(DISTINCT CASE WHEN a.kind = ? THEN e.document_id END)
+		FROM activity_log a
+		JOIN elements e ON e.id = a.element_id
+		WHERE a.occurred_on BETWEEN ? AND ?
+		GROUP BY a.occurred_on`,
+		ActivityReview, ActivityExtract, ActivityReview,
 		from.Format(dateFormat), to.Format(dateFormat),
 	)
 	if err != nil {
@@ -103,12 +119,12 @@ func (s *Store) ActivityHeatmap(from, to time.Time) ([]DayCount, error) {
 	}
 	defer rows.Close()
 
-	type counts struct{ reviews, extracts int }
+	type counts struct{ reviews, extracts, articles int }
 	byDay := map[string]counts{}
 	for rows.Next() {
 		var day string
 		var c counts
-		if err := rows.Scan(&day, &c.reviews, &c.extracts); err != nil {
+		if err := rows.Scan(&day, &c.reviews, &c.extracts, &c.articles); err != nil {
 			return nil, fmt.Errorf("store: activity heatmap: %w", err)
 		}
 		byDay[day] = c
@@ -117,12 +133,55 @@ func (s *Store) ActivityHeatmap(from, to time.Time) ([]DayCount, error) {
 		return nil, fmt.Errorf("store: activity heatmap: %w", err)
 	}
 
+	words, err := s.wordsPerDay(from, to)
+	if err != nil {
+		return nil, err
+	}
+
 	var out []DayCount
 	for day := from; !day.After(to); day = day.AddDate(0, 0, 1) {
-		c := byDay[day.Format(dateFormat)]
-		out = append(out, DayCount{Date: day, Reviews: c.reviews, Extracts: c.extracts})
+		key := day.Format(dateFormat)
+		c := byDay[key]
+		out = append(out, DayCount{
+			Date: day, Reviews: c.reviews, Extracts: c.extracts,
+			Articles: c.articles, Words: words[key],
+		})
 	}
 	return out, nil
+}
+
+// wordsPerDay sums the word count of every extract logged in [from, to],
+// keyed by occurred_on. A quote's word count is computed in Go rather than
+// SQL — SQLite has no word-splitting built in, and the quote is already
+// plain text (see elements.quote), so len(strings.Fields(...)) is exact.
+func (s *Store) wordsPerDay(from, to time.Time) (map[string]int, error) {
+	rows, err := s.db.Query(`
+		SELECT a.occurred_on, e.quote
+		FROM activity_log a
+		JOIN elements e ON e.id = a.element_id
+		WHERE a.kind = ? AND a.occurred_on BETWEEN ? AND ?`,
+		ActivityExtract, from.Format(dateFormat), to.Format(dateFormat),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: words per day: %w", err)
+	}
+	defer rows.Close()
+
+	words := map[string]int{}
+	for rows.Next() {
+		var day, quote string
+		if err := rows.Scan(&day, &quote); err != nil {
+			return nil, fmt.Errorf("store: words per day: %w", err)
+		}
+		words[day] += wordCount(quote)
+	}
+	return words, rows.Err()
+}
+
+// wordCount is the plain word count of a passage of text — split on
+// whitespace, the same way a word processor's count does.
+func wordCount(text string) int {
+	return len(strings.Fields(text))
 }
 
 // dbtx is satisfied by both *sql.DB and *sql.Tx, so the same helper can write
@@ -150,6 +209,10 @@ type ActivityEntry struct {
 	// created — activity_log's own timestamp, for ordering entries within
 	// the day chronologically.
 	OccurredAt time.Time
+
+	// Words is the extract's word count for a Kind == ActivityExtract row,
+	// and 0 for a review — a root topic has no quote of its own to count.
+	Words int
 }
 
 // ActivityOn lists everything that happened on one day — every review graded
@@ -186,6 +249,9 @@ func (s *Store) ActivityOn(day time.Time) ([]ActivityEntry, error) {
 		}
 		nullable.apply(&row.Element)
 		row.OccurredAt = parseTime(occurredAt)
+		if row.Kind == ActivityExtract {
+			row.Words = wordCount(row.Quote)
+		}
 		entries = append(entries, row)
 	}
 	return entries, rows.Err()

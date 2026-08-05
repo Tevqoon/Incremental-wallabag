@@ -1024,6 +1024,61 @@ func (s *Store) AnchorExtract(id int64, position ir.Range, quote, contentHTML st
 	return nil
 }
 
+// UpdateAnnotation saves manual corrections to an extract's own passage, note
+// and chapter — the editor a malformed PDF extraction (OCR noise, a
+// mis-split sentence) or an uncorrected KOReader export often needs, and how
+// a document with no outline of its own gets one by hand.
+//
+// content_html is rebuilt from quote and note the same way an import itself
+// builds it (see annotationHTML), so an edited passage renders exactly as
+// one freshly imported would — except when the element is anchored into an
+// article's own body (start_block set), where content_html is the article's
+// own markup rather than an escaped paragraph, and rewriting it here would
+// quietly downgrade it. The same guard refreshAnnotation applies on
+// re-import; editing a book annotation's passage never encounters it, since
+// those are never anchored in the first place.
+//
+// Scoped to parent_id IS NOT NULL: a document's root topic has no passage or
+// chapter of its own to edit.
+func (s *Store) UpdateAnnotation(id int64, quote, note, chapter string, now time.Time) error {
+	result, err := s.db.Exec(`
+		UPDATE elements SET
+		    quote = ?, note = ?, chapter = ?,
+		    content_html = CASE WHEN start_block IS NULL THEN ? ELSE content_html END,
+		    updated_at = ?
+		WHERE id = ? AND parent_id IS NOT NULL`,
+		quote, note, chapter, annotationHTML(quote, note), formatTime(now), id,
+	)
+	if err != nil {
+		return fmt.Errorf("store: update annotation %d: %w", id, err)
+	}
+	if n, _ := result.RowsAffected(); n == 0 {
+		return fmt.Errorf("store: element %d: %w", id, ErrNotFound)
+	}
+	return nil
+}
+
+// SetAnnotationChapter overrides one annotation's chapter without touching
+// its passage or note — the mass chapter edit's single-row primitive: a
+// document with no outline needs its annotations grouped some other way,
+// commonly a highlight colour standing in for a chapter heading, and this is
+// what a bulk "set chapter" over a checked selection calls once per row.
+//
+// Scoped to parent_id IS NOT NULL, same as UpdateAnnotation.
+func (s *Store) SetAnnotationChapter(id int64, chapter string, now time.Time) error {
+	result, err := s.db.Exec(
+		`UPDATE elements SET chapter = ?, updated_at = ? WHERE id = ? AND parent_id IS NOT NULL`,
+		chapter, formatTime(now), id,
+	)
+	if err != nil {
+		return fmt.Errorf("store: set chapter of element %d: %w", id, err)
+	}
+	if n, _ := result.RowsAffected(); n == 0 {
+		return fmt.Errorf("store: element %d: %w", id, ErrNotFound)
+	}
+	return nil
+}
+
 // Suspend takes an element out of circulation without discarding it.
 //
 // Distinct from Done and Dismiss, which are terminal: a suspended element keeps

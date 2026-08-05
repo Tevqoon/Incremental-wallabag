@@ -158,6 +158,96 @@ func (s *Server) handleDocumentTitles(w http.ResponseWriter, r *http.Request) {
 	s.redirect(w, r, "/documents/"+strconv.FormatInt(id, 10))
 }
 
+// handleEditAnnotation saves manual corrections to one extract's own passage,
+// note and chapter — the editor a malformed PDF extraction (OCR noise, a
+// mis-split sentence) or an uncorrected KOReader export often needs, and how
+// a document with no outline gets one by hand. See Store.UpdateAnnotation.
+func (s *Server) handleEditAnnotation(w http.ResponseWriter, r *http.Request) {
+	id, err := elementID(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+
+	element, err := s.store.ElementByID(id)
+	if err != nil {
+		s.notFoundOrFail(w, err)
+		return
+	}
+	if element.IsRoot() {
+		http.Error(w, "a document itself has no passage to edit", http.StatusBadRequest)
+		return
+	}
+
+	quote := strings.TrimSpace(r.FormValue("quote"))
+	note := strings.TrimSpace(r.FormValue("note"))
+	chapter := strings.TrimSpace(r.FormValue("chapter"))
+	// Same guard insertHighlights applies on import: an annotation with
+	// neither a passage nor a note is not an annotation any more.
+	if quote == "" && note == "" {
+		http.Error(w, "an annotation needs either a passage or a note", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.store.UpdateAnnotation(id, quote, note, chapter, time.Now()); err != nil {
+		s.fail(w, err)
+		return
+	}
+
+	s.redirect(w, r, redirectTarget(r, "/documents/"+strconv.FormatInt(element.DocumentID, 10)))
+}
+
+// handleSetChapters bulk-assigns a chapter to every annotation checked in a
+// document's contents page — the mass chapter edit a document with no
+// outline needs, where a highlight colour or some other manual convention
+// stands in for the headings an outline would otherwise supply.
+func (s *Server) handleSetChapters(w http.ResponseWriter, r *http.Request) {
+	documentID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "bad document id", http.StatusBadRequest)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	chapter := strings.TrimSpace(r.FormValue("chapter"))
+
+	for _, raw := range r.Form["ids"] {
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			continue
+		}
+
+		element, err := s.store.ElementByID(id)
+		if err != nil {
+			if isNotFound(err) {
+				continue
+			}
+			s.fail(w, err)
+			return
+		}
+		// Scoped to this document, same caution handleExtractsBulk applies to
+		// "must be an extract, not a root": a tampered id naming a row in a
+		// different work must not let one document's bulk edit reach across
+		// into another's.
+		if element.IsRoot() || element.DocumentID != documentID {
+			continue
+		}
+
+		if err := s.store.SetAnnotationChapter(id, chapter, time.Now()); err != nil {
+			s.fail(w, err)
+			return
+		}
+	}
+
+	s.redirect(w, r, "/documents/"+strconv.FormatInt(documentID, 10))
+}
+
 // triageData is one step of a document's triage pass.
 type triageData struct {
 	Title    string

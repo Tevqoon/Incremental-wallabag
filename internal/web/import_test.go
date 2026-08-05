@@ -439,6 +439,167 @@ func TestDocumentAuthorFieldHiddenForWallabag(t *testing.T) {
 	}
 }
 
+// TestEditAnnotationSavesCorrections covers the editor a malformed PDF
+// extraction (OCR noise, a mis-split sentence) or an uncorrected KOReader
+// export often needs — the passage, note and chapter are all edited by hand
+// through the same document contents page the annotations already live on.
+func TestEditAnnotationSavesCorrections(t *testing.T) {
+	server, db, _ := newTestServer(t, false)
+	documentID := importedDocumentID(t, server, "triage")
+
+	annotations, err := db.DocumentAnnotations(documentID)
+	if err != nil {
+		t.Fatalf("DocumentAnnotations: %v", err)
+	}
+	target := annotations[0]
+
+	response := post(t, server, "/elements/"+strconv.FormatInt(target.ID, 10)+"/annotation", url.Values{
+		"quote":   {"the painter is standing well back"},
+		"note":    {"corrected OCR noise"},
+		"chapter": {"Las Meninas (corrected)"},
+	})
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303: %s", response.Code, response.Body.String())
+	}
+	if got := response.Header().Get("Location"); got != "/documents/"+strconv.FormatInt(documentID, 10) {
+		t.Errorf("Location = %q, want the document's own contents page", got)
+	}
+
+	edited, err := db.ElementByID(target.ID)
+	if err != nil {
+		t.Fatalf("ElementByID: %v", err)
+	}
+	if edited.Quote != "the painter is standing well back" {
+		t.Errorf("quote = %q, want the edit to have taken", edited.Quote)
+	}
+	if edited.Chapter != "Las Meninas (corrected)" {
+		t.Errorf("chapter = %q, want the edit to have taken", edited.Chapter)
+	}
+
+	body := get(t, server, "/documents/"+strconv.FormatInt(documentID, 10)).Body.String()
+	if !strings.Contains(body, "the painter is standing well back") {
+		t.Errorf("the document page does not show the corrected passage:\n%s", body)
+	}
+	if !strings.Contains(body, "Las Meninas (corrected)") {
+		t.Errorf("the document page does not show the corrected chapter:\n%s", body)
+	}
+}
+
+// TestEditAnnotationRejectsAnEmptyPassageAndNote mirrors the guard
+// insertHighlights applies on import: an annotation with neither a passage
+// nor a note is not an annotation any more, so the editor must not be able
+// to save one into that state.
+func TestEditAnnotationRejectsAnEmptyPassageAndNote(t *testing.T) {
+	server, db, _ := newTestServer(t, false)
+	documentID := importedDocumentID(t, server, "triage")
+	annotations, _ := db.DocumentAnnotations(documentID)
+
+	response := post(t, server, "/elements/"+strconv.FormatInt(annotations[0].ID, 10)+"/annotation", url.Values{
+		"quote": {""}, "note": {""}, "chapter": {"x"},
+	})
+	if response.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", response.Code)
+	}
+}
+
+// TestEditAnnotationRejectsARootElement guards against editing a document's
+// own root topic through this route — it has no passage of its own, and the
+// contents page never offers this form for it.
+func TestEditAnnotationRejectsARootElement(t *testing.T) {
+	server, db, _ := newTestServer(t, false)
+	documentID := importedDocumentID(t, server, "triage")
+	root, err := db.RootElement(documentID)
+	if err != nil {
+		t.Fatalf("RootElement: %v", err)
+	}
+
+	response := post(t, server, "/elements/"+strconv.FormatInt(root.ID, 10)+"/annotation", url.Values{
+		"quote": {"x"},
+	})
+	if response.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", response.Code)
+	}
+}
+
+// TestDocumentOffersAnnotationEditControls guards that the edit forms are
+// actually reachable by browsing the contents page, not just callable by a
+// client that already knows the routes exist.
+func TestDocumentOffersAnnotationEditControls(t *testing.T) {
+	server, _, _ := newTestServer(t, false)
+	documentID := importedDocumentID(t, server, "triage")
+
+	body := get(t, server, "/documents/"+strconv.FormatInt(documentID, 10)).Body.String()
+	if !strings.Contains(body, `action="/elements/`) || !strings.Contains(body, `/annotation"`) {
+		t.Errorf("the document page has no per-annotation edit form:\n%s", body)
+	}
+	if !strings.Contains(body, `id="chapter-form"`) {
+		t.Error("the document page has no mass chapter-edit form")
+	}
+}
+
+// TestSetChaptersBulkAssignsAndScopesToTheDocument is the mass chapter edit:
+// several checked annotations get one chapter in a single request, and an id
+// belonging to a different document — a tampered request, since no checkbox
+// on the page could ever produce one — is ignored rather than honoured.
+func TestSetChaptersBulkAssignsAndScopesToTheDocument(t *testing.T) {
+	server, db, _ := newTestServer(t, false)
+	documentID := importedDocumentID(t, server, "triage")
+	annotations, err := db.DocumentAnnotations(documentID)
+	if err != nil {
+		t.Fatalf("DocumentAnnotations: %v", err)
+	}
+
+	// A second, unrelated work — a different title so it lands as its own
+	// document rather than merging with the first (identity is derived from
+	// title and author; see annotations.documentID).
+	otherResponse := postFile(t, server, "/import", "other.json", []byte(`{
+	  "title": "A Different Book",
+	  "entries": [{"page": 1, "chapter": "One", "text": "an unrelated passage"}]
+	}`), url.Values{"mode": {"triage"}})
+	if otherResponse.Code != http.StatusSeeOther {
+		t.Fatalf("second upload: status %d, body %s", otherResponse.Code, otherResponse.Body.String())
+	}
+	otherDocumentID, err := strconv.ParseInt(
+		strings.TrimPrefix(otherResponse.Header().Get("Location"), "/documents/"), 10, 64)
+	if err != nil {
+		t.Fatalf("second upload redirected to %q, want a document page", otherResponse.Header().Get("Location"))
+	}
+	otherAnnotations, err := db.DocumentAnnotations(otherDocumentID)
+	if err != nil {
+		t.Fatalf("DocumentAnnotations (other): %v", err)
+	}
+
+	response := post(t, server, "/documents/"+strconv.FormatInt(documentID, 10)+"/chapters", url.Values{
+		"chapter": {"Introduction (by colour)"},
+		"ids": {
+			strconv.FormatInt(annotations[0].ID, 10),
+			strconv.FormatInt(annotations[1].ID, 10),
+			strconv.FormatInt(otherAnnotations[0].ID, 10),
+		},
+	})
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303: %s", response.Code, response.Body.String())
+	}
+
+	for _, id := range []int64{annotations[0].ID, annotations[1].ID} {
+		element, err := db.ElementByID(id)
+		if err != nil {
+			t.Fatalf("ElementByID(%d): %v", id, err)
+		}
+		if element.Chapter != "Introduction (by colour)" {
+			t.Errorf("element %d chapter = %q, want the bulk edit to have taken", id, element.Chapter)
+		}
+	}
+
+	untouched, err := db.ElementByID(otherAnnotations[0].ID)
+	if err != nil {
+		t.Fatalf("ElementByID (other): %v", err)
+	}
+	if untouched.Chapter == "Introduction (by colour)" {
+		t.Error("the bulk chapter edit reached into a different document")
+	}
+}
+
 func TestImportRejectsAFileItCannotRead(t *testing.T) {
 	server, _, _ := newTestServer(t, false)
 
