@@ -1,10 +1,13 @@
 package web
 
 import (
+	"net/url"
 	"regexp"
 	"strings"
 
 	"github.com/microcosm-cc/bluemonday"
+	"golang.org/x/net/html"
+	"golang.org/x/net/html/atom"
 )
 
 // invisibleFormatting is the set of Unicode characters that carry no
@@ -46,8 +49,84 @@ func stripInvisibleFormatting(s string) string {
 // from whatever string comes out of here, so stripping later — say, from an
 // already-parsed Block.Text — would shorten it without shortening the DOM
 // node backing it, and silently misalign every offset downstream.
-func (s *Server) sanitize(rawHTML string) string {
-	return stripInvisibleFormatting(s.policy.Sanitize(rewriteEmbeds(rawHTML)))
+//
+// sourceURL is the article's own URL — empty for anything that is not a
+// whole article read at some address (a book annotation, an extract read
+// back through here for offset purposes only). See rewriteSamePageLinks for
+// what it is used for; passed through even when empty, since that rewrite is
+// itself a safe no-op with nothing to compare against.
+func (s *Server) sanitize(rawHTML, sourceURL string) string {
+	preprocessed := rewriteFootnotes(rewriteEmbeds(rawHTML))
+	sanitized := s.policy.Sanitize(preprocessed)
+	return stripInvisibleFormatting(rewriteSamePageLinks(sanitized, sourceURL))
+}
+
+// rewriteSamePageLinks turns a link that only points back into the article's
+// own page — the common shape of a Substack footnote, whose reference and
+// back-link both carry the *article's own URL* plus a fragment — into a bare
+// fragment link, so clicking it jumps within the reader instead of
+// navigating out to the original.
+//
+// Deliberately a pass over already-sanitised HTML, not a rewrite folded into
+// the pre-sanitise step rewriteFootnotes already does. bluemonday's policy
+// disallows relative URLs outright (see newPolicy) precisely so a relative
+// link in an article cannot resolve against increader's own origin — an
+// href written as a bare "#fragment" before sanitising would be stripped by
+// that same rule, not preserved by it. Running after lets the fragment
+// survive: bluemonday has already validated the link's full absolute form
+// as a legitimate http(s) URL, and shortening an already-approved URL down
+// to its fragment introduces nothing a browser could resolve anywhere but
+// the current page.
+func rewriteSamePageLinks(sanitizedHTML, sourceURL string) string {
+	if sourceURL == "" {
+		return sanitizedHTML
+	}
+	source, err := url.Parse(sourceURL)
+	if err != nil {
+		return sanitizedHTML
+	}
+
+	doc, err := html.Parse(strings.NewReader(sanitizedHTML))
+	if err != nil {
+		return sanitizedHTML
+	}
+
+	var walk func(*html.Node)
+	walk = func(node *html.Node) {
+		if node.Type == html.ElementNode && node.DataAtom == atom.A {
+			rewriteHrefIfSamePage(node, source)
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(doc)
+
+	var out strings.Builder
+	if err := html.Render(&out, doc); err != nil {
+		return sanitizedHTML
+	}
+	return out.String()
+}
+
+// rewriteHrefIfSamePage shortens node's href to a bare fragment when it
+// points at the same page as source and carries one — matched on scheme,
+// host and path, ignoring query and fragment, which is what "the same page"
+// means for a link that only differs by which anchor it jumps to.
+func rewriteHrefIfSamePage(node *html.Node, source *url.URL) {
+	for i, attribute := range node.Attr {
+		if attribute.Key != "href" {
+			continue
+		}
+		target, err := url.Parse(attribute.Val)
+		if err != nil || target.Fragment == "" {
+			return
+		}
+		if target.Scheme == source.Scheme && target.Host == source.Host && target.Path == source.Path {
+			node.Attr[i].Val = "#" + target.Fragment
+		}
+		return
+	}
 }
 
 // newPolicy builds the sanitiser applied to every article body before it is
@@ -81,6 +160,14 @@ func newPolicy() *bluemonday.Policy {
 	policy.AllowAttrs("class").
 		Matching(regexp.MustCompile(`^annotation-note$`)).
 		OnElements("p")
+
+	// rewriteFootnotes marks the number it moves to the front of a footnote's
+	// own paragraph with this class, so it can be told apart from the
+	// footnote's text — same reasoning and same narrow scoping as
+	// annotation-note above.
+	policy.AllowAttrs("class").
+		Matching(regexp.MustCompile(`^footnote-number$`)).
+		OnElements("a")
 
 	// Images are worth keeping — many articles are unreadable without their
 	// diagrams. The cost is that loading one tells its host you are reading

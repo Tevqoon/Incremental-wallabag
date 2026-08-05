@@ -230,7 +230,7 @@ func (s *Server) handleTriage(w http.ResponseWriter, r *http.Request) {
 		Document:  document,
 		Element:   element,
 		Counts:    counts,
-		Body:      template.HTML(s.sanitize(element.ContentHTML)),
+		Body:      template.HTML(s.sanitize(element.ContentHTML, document.URL)),
 		Intervals: intervals,
 		Backlog:   ir.BacklogOptions(element.ID),
 	})

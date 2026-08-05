@@ -233,13 +233,13 @@ func elementID(r *http.Request) (int64, error) {
 // Lazy fetching is what makes syncing a large library cheap: the sync stores
 // metadata only, and the body arrives when someone actually reads it.
 func (s *Server) articleHTML(ctx context.Context, element store.Element) (string, error) {
-	if !element.IsRoot() {
-		return s.sanitize(element.ContentHTML), nil
-	}
-
 	document, err := s.store.DocumentByID(element.DocumentID)
 	if err != nil {
 		return "", err
+	}
+
+	if !element.IsRoot() {
+		return s.sanitize(element.ContentHTML, document.URL), nil
 	}
 
 	if !document.HasContent {
@@ -254,7 +254,7 @@ func (s *Server) articleHTML(ctx context.Context, element store.Element) (string
 
 		// Highlights that only arrive with a full fetch are imported here, at
 		// the moment the article is first opened.
-		sanitized := s.sanitize(body)
+		sanitized := s.sanitize(body, document.URL)
 		if err := s.importHighlights(element, sanitized, highlights); err != nil {
 			// A failed import must not stop the article from being read; the
 			// highlights can be imported again on the next open.
@@ -263,7 +263,7 @@ func (s *Server) articleHTML(ctx context.Context, element store.Element) (string
 		}
 	}
 
-	sanitized := s.sanitize(document.ContentHTML)
+	sanitized := s.sanitize(document.ContentHTML, document.URL)
 
 	// Highlights imported during sync have no position, because the listing
 	// that carries them omits the article text. Now that the text is here they

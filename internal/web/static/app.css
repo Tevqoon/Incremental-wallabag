@@ -208,6 +208,16 @@ h1 { font-size: 1.5rem; line-height: 1.25; margin: 0 0 0.35rem; }
 
 #article a { color: var(--accent); }
 
+/* rewriteFootnotes moves a footnote's number to the front of its own
+   paragraph — a label marking which reference it answers, not an ordinary
+   inline link, so it reads as one rather than as more body text. */
+#article a.footnote-number {
+  font-weight: 600;
+  color: var(--muted);
+  text-decoration: none;
+}
+#article a.footnote-number:hover { color: var(--accent); }
+
 /* Blocks that were list items before the reader flattened the article. */
 #article .list-item { padding-left: 1.25rem; position: relative; }
 #article .list-item::before {

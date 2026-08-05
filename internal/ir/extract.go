@@ -136,15 +136,47 @@ func openTag(node *html.Node) string {
 		return "<" + node.Data + ">"
 	}
 
+	href := ""
+	ok := false
 	for _, attribute := range node.Attr {
 		if attribute.Key == "href" && safeURL(attribute.Val) {
-			return `<a href="` + html.EscapeString(attribute.Val) +
-				`" rel="noopener noreferrer" target="_blank">`
+			href, ok = attribute.Val, true
+			break
 		}
 	}
-	// A link whose destination did not survive the check keeps its text but
-	// loses its destination.
-	return "<a>"
+	if !ok {
+		// A link whose destination did not survive the check keeps its text
+		// but loses its destination.
+		return "<a>"
+	}
+
+	var tag strings.Builder
+	tag.WriteString(`<a href="` + html.EscapeString(href) + `"`)
+
+	// A same-page jump — a bare "#fragment" href, the shape
+	// web.rewriteSamePageLinks produces for a footnote that would otherwise
+	// point back at the article's own address — opens in place. Anything
+	// else opens in a new tab, so following a link never navigates the
+	// reader itself away from the article.
+	if !strings.HasPrefix(href, "#") {
+		tag.WriteString(` rel="noopener noreferrer" target="_blank"`)
+	}
+
+	// id and class both already passed the sanitiser's own allowlist before
+	// reaching here — id generally, class only for the couple of literal
+	// values the reader relies on (an annotation's own note, a footnote's
+	// number; see web.newPolicy). Carrying them through is what gives a
+	// same-page href above somewhere to actually land, and lets a footnote
+	// number keep the styling that tells it apart from the footnote's text.
+	if id := attr(node, "id"); id != "" {
+		tag.WriteString(` id="` + html.EscapeString(id) + `"`)
+	}
+	if class := attr(node, "class"); class != "" {
+		tag.WriteString(` class="` + html.EscapeString(class) + `"`)
+	}
+
+	tag.WriteString(">")
+	return tag.String()
 }
 
 // safeURL rejects schemes that can execute, most importantly javascript:.

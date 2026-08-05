@@ -89,7 +89,7 @@ func TestRewriteEmbedsFailsSafely(t *testing.T) {
 func TestSanitizeRewritesTweetEmbeds(t *testing.T) {
 	server := &Server{policy: newPolicy()}
 
-	got := server.sanitize(substackTweetEmbed)
+	got := server.sanitize(substackTweetEmbed, "")
 
 	if !strings.Contains(got, `<blockquote><a href="https://xcancel.com/nabeelqu/status/1"`) {
 		t.Errorf("sanitize did not rewrite the embed, got:\n%s", got)

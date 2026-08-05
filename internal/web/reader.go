@@ -415,8 +415,11 @@ func (s *Server) clozeOffsets(r *http.Request, element store.Element) (int, int,
 	}
 
 	// An extract's own content is the article here, not the document it came
-	// from: the offsets are relative to the passage being clozed.
-	article, err := ir.ParseArticle(s.sanitize(element.ContentHTML))
+	// from: the offsets are relative to the passage being clozed. No source
+	// URL either — this is purely an offset computation, never rendered, so
+	// there is nothing for rewriteSamePageLinks to do and no document worth
+	// a lookup just to hand it one.
+	article, err := ir.ParseArticle(s.sanitize(element.ContentHTML, ""))
 	if err != nil {
 		return 0, 0, err
 	}

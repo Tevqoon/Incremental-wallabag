@@ -189,6 +189,37 @@ func TestRenderMarksExtracts(t *testing.T) {
 	}
 }
 
+// TestRenderSamePageLinksOpenInPlace covers openTag's other job besides
+// hrefs: a bare "#fragment" href — the shape web.rewriteSamePageLinks
+// produces for a footnote that would otherwise point back at the article's
+// own address — must not get target="_blank", or following it would open a
+// second tab just to jump to an anchor on the page already open. id and
+// class survive too, which is what gives that href somewhere to land and
+// lets a footnote's number keep the styling telling it apart from the
+// footnote's text.
+func TestRenderSamePageLinksOpenInPlace(t *testing.T) {
+	article := mustParse(t, `<p><a id="footnote-1" href="#footnote-anchor-1" class="footnote-number">1. </a>It took place in February.</p>`)
+
+	got := article.Render(RenderOptions{ReadPoint: NoReadPoint})
+	want := `<p data-b="0"><a href="#footnote-anchor-1" id="footnote-1" class="footnote-number">1. </a>It took place in February.</p>`
+	if got != want {
+		t.Errorf("got  %s\nwant %s", got, want)
+	}
+}
+
+// TestRenderExternalLinksStillOpenInANewTab is the regression guard beside
+// the test above: an ordinary absolute link is not a same-page jump, and
+// must keep opening in a new tab exactly as before.
+func TestRenderExternalLinksStillOpenInANewTab(t *testing.T) {
+	article := mustParse(t, `<p><a href="https://example.com/x">a link</a></p>`)
+
+	got := article.Render(RenderOptions{ReadPoint: NoReadPoint})
+	want := `<p data-b="0"><a href="https://example.com/x" rel="noopener noreferrer" target="_blank">a link</a></p>`
+	if got != want {
+		t.Errorf("got  %s\nwant %s", got, want)
+	}
+}
+
 // TestRenderMergesOverlappingMarks covers the normal workflow of re-reading a
 // passage and extracting a longer version of it. Nested <mark> elements would
 // render as meaningless darker bands.
