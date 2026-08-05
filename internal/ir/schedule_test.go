@@ -8,61 +8,88 @@ import (
 
 var today = time.Date(2026, 7, 31, 14, 30, 0, 0, time.UTC)
 
+// fuzzSpreadFor mirrors fuzzedIntervalOffset's own spread calculation, so
+// tests can assert "within the fuzz's own bound" instead of duplicating the
+// seed arithmetic and asserting an exact number the fuzz is designed to move.
+func fuzzSpreadFor(scale float64) float64 {
+	return float64(max(minIntervalFuzzSpread, int(math.Round(scale))/intervalFuzzDivisor))
+}
+
 func TestIntervalsGrowByAFactor(t *testing.T) {
 	// A fresh topic at the lowest priority, so nothing is capped and the raw
 	// A-Factor progression is visible.
 	schedule := Schedule{Priority: 1.0}
+	elementID := int64(1)
 
-	want := []float64{30, 60, 120, 240}
-	for repetition, wantInterval := range want {
-		schedule = Next(schedule, GradeNext, today)
+	for repetition := 1; repetition <= 4; repetition++ {
+		prevInterval := schedule.IntervalDays
+		wantRaw := grow(prevInterval, defaultAFactor)
 
-		if !closeEnough(schedule.IntervalDays, wantInterval) {
-			t.Errorf("repetition %d: interval = %.2f, want %.2f",
-				repetition+1, schedule.IntervalDays, wantInterval)
+		schedule = Next(schedule, GradeNext, today, elementID)
+
+		if spread := fuzzSpreadFor(wantRaw); math.Abs(schedule.IntervalDays-wantRaw) > spread {
+			t.Errorf("repetition %d: interval = %.2f, want within %.1f of %.2f",
+				repetition, schedule.IntervalDays, spread, wantRaw)
 		}
-		if schedule.Reps != repetition+1 {
-			t.Errorf("repetition %d: reps = %d", repetition+1, schedule.Reps)
+		if schedule.IntervalDays <= prevInterval {
+			t.Errorf("repetition %d: interval did not grow: %.2f -> %.2f",
+				repetition, prevInterval, schedule.IntervalDays)
+		}
+		if schedule.Reps != repetition {
+			t.Errorf("repetition %d: reps = %d", repetition, schedule.Reps)
 		}
 		if schedule.State != StateReading {
-			t.Errorf("repetition %d: state = %q, want %q", repetition+1, schedule.State, StateReading)
+			t.Errorf("repetition %d: state = %q, want %q", repetition, schedule.State, StateReading)
 		}
 	}
 }
 
 // TestFirstRepetitionIsAMonth: with no history to grow from, Next needs a
 // baseline distinct from Sooner's flat one-day floor, or the two read as the
-// same decision on a topic's very first grade — see firstInterval.
+// same decision on a topic's very first grade — see firstInterval. Fuzz
+// moves it off the exact figure, so this checks the fuzz's own bound rather
+// than the bare constant.
 func TestFirstRepetitionIsAMonth(t *testing.T) {
-	schedule := Next(Schedule{Priority: 1.0}, GradeNext, today)
+	elementID := int64(1)
+	schedule := Next(Schedule{Priority: 1.0}, GradeNext, today, elementID)
 
-	if !closeEnough(schedule.IntervalDays, 30) {
-		t.Errorf("interval = %.2f, want 30", schedule.IntervalDays)
+	if spread := fuzzSpreadFor(firstInterval); math.Abs(schedule.IntervalDays-firstInterval) > spread {
+		t.Errorf("interval = %.2f, want within %.1f of %.0f", schedule.IntervalDays, spread, firstInterval)
 	}
-	want := Day(today).AddDate(0, 0, 30)
+	want := Day(today).AddDate(0, 0, int(math.Round(schedule.IntervalDays)))
 	if !schedule.DueOn.Equal(want) {
 		t.Errorf("due = %v, want %v", schedule.DueOn, want)
 	}
 }
 
-// TestSoonerStaysAFlatDayOnAFreshTopic guards the split TestFirstRepetitionIsAMonth
-// depends on: Sooner never grows past a day just because there is no history
-// yet to halve.
-func TestSoonerStaysAFlatDayOnAFreshTopic(t *testing.T) {
-	schedule := Next(Schedule{Priority: 1.0}, GradeSooner, today)
+// TestSoonerFuzzesFromAFreshTopic guards the split TestFirstRepetitionIsAMonth
+// depends on: Sooner never grows past a handful of days just because there is
+// no history yet to halve. Unlike the backlog's "1d" preset, a fresh topic's
+// flat one-day floor is not a preset a reader chose — see
+// minIntervalFuzzSpread — so it still fuzzes, spread off Next's own growth
+// branch (firstInterval) rather than off Sooner's own tiny raw value.
+func TestSoonerFuzzesFromAFreshTopic(t *testing.T) {
+	elementID := int64(1)
+	schedule := Next(Schedule{Priority: 1.0}, GradeSooner, today, elementID)
 
-	if !closeEnough(schedule.IntervalDays, 1) {
-		t.Errorf("interval = %.2f, want 1", schedule.IntervalDays)
+	if schedule.IntervalDays < minInterval {
+		t.Errorf("interval = %.2f, want at least %.1f", schedule.IntervalDays, minInterval)
+	}
+	if max := 1 + fuzzSpreadFor(firstInterval); schedule.IntervalDays > max {
+		t.Errorf("interval = %.2f, want at most %.1f", schedule.IntervalDays, max)
 	}
 }
 
 func TestSoonerShortensAndSlowsGrowth(t *testing.T) {
 	schedule := Schedule{IntervalDays: 8, AFactor: 2.0, Priority: 1.0}
+	elementID := int64(1)
 
-	got := Next(schedule, GradeSooner, today)
+	got := Next(schedule, GradeSooner, today, elementID)
 
-	if !closeEnough(got.IntervalDays, 4) {
-		t.Errorf("interval = %.3f, want 4 (half of 8)", got.IntervalDays)
+	rawHalf := schedule.IntervalDays / 2
+	growthScale := grow(schedule.IntervalDays, schedule.AFactor)
+	if spread := fuzzSpreadFor(growthScale); math.Abs(got.IntervalDays-rawHalf) > spread {
+		t.Errorf("interval = %.3f, want within %.1f of %.1f (half of 8)", got.IntervalDays, spread, rawHalf)
 	}
 	if got.AFactor >= 2.0 {
 		t.Errorf("A-Factor = %.3f, want it reduced below 2.0", got.AFactor)
@@ -78,7 +105,7 @@ func TestAFactorIsClamped(t *testing.T) {
 	// Repeated Sooner must not collapse to no growth at all.
 	schedule := Schedule{IntervalDays: 100, AFactor: minAFactor, Priority: 1.0}
 	for i := 0; i < 20; i++ {
-		schedule = Next(schedule, GradeSooner, today)
+		schedule = Next(schedule, GradeSooner, today, 1)
 	}
 	if schedule.AFactor < minAFactor {
 		t.Errorf("A-Factor = %.3f, want at least %.3f", schedule.AFactor, minAFactor)
@@ -107,7 +134,7 @@ func TestPriorityCapsTheInterval(t *testing.T) {
 			schedule := Schedule{Priority: test.priority}
 			// Far more repetitions than needed to reach the ceiling.
 			for i := 0; i < 40; i++ {
-				schedule = Next(schedule, GradeNext, today)
+				schedule = Next(schedule, GradeNext, today, 1)
 			}
 			if schedule.IntervalDays > test.wantAtMost {
 				t.Errorf("interval settled at %.1f, want at most %.1f",
@@ -128,8 +155,8 @@ func TestPriorityOrdersIntervals(t *testing.T) {
 	low := Schedule{Priority: 0.9}
 
 	for repetition := 1; repetition <= 15; repetition++ {
-		high = Next(high, GradeNext, today)
-		low = Next(low, GradeNext, today)
+		high = Next(high, GradeNext, today, 1)
+		low = Next(low, GradeNext, today, 1)
 
 		if high.IntervalDays > low.IntervalDays {
 			t.Fatalf("repetition %d: high-priority interval %.1f exceeds low-priority %.1f",
@@ -141,7 +168,7 @@ func TestPriorityOrdersIntervals(t *testing.T) {
 func TestTerminalGrades(t *testing.T) {
 	schedule := Schedule{IntervalDays: 8, AFactor: 2, Reps: 3}
 
-	done := Next(schedule, GradeDone, today)
+	done := Next(schedule, GradeDone, today, 1)
 	if done.State != StateDone {
 		t.Errorf("state = %q, want %q", done.State, StateDone)
 	}
@@ -152,7 +179,7 @@ func TestTerminalGrades(t *testing.T) {
 		t.Error("finished material is still reported as due")
 	}
 
-	dismissed := Next(schedule, GradeDismiss, today)
+	dismissed := Next(schedule, GradeDismiss, today, 1)
 	if dismissed.State != StateDismissed {
 		t.Errorf("state = %q, want %q", dismissed.State, StateDismissed)
 	}
@@ -230,7 +257,7 @@ func TestDayUsesLocalLocation(t *testing.T) {
 func TestZeroValueScheduleGetsDefaults(t *testing.T) {
 	// An element created before a field existed, or read from a row with
 	// defaults, must not produce a zero A-Factor and freeze in place.
-	got := Next(Schedule{}, GradeNext, today)
+	got := Next(Schedule{}, GradeNext, today, 1)
 
 	if got.AFactor < minAFactor {
 		t.Errorf("A-Factor = %.3f, want the default of %.1f", got.AFactor, defaultAFactor)
@@ -364,7 +391,7 @@ func TestSuspendIsReversible(t *testing.T) {
 		State: StateReading, IntervalDays: 8, AFactor: 2.4, Reps: 3, Priority: 0.3,
 	}
 
-	got := Next(schedule, GradeSuspend, today)
+	got := Next(schedule, GradeSuspend, today, 1)
 
 	if got.State != StateSuspended {
 		t.Errorf("state = %q, want %q", got.State, StateSuspended)
@@ -389,7 +416,7 @@ func TestSuspendIsReversible(t *testing.T) {
 
 	// Unlike Done, which also clears the due date, this is not terminal: the
 	// next ordinary grade picks up from the preserved interval.
-	resumed := Next(got, GradeNext, today)
+	resumed := Next(got, GradeNext, today, 1)
 	if resumed.State != StateReading {
 		t.Errorf("resumed state = %q, want %q", resumed.State, StateReading)
 	}
@@ -437,6 +464,11 @@ func TestFormatInterval(t *testing.T) {
 // TestPreviewsMatchWhatNextDoes is the property that makes the button labels
 // trustworthy: the preview is produced by the scheduler, so a button cannot
 // advertise an interval the scheduler would not actually apply.
+//
+// It also covers the invariant fuzzing must not break: Sooner and Next are
+// fuzzed with the same offset (see fuzzedIntervalOffset) precisely so that,
+// whatever elementID the jitter is seeded with, Sooner can never advertise a
+// longer wait than Next on the same schedule.
 func TestPreviewsMatchWhatNextDoes(t *testing.T) {
 	schedules := []Schedule{
 		{},
@@ -446,28 +478,31 @@ func TestPreviewsMatchWhatNextDoes(t *testing.T) {
 	}
 
 	for _, schedule := range schedules {
-		previews := Previews(schedule, today)
+		for elementID := int64(1); elementID <= 30; elementID++ {
+			previews := Previews(schedule, today, elementID)
 
-		for _, grade := range []Grade{GradeNext, GradeSooner} {
-			want := FormatInterval(Next(schedule, grade, today).IntervalDays)
-			if got := previews[grade].Interval; got != want {
-				t.Errorf("schedule %+v grade %d: preview %q, scheduler would give %q",
-					schedule, grade, got, want)
+			for _, grade := range []Grade{GradeNext, GradeSooner} {
+				want := FormatInterval(Next(schedule, grade, today, elementID).IntervalDays)
+				if got := previews[grade].Interval; got != want {
+					t.Errorf("schedule %+v element %d grade %d: preview %q, scheduler would give %q",
+						schedule, elementID, grade, got, want)
+				}
 			}
-		}
 
-		// Sooner must never advertise a longer wait than Next, or the labels
-		// contradict the words on them.
-		sooner := Next(schedule, GradeSooner, today).IntervalDays
-		next := Next(schedule, GradeNext, today).IntervalDays
-		if sooner > next {
-			t.Errorf("schedule %+v: Sooner (%.1f) exceeds Next (%.1f)", schedule, sooner, next)
+			// Sooner must never advertise a longer wait than Next, or the
+			// labels contradict the words on them.
+			sooner := Next(schedule, GradeSooner, today, elementID).IntervalDays
+			next := Next(schedule, GradeNext, today, elementID).IntervalDays
+			if sooner > next {
+				t.Errorf("schedule %+v element %d: Sooner (%.1f) exceeds Next (%.1f)",
+					schedule, elementID, sooner, next)
+			}
 		}
 	}
 }
 
 func TestPreviewsMarkTerminalGrades(t *testing.T) {
-	previews := Previews(Schedule{IntervalDays: 5, AFactor: 2}, today)
+	previews := Previews(Schedule{IntervalDays: 5, AFactor: 2}, today, 1)
 
 	for _, grade := range []Grade{GradeDone, GradeDismiss, GradeSuspend} {
 		if !previews[grade].Terminal {
@@ -492,10 +527,72 @@ func TestBuryLeavesTheScheduleAlone(t *testing.T) {
 		Priority: 0.3, DueOn: today,
 	}
 
-	after := Next(before, GradeBury, today)
+	after := Next(before, GradeBury, today, 1)
 
 	if after != before {
 		t.Errorf("bury changed the schedule:\n got %+v\nwant %+v", after, before)
+	}
+}
+
+// TestIntervalFuzzStaysWithinSpread mirrors TestFuzzedBacklogDaysStaysWithinSpread
+// for the scheduler's own growth: whatever the offset does, it must stay
+// inside the spread fuzzedIntervalOffset itself defines.
+func TestIntervalFuzzStaysWithinSpread(t *testing.T) {
+	scales := []float64{1, 7, 30, 60, 200, 900}
+
+	for _, scale := range scales {
+		spread := fuzzSpreadFor(scale)
+		for elementID := int64(1); elementID <= 200; elementID++ {
+			for reps := 0; reps < 5; reps++ {
+				got := fuzzedIntervalOffset(elementID, reps, scale)
+				if float64(got) < -spread || float64(got) > spread {
+					t.Fatalf("scale %.0f, element %d, reps %d: offset = %d, want in [-%.0f, %.0f]",
+						scale, elementID, reps, got, spread, spread)
+				}
+			}
+		}
+	}
+}
+
+// TestIntervalFuzzSpreadsAcrossElements is the whole point: if every element
+// graded "Next" from a fresh start landed on the same due date, the pile-up
+// the fuzz exists to prevent would happen anyway, just on the grading path
+// instead of the backlog buttons — see TestFuzzedBacklogDaysSpreadsAcrossElements.
+func TestIntervalFuzzSpreadsAcrossElements(t *testing.T) {
+	seen := make(map[float64]bool)
+	for elementID := int64(1); elementID <= 50; elementID++ {
+		graded := Next(Schedule{Priority: 1.0}, GradeNext, today, elementID)
+		seen[graded.IntervalDays] = true
+	}
+	if len(seen) < 5 {
+		t.Errorf("50 elements grading Next from fresh produced only %d distinct intervals, want a real spread", len(seen))
+	}
+}
+
+// TestSoonerFuzzSpreadsAcrossElements is TestIntervalFuzzSpreadsAcrossElements
+// for the left-hand button: fifty readers all hitting Sooner on a fresh topic
+// on the same day must not all land on the exact same tomorrow.
+func TestSoonerFuzzSpreadsAcrossElements(t *testing.T) {
+	seen := make(map[float64]bool)
+	for elementID := int64(1); elementID <= 50; elementID++ {
+		graded := Next(Schedule{Priority: 1.0}, GradeSooner, today, elementID)
+		seen[graded.IntervalDays] = true
+	}
+	if len(seen) < 3 {
+		t.Errorf("50 elements grading Sooner from fresh produced only %d distinct intervals, want a real spread", len(seen))
+	}
+}
+
+// TestIntervalFuzzIsDeterministic: grading the same element from the same
+// schedule must always compute the same interval, or the button's own
+// preview (see TestPreviewsMatchWhatNextDoes) could not promise anything.
+func TestIntervalFuzzIsDeterministic(t *testing.T) {
+	schedule := Schedule{IntervalDays: 8, AFactor: 2.4, Reps: 3, Priority: 0.3}
+	first := Next(schedule, GradeNext, today, 42)
+	for i := 0; i < 5; i++ {
+		if got := Next(schedule, GradeNext, today, 42); got.IntervalDays != first.IntervalDays {
+			t.Fatalf("call %d: got %.2f, want %.2f (same every time)", i, got.IntervalDays, first.IntervalDays)
+		}
 	}
 }
 

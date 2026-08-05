@@ -152,7 +152,7 @@ func (s *Server) handleGrade(w http.ResponseWriter, r *http.Request) {
 func (s *Server) applyGrade(element store.Element, grade ir.Grade) error {
 	// The whole scheduling decision is one pure function call. Everything
 	// stateful — reading the row, writing it back — stays here.
-	updated := ir.Next(element.Schedule, grade, s.today())
+	updated := ir.Next(element.Schedule, grade, s.today(), element.ID)
 
 	if err := s.store.SaveScheduleReviewed(element.ID, updated, time.Now()); err != nil {
 		return err

@@ -219,7 +219,7 @@ func (s *Server) handleTriage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	previews := ir.Previews(element.Schedule, s.today())
+	previews := ir.Previews(element.Schedule, s.today(), element.ID)
 	intervals := map[string]string{
 		"next":   previews[ir.GradeNext].Interval,
 		"sooner": previews[ir.GradeSooner].Interval,
@@ -255,7 +255,7 @@ func (s *Server) handleTriage(w http.ResponseWriter, r *http.Request) {
 // alone: an untriaged import starts suspended (see ImportOptions.Triage),
 // and "keep" is precisely the decision that ends that — the same transition
 // KeepTriaged has always made.
-func triageSchedule(current ir.Schedule, r *http.Request, today time.Time) (ir.Schedule, error) {
+func triageSchedule(current ir.Schedule, r *http.Request, today time.Time, elementID int64) (ir.Schedule, error) {
 	var next ir.Schedule
 
 	if days := r.FormValue("days"); days != "" {
@@ -274,7 +274,7 @@ func triageSchedule(current ir.Schedule, r *http.Request, today time.Time) (ir.S
 		default:
 			return ir.Schedule{}, fmt.Errorf("unknown keep grade %q", r.FormValue("grade"))
 		}
-		computed := ir.Next(current, grade, today)
+		computed := ir.Next(current, grade, today, elementID)
 		next = ir.Backlog(current, int(math.Round(computed.IntervalDays)), today)
 	}
 
@@ -342,7 +342,7 @@ func (s *Server) handleTriageDecision(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if decision == "keep" {
-		schedule, err := triageSchedule(element.Schedule, r, s.today())
+		schedule, err := triageSchedule(element.Schedule, r, s.today(), element.ID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
