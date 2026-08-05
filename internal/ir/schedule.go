@@ -114,10 +114,15 @@ type Schedule struct {
 //
 // It is a pure function: same inputs, same output, no clock and no storage.
 // today is supplied by the caller, which is what makes the day-boundary
-// behaviour testable and keeps the timezone decision in one place.
-func Next(schedule Schedule, grade Grade, today time.Time) Schedule {
+// behaviour testable and keeps the timezone decision in one place. elementID
+// seeds the same kind of jitter FuzzedBacklogDays applies to the backlog
+// presets — see fuzzedIntervalOffset — so that grading many elements "Next"
+// (or "Sooner") on the same day does not pile their due dates onto the exact
+// same future date.
+func Next(schedule Schedule, grade Grade, today time.Time, elementID int64) Schedule {
 	next := schedule
-	next.AFactor = clamp(orDefault(schedule.AFactor, defaultAFactor), minAFactor, maxAFactor)
+	baseAFactor := clamp(orDefault(schedule.AFactor, defaultAFactor), minAFactor, maxAFactor)
+	next.AFactor = baseAFactor
 	next.Priority = clamp(schedule.Priority, 0, 1)
 
 	switch grade {
@@ -141,22 +146,68 @@ func Next(schedule Schedule, grade Grade, today time.Time) Schedule {
 	case GradeBury:
 		// Position within today, not a change of schedule.
 		return schedule
+	}
 
+	// Always the growth branch's value, regardless of which grade is being
+	// applied, so that a Sooner call and a Next call starting from the same
+	// schedule size their jitter identically below — see fuzzedIntervalOffset.
+	growthScale := grow(schedule.IntervalDays, baseAFactor)
+
+	switch grade {
 	case GradeSooner:
-		next.AFactor = clamp(next.AFactor/aFactorStep, minAFactor, maxAFactor)
+		next.AFactor = clamp(baseAFactor/aFactorStep, minAFactor, maxAFactor)
 		// Come back in half the time just waited, rather than growing at all.
 		// Sooner is a request to see this again, so growth would contradict it.
 		next.IntervalDays = math.Max(minInterval, schedule.IntervalDays/2)
 
 	default: // GradeNext
-		next.IntervalDays = grow(schedule.IntervalDays, next.AFactor)
+		next.IntervalDays = growthScale
 	}
+
+	offset := fuzzedIntervalOffset(elementID, schedule.Reps, growthScale)
+	next.IntervalDays = math.Max(minInterval, next.IntervalDays+float64(offset))
 
 	next.IntervalDays = math.Min(next.IntervalDays, priorityCap(next.Priority))
 	next.Reps = schedule.Reps + 1
 	next.State = StateReading
 	next.DueOn = Day(today).AddDate(0, 0, int(math.Round(next.IntervalDays)))
 	return next
+}
+
+// intervalFuzzDivisor mirrors backlogFuzzDivisor: the scheduler's own growth
+// gets the same eighth-of-the-interval jitter the backlog presets do, for
+// the same reason — see FuzzedBacklogDays.
+const intervalFuzzDivisor = 8
+
+// minIntervalFuzzSpread floors the jitter's width at two days rather than
+// letting it shrink to nothing the way FuzzedBacklogDays lets a "1d" preset
+// go unfuzzed. That exception exists there because "1d" is meant to read as
+// an exact, predictable choice; here there is no equivalent preset a reader
+// picked on purpose — Sooner's flat one-day floor and Next's flat
+// firstInterval are just what a fresh topic happens to start at — so a
+// fresh topic's very first grade still needs to spread across elements, not
+// land every reader's Sooner on tomorrow and every reader's Next on the same
+// date one month out.
+const minIntervalFuzzSpread = 2
+
+// fuzzedIntervalOffset is a deterministic, per-element jitter in days, shared
+// by both grade branches of a single Next call rather than sampled
+// separately for each. Sharing one offset is what keeps Sooner's result at
+// or below Next's after fuzzing: Sooner's raw interval is always at or below
+// Next's raw interval (see TestPreviewsMatchWhatNextDoes), and adding the
+// same number to both sides of that inequality can never flip it, where two
+// independently sampled offsets could.
+//
+// scale is always the growth branch's own interval — grow(schedule's
+// interval, its A-Factor) — never whichever branch actually produced
+// next.IntervalDays, so that a Sooner call and a Next call starting from the
+// same schedule and reps compute the identical offset.
+func fuzzedIntervalOffset(elementID int64, reps int, scale float64) int {
+	spread := max(minIntervalFuzzSpread, int(math.Round(scale))/intervalFuzzDivisor)
+	width := int64(2*spread + 1)
+	seed := elementID*2654435761 + int64(reps)*40503 + 15485863
+	offset := int(((seed % width) + width) % width)
+	return offset - spread
 }
 
 // BacklogPreset is one fixed duration offered for putting an element off.
@@ -347,12 +398,14 @@ type Preview struct {
 //
 // It calls Next rather than reimplementing the arithmetic, so a button can
 // never advertise something the scheduler would not actually do — the preview
-// is the behaviour, not a description of it.
-func Previews(schedule Schedule, today time.Time) map[Grade]Preview {
+// is the behaviour, not a description of it. elementID is passed straight
+// through to Next, so the interval a button shows is exactly what grading
+// this element would apply, fuzz included.
+func Previews(schedule Schedule, today time.Time, elementID int64) map[Grade]Preview {
 	previews := make(map[Grade]Preview, 4)
 
 	for _, grade := range []Grade{GradeNext, GradeSooner} {
-		next := Next(schedule, grade, today)
+		next := Next(schedule, grade, today, elementID)
 		previews[grade] = Preview{Grade: grade, Interval: FormatInterval(next.IntervalDays)}
 	}
 

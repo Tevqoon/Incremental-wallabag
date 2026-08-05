@@ -1103,7 +1103,7 @@ func TestQueueRankIsStableAcrossRemovals(t *testing.T) {
 			break
 		}
 	}
-	graded := ir.Next(firstExtract.Schedule, ir.GradeNext, now)
+	graded := ir.Next(firstExtract.Schedule, ir.GradeNext, now, firstExtract.ID)
 	if err := db.SaveSchedule(firstExtract.ID, graded, now); err != nil {
 		t.Fatalf("SaveSchedule: %v", err)
 	}

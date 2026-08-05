@@ -2802,7 +2802,7 @@ func TestGradeButtonsShowTheirIntervals(t *testing.T) {
 
 	element, _ := db.ElementByID(1)
 	for _, grade := range []ir.Grade{ir.GradeNext, ir.GradeSooner} {
-		want := ir.FormatInterval(ir.Next(element.Schedule, grade, time.Now()).IntervalDays)
+		want := ir.FormatInterval(ir.Next(element.Schedule, grade, time.Now(), element.ID).IntervalDays)
 		if !strings.Contains(body, ">"+want+"<") {
 			t.Errorf("the page does not show the interval %q for grade %d", want, grade)
 		}
