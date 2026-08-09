@@ -1,9 +1,10 @@
 // increader — the only hand-written JavaScript in the project.
 //
-// Its whole job is translating a text selection into the coordinates the server
+// Its main job is translating a text selection into the coordinates the server
 // addresses passages by: a block index (the data-b attribute the server put on
 // every paragraph) plus a character offset into that block's text. Everything
-// else is htmx.
+// else is htmx, except the theme toggle at the bottom, which is too small a
+// job to justify a second file.
 
 (function () {
   "use strict";
@@ -493,4 +494,46 @@
       }
     }
   });
+
+  // ---- Theme toggle ---------------------------------------------------
+  //
+  // Three states cycled in one button: device (the plain CSS media query,
+  // no override stored at all), light, dark. The inline script in
+  // layout.html's <head> already applied whatever is in localStorage before
+  // this ran, so init() here only has to make the button's own label agree
+  // with reality — it must never itself decide the theme, or a page loaded
+  // before this script finishes would flash the wrong one.
+  const THEME_CYCLE = [null, "light", "dark"];
+
+  function storedTheme() {
+    const theme = localStorage.getItem("theme");
+    return theme === "light" || theme === "dark" ? theme : null;
+  }
+
+  function themeLabel(theme) {
+    if (theme === "light") return "☀ light";
+    if (theme === "dark") return "☾ dark";
+    return "◐ device";
+  }
+
+  function setTheme(theme) {
+    if (theme) {
+      document.documentElement.dataset.theme = theme;
+      localStorage.setItem("theme", theme);
+    } else {
+      delete document.documentElement.dataset.theme;
+      localStorage.removeItem("theme");
+    }
+    const button = document.getElementById("theme-toggle");
+    if (button) button.textContent = themeLabel(theme);
+  }
+
+  const themeToggle = document.getElementById("theme-toggle");
+  if (themeToggle) {
+    setTheme(storedTheme());
+    themeToggle.addEventListener("click", () => {
+      const next = THEME_CYCLE[(THEME_CYCLE.indexOf(storedTheme()) + 1) % THEME_CYCLE.length];
+      setTheme(next);
+    });
+  }
 })();

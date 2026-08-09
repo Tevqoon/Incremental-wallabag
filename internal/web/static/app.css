@@ -26,6 +26,32 @@
   }
 }
 
+/* An explicit override from the theme toggle, applied as a data attribute
+   rather than a class so the anti-flash script in layout.html's <head> can
+   set it in one line before anything else has run. The attribute selector
+   outranks the plain :root above and the :root inside the media query
+   either way, so this wins regardless of the device's own setting. */
+:root[data-theme="light"] {
+  --bg: #fdfcfa;
+  --fg: #1f1d1a;
+  --muted: #6b6660;
+  --rule: #e3ded6;
+  --accent: #2f6f4e;
+  --mark: #fdf0b8;
+  --mark-edge: #e8d47a;
+  --danger: #9a3b2f;
+}
+:root[data-theme="dark"] {
+  --bg: #161513;
+  --fg: #e8e4dc;
+  --muted: #9a938a;
+  --rule: #2f2c28;
+  --accent: #7fb896;
+  --mark: #4a4322;
+  --mark-edge: #6d6231;
+  --danger: #d98a7c;
+}
+
 * { box-sizing: border-box; }
 
 body {
@@ -66,6 +92,18 @@ main { padding: 1.5rem 1.25rem 6rem; }
 .bar nav { display: flex; flex-wrap: wrap; gap: 1rem; }
 .bar a { color: var(--muted); text-decoration: none; }
 .bar a:hover, .brand { color: var(--fg); }
+
+.theme-toggle {
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.theme-toggle:hover { color: var(--fg); border-color: transparent; }
 
 /* ---- Queue ------------------------------------------------------------ */
 

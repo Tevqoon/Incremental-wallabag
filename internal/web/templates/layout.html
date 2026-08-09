@@ -10,6 +10,19 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>{{.Title}} · increader</title>
   <link rel="stylesheet" href="/static/app.css">
+  <!-- Blocking, not deferred, and ahead of the stylesheet: a stored theme
+       override has to land on <html> before the first paint, or the
+       device's own theme flashes for one frame before this corrects it.
+       app.js (deferred) only wires up the toggle button afterwards; by the
+       time it runs the theme itself is already settled. -->
+  <script>
+    (function () {
+      var theme = localStorage.getItem("theme");
+      if (theme === "light" || theme === "dark") {
+        document.documentElement.dataset.theme = theme;
+      }
+    })();
+  </script>
   <script src="/static/htmx.min.js" defer></script>
   <script src="/static/app.js" defer></script>
 </head>
@@ -24,6 +37,7 @@
       <a href="/library">Library</a>
       <a href="/import">Import</a>
     </nav>
+    <button id="theme-toggle" class="theme-toggle" type="button" title="Cycle the color theme: device, light, dark"></button>
   </header>
 
   <main>
