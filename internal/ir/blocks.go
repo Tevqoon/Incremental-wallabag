@@ -72,6 +72,29 @@ type Image struct {
 	Alt        string
 }
 
+// Table is a block-level table, excluded from the addressable block sequence
+// entirely rather than read as a bag of <td>/<th> paragraphs — a comparison
+// grid has no linear reading order to pull a "passage" out of, the same
+// reasoning that keeps an Image out of the block sequence. Locate only ever
+// searches block text, so a highlight — one already made elsewhere, or a new
+// selection in this reader — can never land inside one; see Render, which
+// renders it verbatim at its original position instead.
+type Table struct {
+	// AfterBlock is the index of the block this table follows in document
+	// order, or -1 if it appears before the article's first block — same
+	// convention as Image.AfterBlock.
+	AfterBlock int
+
+	// Images are every <img> found anywhere inside the table, unresolved —
+	// same shape and purpose as Article.Images(), just collected separately
+	// since a table is never walked by the ordinary block/image collection
+	// that finds the rest (see collectBlocks). Folded into Article.Images()
+	// for the caller, so resolving them costs nothing extra there.
+	Images []Image
+
+	node *html.Node
+}
+
 // Article is a parsed, addressable article.
 //
 // Construct it from the *sanitised* HTML, never the raw source. Sanitising
@@ -83,6 +106,7 @@ type Article struct {
 	root   *html.Node
 	blocks []Block
 	images []Image
+	tables []Table
 }
 
 // ParseArticle parses sanitised article HTML and enumerates its blocks.
@@ -93,18 +117,27 @@ func ParseArticle(sanitizedHTML string) (*Article, error) {
 	}
 
 	article := &Article{root: root}
-	collectBlocks(root, &article.blocks, &article.images)
+	collectBlocks(root, &article.blocks, &article.images, &article.tables)
 	return article, nil
 }
 
 // collectBlocks walks the tree in document order, emitting one block per
 // "leaf block" element: one that is a block tag and contains no block tag.
 // Alongside that, every <img> anywhere in the tree is collected too, tagged
-// with the block it trails — see Image.
+// with the block it trails — see Image — and every <table> is pulled out
+// whole, tagged the same way — see Table.
 //
-// It reports whether the subtree produced any block, which is what lets a
-// parent skip emitting itself when its children already covered the text.
-func collectBlocks(node *html.Node, out *[]Block, images *[]Image) bool {
+// A table is never descended into here: its own <td>/<th> cells would
+// otherwise each look like an ordinary leaf block, which is exactly what
+// used to flatten a grid into a disconnected stream of paragraphs before
+// Table existed. collectImages below still finds whatever the table
+// contains for the image cache's sake, just via its own walk rather than
+// this one.
+//
+// It reports whether the subtree produced any block or table, which is what
+// lets a parent skip emitting itself when its children already covered the
+// text.
+func collectBlocks(node *html.Node, out *[]Block, images *[]Image, tables *[]Table) bool {
 	emitted := false
 	for child := node.FirstChild; child != nil; child = child.NextSibling {
 		if child.Type != html.ElementNode {
@@ -118,7 +151,16 @@ func collectBlocks(node *html.Node, out *[]Block, images *[]Image) bool {
 			})
 			continue
 		}
-		if collectBlocks(child, out, images) {
+		if child.DataAtom == atom.Table {
+			*tables = append(*tables, Table{
+				AfterBlock: len(*out) - 1,
+				Images:     collectImages(child),
+				node:       child,
+			})
+			emitted = true
+			continue
+		}
+		if collectBlocks(child, out, images, tables) {
 			emitted = true
 		}
 	}
@@ -141,6 +183,25 @@ func collectBlocks(node *html.Node, out *[]Block, images *[]Image) bool {
 	return true
 }
 
+// collectImages finds every <img> in a subtree a table's own AfterBlock
+// position already accounts for, so they can still be resolved and cached
+// like any other article image (see web.resolveImages) even though the
+// table itself is opaque to the ordinary block/image walk.
+func collectImages(node *html.Node) []Image {
+	var found []Image
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.ElementNode && n.DataAtom == atom.Img {
+			found = append(found, Image{Src: attr(n, "src"), Alt: attr(n, "alt")})
+		}
+		for child := n.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(node)
+	return found
+}
+
 // attr reads one attribute's value, or "" if the node does not carry it.
 func attr(node *html.Node, key string) string {
 	for _, attribute := range node.Attr {
@@ -155,8 +216,19 @@ func attr(node *html.Node, key string) string {
 func (a *Article) Blocks() []Block { return a.blocks }
 
 // Images returns the article's images, in document order, unresolved — see
-// Image.
-func (a *Article) Images() []Image { return a.images }
+// Image. Includes every image nested inside a table, so a caller resolving
+// this list for RenderOptions.ImageURLs (see web.resolveImages) never has to
+// know tables are handled separately in the first place.
+func (a *Article) Images() []Image {
+	if len(a.tables) == 0 {
+		return a.images
+	}
+	all := append([]Image{}, a.images...)
+	for _, table := range a.tables {
+		all = append(all, table.Images...)
+	}
+	return all
+}
 
 // textContent concatenates every descendant text node, exactly as the DOM
 // property of the same name does.

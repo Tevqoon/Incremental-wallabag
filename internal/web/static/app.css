@@ -244,6 +244,24 @@ h1 { font-size: 1.5rem; line-height: 1.25; margin: 0 0 0.35rem; }
 #article .article-image { text-align: center; }
 #article .article-image img { border-radius: 3px; }
 
+/* ir.renderTable's one wrapper: lets a grid wider than the reader's own
+   prose column scroll sideways in place rather than forcing the whole page
+   wider, the same problem .cloze-preview and #article pre solve the same
+   way for a long unbroken line. */
+#article .table-wrap { overflow-x: auto; }
+#article table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.9rem;
+}
+#article th, #article td {
+  border: 1px solid var(--rule);
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+  vertical-align: top;
+}
+#article th { background: color-mix(in srgb, var(--fg) 5%, transparent); }
+
 #article a { color: var(--accent); }
 
 /* rewriteFootnotes moves a footnote's number to the front of its own

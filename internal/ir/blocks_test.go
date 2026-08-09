@@ -479,3 +479,146 @@ func TestRenderEscapesImageAttributes(t *testing.T) {
 		t.Errorf("image attributes were not escaped:\n%s", out)
 	}
 }
+
+// TestTablesAreNotBlocks: before Table existed, blockTags included td/th, so
+// each cell of a grid became its own disconnected paragraph — a comparison
+// table rendered as an unreadable stream of headers and values with no row
+// or column left to tell them apart. A table must produce zero Blocks now,
+// the same way an image already does.
+func TestTablesAreNotBlocks(t *testing.T) {
+	article := mustParse(t, `<p>Before.</p>`+
+		`<table><tbody><tr><th>Speakers</th><td>83 million</td></tr></tbody></table>`+
+		`<p>After.</p>`)
+
+	blocks := article.Blocks()
+	if len(blocks) != 2 || blocks[0].Text != "Before." || blocks[1].Text != "After." {
+		t.Fatalf("Blocks() = %+v, want exactly the two paragraphs either side of the table", blocks)
+	}
+}
+
+// TestTableRendersAsTable checks the table survives Render as an actual
+// <table>, in place between the blocks it sits among, rather than being
+// dropped or flattened.
+func TestTableRendersAsTable(t *testing.T) {
+	article := mustParse(t, `<p>Before.</p>`+
+		`<table><tbody><tr><th>Speakers</th><td>83 million</td></tr></tbody></table>`+
+		`<p>After.</p>`)
+
+	out := article.Render(RenderOptions{ReadPoint: NoReadPoint})
+
+	beforeAt := strings.Index(out, `data-b="0">Before.`)
+	tableAt := strings.Index(out, `<div class="table-wrap"><table>`)
+	afterAt := strings.Index(out, `data-b="1">After.`)
+	if beforeAt == -1 || tableAt == -1 || afterAt == -1 {
+		t.Fatalf("render did not contain the expected pieces:\n%s", out)
+	}
+	if !(beforeAt < tableAt && tableAt < afterAt) {
+		t.Errorf("table did not land between the two blocks it sits between:\n%s", out)
+	}
+	want := `<tr><th>Speakers</th><td>83 million</td></tr>`
+	if !strings.Contains(out, want) {
+		t.Errorf("Render() = %q, want to contain %q", out, want)
+	}
+}
+
+// TestTableSpanAttributes: colspan/rowspan are what keep a merged header
+// cell honest, so they have to survive; a value that does not look like a
+// small integer must not, since renderTableChild writes it straight into
+// raw HTML rather than trusting the sanitiser already caught it.
+func TestTableSpanAttributes(t *testing.T) {
+	tests := []struct {
+		name string
+		attr string
+		want string
+	}{
+		{"an ordinary colspan survives", `colspan="2"`, `colspan="2"`},
+		{"an ordinary rowspan survives", `rowspan="3"`, `rowspan="3"`},
+		// Single-quoted so the value the HTML tokenizer hands to node.Attr
+		// genuinely contains a literal double quote — if writeSpanAttr ever
+		// stopped re-checking and copied that value straight into the
+		// double-quoted attribute this function itself writes, it would
+		// break out of it and inject onmouseover as a real attribute.
+		{"a value breaking attribute-value context is dropped", `colspan='2" onmouseover="alert(1)'`, ""},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			article := mustParse(t, `<table><tbody><tr><td `+test.attr+`>Cell</td></tr></tbody></table>`)
+			out := article.Render(RenderOptions{ReadPoint: NoReadPoint})
+
+			if test.want != "" && !strings.Contains(out, test.want) {
+				t.Errorf("Render() = %q, want to contain %q", out, test.want)
+			}
+			if test.want == "" && (strings.Contains(out, "colspan") || strings.Contains(out, "onmouseover")) {
+				t.Errorf("Render() = %q, want the malformed attribute dropped entirely", out)
+			}
+		})
+	}
+}
+
+// TestTableImagesAreResolved: an image inside a table must go through the
+// same resolve-and-cache map as any other article image (see
+// web.resolveImages) rather than pointing straight at its original host —
+// the same privacy reasoning renderImage already applies, just reached by a
+// different path since a table is walked separately.
+func TestTableImagesAreResolved(t *testing.T) {
+	article := mustParse(t, `<table><tbody><tr><td><img src="flag.png" alt="Flag"></td></tr></tbody></table>`)
+
+	// Unresolved: dropped, the same as a bare article image with nothing in
+	// ImageURLs.
+	out := article.Render(RenderOptions{ReadPoint: NoReadPoint})
+	if strings.Contains(out, "<img") {
+		t.Errorf("an unresolved table image was rendered anyway:\n%s", out)
+	}
+
+	// Article.Images() has to surface it too, or resolveImages never learns
+	// there was anything here to fetch in the first place.
+	images := article.Images()
+	if len(images) != 1 || images[0].Src != "flag.png" {
+		t.Fatalf("Images() = %+v, want the one image inside the table", images)
+	}
+
+	// Resolved: rendered with the cached address, not the original.
+	out = article.Render(RenderOptions{
+		ReadPoint: NoReadPoint,
+		ImageURLs: map[string]ResolvedImage{"flag.png": {URL: "/documents/1/images/1"}},
+	})
+	if !strings.Contains(out, `<img src="/documents/1/images/1" alt="Flag" loading="lazy">`) {
+		t.Errorf("Render() = %q, want the resolved image inline in the cell", out)
+	}
+}
+
+// TestTableLinksAreSanitized: a link inside a table gets the same href
+// re-check openTag already applies to one inside an ordinary extract —
+// renderTableChild must not have quietly reopened a hole article.HTML
+// already closed just because the surrounding element is a <table> instead
+// of a <p>.
+func TestTableLinksAreSanitized(t *testing.T) {
+	article := mustParse(t, `<table><tbody><tr><td><a href="javascript:alert(1)">Click</a></td></tr></tbody></table>`)
+
+	out := article.Render(RenderOptions{ReadPoint: NoReadPoint})
+	if strings.Contains(out, "javascript:") {
+		t.Errorf("Render() = %q, want the unsafe href dropped", out)
+	}
+	if !strings.Contains(out, "Click") {
+		t.Errorf("Render() = %q, want the link's text to survive even without its href", out)
+	}
+}
+
+// TestTableTextIsNotLocatable documents the trade-off directly: since a
+// table's cells are no longer Blocks, Locate — the mechanism that turns a
+// wallabag/KOReader highlight's quoted text, or a fresh selection in this
+// reader, into a Range — can never find a passage that lives only inside a
+// table. That mirrors an image already being unselectable, and it is the
+// same reasoning: a grid has no "passage" for a highlight to be a substring
+// of. An import that hits this is not silently lost — insertHighlights
+// stores it unanchored, and it renders on its own via annotationHTML rather
+// than in place — but it will not appear as a mark in the table itself.
+func TestTableTextIsNotLocatable(t *testing.T) {
+	article := mustParse(t, `<p>Before.</p>`+
+		`<table><tbody><tr><th>Speakers</th><td>83 million</td></tr></tbody></table>`)
+
+	if _, found := article.Locate("83 million"); found {
+		t.Errorf("Locate found text that only exists inside a table; want it unlocatable")
+	}
+}

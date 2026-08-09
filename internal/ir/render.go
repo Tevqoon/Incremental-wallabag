@@ -1,6 +1,7 @@
 package ir
 
 import (
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -62,10 +63,14 @@ type ResolvedImage struct {
 func (a *Article) Render(options RenderOptions) string {
 	windows := a.windowsByBlock(options.Marks)
 	imagesAfter := a.imagesByBlock()
+	tablesAfter := a.tablesByBlock()
 
 	var out strings.Builder
 	for _, image := range imagesAfter[-1] {
 		renderImage(image, options.ImageURLs, &out)
+	}
+	for _, table := range tablesAfter[-1] {
+		renderTable(table, options.ImageURLs, &out)
 	}
 
 	for _, block := range a.blocks {
@@ -92,6 +97,9 @@ func (a *Article) Render(options RenderOptions) string {
 
 		for _, image := range imagesAfter[block.Index] {
 			renderImage(image, options.ImageURLs, &out)
+		}
+		for _, table := range tablesAfter[block.Index] {
+			renderTable(table, options.ImageURLs, &out)
 		}
 	}
 	return out.String()
@@ -132,6 +140,105 @@ func renderImage(image Image, resolved map[string]ResolvedImage, out *strings.Bu
 		out.WriteString(` width="` + strconv.Itoa(target.Width) + `" height="` + strconv.Itoa(target.Height) + `"`)
 	}
 	out.WriteString(` loading="lazy"></figure>`)
+}
+
+// tablesByBlock groups the article's tables by the block they trail —
+// mirrors imagesByBlock exactly, same reason.
+func (a *Article) tablesByBlock() map[int][]Table {
+	byBlock := make(map[int][]Table, len(a.tables))
+	for _, table := range a.tables {
+		byBlock[table.AfterBlock] = append(byBlock[table.AfterBlock], table)
+	}
+	return byBlock
+}
+
+// renderTable writes one table verbatim from its own sanitised node, wrapped
+// in a horizontally scrollable container so a wide grid cannot force the
+// whole page wider than the reader's own prose column (see .table-wrap in
+// app.css). Unlike a Block, a table is never re-derived from parsed text: a
+// grid has no linear order to flatten it back into without losing exactly
+// the row/column structure this exists to keep.
+func renderTable(table Table, resolved map[string]ResolvedImage, out *strings.Builder) {
+	out.WriteString(`<div class="table-wrap"><table>`)
+	for child := table.node.FirstChild; child != nil; child = child.NextSibling {
+		renderTableChild(child, resolved, out)
+	}
+	out.WriteString(`</table></div>`)
+}
+
+// renderTableChild serialises one node inside a table, recursively. It
+// extends the sanitiser the same trust article.HTML's clip already does for
+// an extract, with the same two exceptions: <img>, which is swapped for its
+// resolved, cached address rather than kept pointing at the original host
+// (see resolveImages), and <a>, whose href openTag re-verifies. Every other
+// tag is emitted by name with no attributes beyond the couple of explicitly
+// allowed ones below — never a raw copy of node.Attr — since this writes raw
+// HTML straight into the page and must not assume the sanitiser upstream
+// already caught everything.
+func renderTableChild(node *html.Node, resolved map[string]ResolvedImage, out *strings.Builder) {
+	if node.Type == html.TextNode {
+		out.WriteString(html.EscapeString(node.Data))
+		return
+	}
+	if node.Type != html.ElementNode {
+		return
+	}
+
+	switch node.DataAtom {
+	case atom.Img:
+		renderInlineImage(Image{Src: attr(node, "src"), Alt: attr(node, "alt")}, resolved, out)
+		return
+	case atom.Br:
+		out.WriteString("<br>")
+		return
+	case atom.A:
+		out.WriteString(openTag(node))
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			renderTableChild(child, resolved, out)
+		}
+		out.WriteString("</a>")
+		return
+	}
+
+	tag := node.Data
+	out.WriteString("<" + tag)
+	if node.DataAtom == atom.Td || node.DataAtom == atom.Th {
+		writeSpanAttr(node, "colspan", out)
+		writeSpanAttr(node, "rowspan", out)
+	}
+	out.WriteString(">")
+	for child := node.FirstChild; child != nil; child = child.NextSibling {
+		renderTableChild(child, resolved, out)
+	}
+	out.WriteString("</" + tag + ">")
+}
+
+// spanAttr matches a colspan/rowspan value the same way bluemonday's own
+// Integer pattern would — re-checked here for the same reason openTag
+// re-checks a link's href: this writes the value straight into raw HTML, so
+// it cannot lean on an upstream guarantee it has no way to verify itself.
+var spanAttr = regexp.MustCompile(`^[0-9]{1,3}$`)
+
+func writeSpanAttr(node *html.Node, name string, out *strings.Builder) {
+	if value := attr(node, name); spanAttr.MatchString(value) {
+		out.WriteString(" " + name + `="` + value + `"`)
+	}
+}
+
+// renderInlineImage is renderImage without the <figure> wrapper: a table
+// cell is not the illustration's own block, just wherever it happens to sit
+// in the grid, and one more level of block structure would only fight the
+// table's own layout. Also unlike renderImage, width/height are left off —
+// the small icons this exists for (flags, glyphs) do not need their box
+// reserved against layout shift the way a full illustration does.
+func renderInlineImage(image Image, resolved map[string]ResolvedImage, out *strings.Builder) {
+	target, ok := resolved[image.Src]
+	if !ok || target.URL == "" {
+		return
+	}
+	out.WriteString(`<img src="` + html.EscapeString(target.URL) + `" alt="`)
+	out.WriteString(html.EscapeString(image.Alt))
+	out.WriteString(`" loading="lazy">`)
 }
 
 // window is a highlighted span within a single block.
