@@ -88,6 +88,32 @@
 
   <div id="article" data-element="{{.Element.ID}}">{{.ArticleHTML}}</div>
 
+  {{if not .Element.IsRoot}}
+    <!-- An anchored extract's #article is the article's own recovered
+         markup (see AnchorExtract), which has nowhere to put a note — so
+         unlike the annotation-note paragraph annotationHTML bakes into an
+         unanchored one's content_html, this has to render from .Element.Note
+         directly. Guarded on HasRange so an unanchored extract, whose note
+         is already inside #article, does not show it twice. -->
+    {{if and .Element.HasRange .Element.Note}}
+      <p class="annotation-note">{{.Element.Note}}</p>
+    {{end}}
+
+    <details class="annotation-edit">
+      <summary>{{if .Element.Note}}edit note{{else}}add note{{end}}</summary>
+      <form method="post" action="/elements/{{.Element.ID}}/annotation">
+        <input type="hidden" name="redirect" value="/read/{{.Element.ID}}">
+        <input type="hidden" name="quote" value="{{.Element.Quote}}">
+        <input type="hidden" name="chapter" value="{{.Element.Chapter}}">
+        <label class="field">
+          <span>Note</span>
+          <textarea name="note" rows="3">{{.Element.Note}}</textarea>
+        </label>
+        <button type="submit" class="tiny">Save</button>
+      </form>
+    </details>
+  {{end}}
+
   {{if .ClozePreview}}
     <section class="clozes">
       <h2>Card</h2>

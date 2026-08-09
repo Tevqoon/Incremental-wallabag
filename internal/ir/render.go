@@ -214,6 +214,17 @@ func renderTag(node *html.Node) (tag, class string) {
 	case atom.Li:
 		return "p", "list-item"
 	default:
+		// store.annotationHTML marks a reader's own note on an imported
+		// passage with this class so it renders visually distinct from the
+		// passage above it — otherwise lost here, since every other <p>
+		// falls through to the same bare default and this is the one place
+		// a class survives sanitising only to be discarded on the way to the
+		// page. bluemonday's policy (see newPolicy) is the only source of an
+		// arbitrary class on a <p> reaching this node at all, so trusting it
+		// here opens nothing wider than what already got through.
+		if attr(node, "class") == "annotation-note" {
+			return "p", "annotation-note"
+		}
 		return "p", ""
 	}
 }

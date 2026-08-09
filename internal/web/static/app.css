@@ -958,10 +958,25 @@ fieldset.field { border: 0; padding: 0; margin-inline: 0; }
   margin-bottom: 1.2rem;
 }
 .triage-body { font-size: 1.1rem; line-height: 1.6; }
-/* The reader's own note under a passage, as annotationHTML marks it up. */
+/* The reader's own note under a passage — either baked into content_html by
+   annotationHTML (inside .triage-body / #article) or, for an anchored
+   extract, rendered by reader.html straight from .Element.Note as a sibling
+   of #article. The label makes explicit what the border alone did not: that
+   this line is the reader's comment, not more of the passage above it. */
 .triage-body .annotation-note,
-#article .annotation-note {
+.reader .annotation-note {
+  margin-top: 1rem;
   color: var(--muted);
   border-left: 2px solid var(--rule);
   padding-left: 0.7rem;
+}
+.triage-body .annotation-note::before,
+.reader .annotation-note::before {
+  content: "Note";
+  display: block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 0.2rem;
 }
