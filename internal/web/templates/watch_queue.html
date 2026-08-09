@@ -1,0 +1,19 @@
+{{define "content"}}
+<div class="top">
+  <h1>Queue</h1>
+  <span class="meta">{{.Due}} due</span>
+</div>
+
+{{if .Items}}
+  {{range .Items}}
+    <a class="item" href="/w/read/{{.ID}}">
+      <span class="item-title">{{if .IsRoot}}{{.DocumentTitle}}{{else}}{{.Title}}{{end}}</span>
+      <span class="item-meta">
+        {{if .IsRoot}}article{{else}}extract{{end}} · {{days .Schedule.IntervalDays}}
+      </span>
+    </a>
+  {{end}}
+{{else}}
+  <p class="empty">Nothing due today.</p>
+{{end}}
+{{end}}

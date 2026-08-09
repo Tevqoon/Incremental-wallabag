@@ -39,6 +39,12 @@ var pageNames = []string{
 	"import.html", "document.html", "triage.html", "calendar.html", "calendar_day.html",
 }
 
+// watchPageNames are the watch-shaped pages under /w — see
+// templates/watch_layout.html for why they parse against their own layout
+// rather than the site's: no htmx, no nav bar, nothing that depends on
+// JavaScript running.
+var watchPageNames = []string{"watch_queue.html", "watch_read.html"}
+
 // Server holds everything the handlers need. Dependencies arrive through this
 // struct rather than package-level variables, so a test can build a Server with
 // its own store and no global setup.
@@ -111,6 +117,16 @@ func New(options Options) (*Server, error) {
 		server.pages[name] = page
 	}
 
+	for _, name := range watchPageNames {
+		page, err := template.New(name).
+			Funcs(templateFuncs).
+			ParseFS(assets, "templates/watch_layout.html", "templates/"+name)
+		if err != nil {
+			return nil, fmt.Errorf("web: parse template %s: %w", name, err)
+		}
+		server.pages[name] = page
+	}
+
 	return server, nil
 }
 
@@ -144,6 +160,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /calendar", s.handleCalendar)
 	mux.HandleFunc("GET /calendar/day/{date}", s.handleCalendarDay)
 	mux.HandleFunc("GET /read/{id}", s.handleRead)
+
+	// The watch-shaped route: no JavaScript, real <form> posts to the same
+	// handlers above. See watch.go and templates/watch_layout.html.
+	mux.HandleFunc("GET /w", s.handleWatchQueue)
+	mux.HandleFunc("GET /w/next", s.handleWatchNext)
+	mux.HandleFunc("GET /w/read/{id}", s.handleWatchRead)
 
 	mux.HandleFunc("POST /elements/{id}/extract", s.handleExtract)
 	mux.HandleFunc("POST /elements/{id}/cloze", s.handleCloze)
