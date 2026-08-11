@@ -2335,8 +2335,10 @@ func TestDoneArchivesUpstream(t *testing.T) {
 }
 
 // TestSuspendPushesSuspendedTag: parking an article should be visible
-// upstream too, the same as Done and Dismiss, but without archiving it —
-// suspended material is still unread, just not currently in circulation.
+// upstream too, the same as Done and Dismiss — suspending takes it out of
+// circulation the same way finishing with it does, so it archives upstream
+// just like Done and Dismiss, and matches unsuspend un-archiving on the way
+// back in.
 func TestSuspendPushesSuspendedTag(t *testing.T) {
 	server, db, _ := newTestServer(t, true)
 
@@ -2347,18 +2349,18 @@ func TestSuspendPushesSuspendedTag(t *testing.T) {
 	}
 
 	document, _ := db.DocumentByID(1)
-	if document.IsArchived {
-		t.Error("suspending archived the article; it should stay unread upstream")
+	if !document.IsArchived {
+		t.Error("suspending did not archive the article upstream")
 	}
 
 	writes, err := db.PendingWrites("wallabag", 10)
 	if err != nil {
 		t.Fatalf("PendingWrites: %v", err)
 	}
-	var tagAdds int
+	var tagAdds, archives int
 	for _, write := range writes {
 		if write.Operation == store.OpArchive {
-			t.Errorf("suspending queued an archive write: %+v", write)
+			archives++
 		}
 		if write.Operation == store.OpTagAdd {
 			tagAdds++
@@ -2366,6 +2368,9 @@ func TestSuspendPushesSuspendedTag(t *testing.T) {
 				t.Errorf("queued tag = %q, want %q", write.Payload, "suspended")
 			}
 		}
+	}
+	if archives != 1 {
+		t.Errorf("queued %+v, want exactly one archive write", writes)
 	}
 	if tagAdds != 1 {
 		t.Errorf("queued %+v, want exactly one tag_add write", writes)

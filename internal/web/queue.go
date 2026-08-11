@@ -178,10 +178,13 @@ func (s *Server) applyGrade(element store.Element, grade ir.Grade) error {
 	// Finishing with an article here means finishing with it in wallabag too.
 	// Without this the two views drift: it disappears from increader's queue
 	// but sits in wallabag's Unread list forever, and the next reader to look
-	// there sees a backlog that is not real.
+	// there sees a backlog that is not real. Suspend counts as finishing with
+	// it for this purpose too — it is the same "out of the queue" outcome as
+	// Done or Dismiss, and matches applyUnsuspend un-archiving on the way
+	// back in, and archived-articles-arrive-suspended on import.
 	//
 	// Only whole articles: an extract has no identity upstream.
-	if element.IsRoot() && (grade == ir.GradeDone || grade == ir.GradeDismiss) {
+	if element.IsRoot() && (grade == ir.GradeDone || grade == ir.GradeDismiss || grade == ir.GradeSuspend) {
 		if err := s.archiveUpstream(element, true); err != nil {
 			return err
 		}
