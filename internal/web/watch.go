@@ -24,15 +24,20 @@ type watchQueueData struct {
 // handleWatchQueue is the watch-shaped counterpart to handleQueue: same
 // data, a layout with no htmx and no nav bar, sized for a wrist rather than
 // a browser window. See templates/watch_layout.html for why it exists.
+//
+// Always the articles queue, never extracts: a wrist is where a reading
+// session gets picked up, not where a harvest gets reviewed, and the watch
+// templates have no tab to choose the other one the way the desktop queue
+// page does — see QueueKind.
 func (s *Server) handleWatchQueue(w http.ResponseWriter, r *http.Request) {
 	today := s.today()
 
-	items, err := s.store.Queue(today, watchQueueLimit)
+	items, err := s.store.Queue(today, store.QueueArticles, watchQueueLimit)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
-	due, err := s.store.CountDue(today)
+	due, err := s.store.CountDue(today, store.QueueArticles)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -49,7 +54,7 @@ func (s *Server) handleWatchQueue(w http.ResponseWriter, r *http.Request) {
 // straight to the most important due element, so grading one on the watch
 // page chains into the next without a stop at the list.
 func (s *Server) handleWatchNext(w http.ResponseWriter, r *http.Request) {
-	items, err := s.store.Queue(s.today(), 1)
+	items, err := s.store.Queue(s.today(), store.QueueArticles, 1)
 	if err != nil {
 		s.fail(w, err)
 		return

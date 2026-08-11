@@ -272,12 +272,11 @@ type triageData struct {
 
 // handleTriage offers the next annotation awaiting a decision.
 //
-// A separate pass from the main queue on purpose. The queue interleaves
-// everything by priority, which is right for reading but wrong for deciding:
-// going through a book's annotations means going through them in the book's
-// own order, one after another, with the chapter you were just in still in
-// mind. And a four-hundred-passage import needs a gate before the queue, not
-// after it.
+// A separate pass from the extract queue on purpose. That queue is ordered by
+// priority, which is right for reviewing but wrong for deciding: going through
+// a book's annotations means going through them in the book's own order, one
+// after another, with the chapter you were just in still in mind. And a
+// four-hundred-passage import needs a gate before the queue, not after it.
 func (s *Server) handleTriage(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {

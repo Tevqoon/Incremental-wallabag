@@ -21,8 +21,15 @@ timezone: Europe/Ljubljana
 # How often sources are polled in the background.
 sync_interval: 30m
 
-# Maximum elements the queue offers in a day.
-daily_limit: 60
+# Maximum rows the queue page renders at once, per queue. 0 means all of them,
+# which is the default.
+#
+# Purely a display cap: "Read next" and every grade always jump to the single
+# most important due element, so this has never limited how much you can read
+# in a day — only how much of the list you can see at once. Worth setting only
+# if a very large backlog makes the page unwieldy; when it does truncate, the
+# page says so rather than quietly showing you a fraction.
+queue_page_limit: 0
 
 # How long before a new extract first comes back — whether made here or
 # imported from a wallabag highlight. Putting one straight back in front of you

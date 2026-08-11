@@ -87,7 +87,7 @@ func TestUpsertCreatesDocumentAndRootTopic(t *testing.T) {
 
 	// The root topic is due today, so a freshly synced article is immediately
 	// readable rather than waiting for a cycle.
-	due, err := db.CountDue(now)
+	due, err := db.CountDue(now, QueueArticles)
 	if err != nil {
 		t.Fatalf("CountDue: %v", err)
 	}
@@ -288,7 +288,7 @@ func TestArchivedDocumentsArriveSuspended(t *testing.T) {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
-	queue, err := db.Queue(now, 10)
+	queue, err := db.Queue(now, QueueArticles, 10)
 	if err != nil {
 		t.Fatalf("Queue: %v", err)
 	}
@@ -299,7 +299,7 @@ func TestArchivedDocumentsArriveSuspended(t *testing.T) {
 		t.Errorf("queued %q, want the unread article", queue[0].Title)
 	}
 
-	due, err := db.CountDue(now)
+	due, err := db.CountDue(now, QueueArticles)
 	if err != nil {
 		t.Fatalf("CountDue: %v", err)
 	}
@@ -338,7 +338,7 @@ func TestArchivingLaterSuspends(t *testing.T) {
 		t.Errorf("reported %d suspended, want 1", result.Suspended)
 	}
 
-	queue, _ := db.Queue(now, 10)
+	queue, _ := db.Queue(now, QueueArticles, 10)
 	if len(queue) != 0 {
 		t.Errorf("archived article is still queued")
 	}
@@ -368,7 +368,7 @@ func TestUnsuspendingSurvivesResync(t *testing.T) {
 		t.Fatalf("second sync: %v", err)
 	}
 
-	queue, _ := db.Queue(now, 10)
+	queue, _ := db.Queue(now, QueueArticles, 10)
 	if len(queue) != 1 {
 		t.Errorf("a re-sync re-suspended an article the reader had queued")
 	}
@@ -460,10 +460,14 @@ func TestHighlightsImportDuringSync(t *testing.T) {
 	}
 
 	// The article stays out of the queue, but its extracts are in it — which is
-	// the entire point of importing them.
-	queue, _ := db.Queue(now, 10)
+	// the entire point of importing them. The two now being separate queues,
+	// that means absent from one and present in the other.
+	queue, _ := db.Queue(now, QueueExtracts, 10)
 	if len(queue) != 2 {
-		t.Errorf("queue holds %d elements, want the two extracts", len(queue))
+		t.Errorf("extract queue holds %d elements, want the two extracts", len(queue))
+	}
+	if articles, _ := db.Queue(now, QueueArticles, 10); len(articles) != 0 {
+		t.Errorf("article queue holds %d elements, want none — the article is archived", len(articles))
 	}
 
 	// Re-syncing must not duplicate them.
@@ -900,11 +904,14 @@ func TestSetDocumentImageDimensionsPreservesEverythingElse(t *testing.T) {
 	}
 }
 
-// TestQueueInterleavesArticlesAndExtracts guards the tie-break. Everything
-// starts at the same default priority, so ordering by id alone would put every
-// article ahead of every extract and you would never reach an extract until the
-// entire reading list was done.
-func TestQueueInterleavesArticlesAndExtracts(t *testing.T) {
+// TestQueueSeparatesArticlesFromExtracts is the split itself: each queue
+// returns its own half of the elements table and nothing of the other's.
+//
+// This replaces the interleave the queue used to perform, which blended the
+// two in proportion to how many of each were due. What it guards now is the
+// property that made that machinery unnecessary — a reader asking for articles
+// gets articles, so no ranking column has to hold the two populations apart.
+func TestQueueSeparatesArticlesFromExtracts(t *testing.T) {
 	db := testStore(t)
 	now := time.Now()
 
@@ -930,109 +937,141 @@ func TestQueueInterleavesArticlesAndExtracts(t *testing.T) {
 		}
 	}
 
-	queue, err := db.Queue(now, 10)
+	articles, err := db.Queue(now, QueueArticles, 50)
 	if err != nil {
-		t.Fatalf("Queue: %v", err)
+		t.Fatalf("Queue(articles): %v", err)
 	}
-	if len(queue) != 10 {
-		t.Fatalf("got %d queued, want 10", len(queue))
+	if len(articles) != 10 {
+		t.Fatalf("article queue holds %d, want 10", len(articles))
 	}
-
-	var articles, extracts int
-	for _, item := range queue {
-		if item.IsRoot() {
-			articles++
-		} else {
-			extracts++
+	for _, item := range articles {
+		if !item.IsRoot() {
+			t.Errorf("extract %d is in the article queue", item.ID)
 		}
 	}
-	if articles == 0 || extracts == 0 {
-		t.Errorf("first 10 of the queue are all one kind (%d articles, %d extracts); "+
-			"articles and extracts are not interleaved", articles, extracts)
+
+	extracts, err := db.Queue(now, QueueExtracts, 50)
+	if err != nil {
+		t.Fatalf("Queue(extracts): %v", err)
+	}
+	if len(extracts) != 10 {
+		t.Fatalf("extract queue holds %d, want 10", len(extracts))
+	}
+	for _, item := range extracts {
+		if item.IsRoot() {
+			t.Errorf("article %d is in the extract queue", item.ID)
+		}
 	}
 
 	// Deterministic: the same query must not reshuffle between page loads.
-	again, _ := db.Queue(now, 10)
-	for i := range queue {
-		if queue[i].ID != again[i].ID {
+	again, _ := db.Queue(now, QueueArticles, 50)
+	for i := range articles {
+		if articles[i].ID != again[i].ID {
 			t.Fatalf("queue order changed between reads at position %d", i)
 		}
 	}
 }
 
-// TestQueueInterleavesProportionallyByCount guards the fair-interleave itself,
-// not just the tie-break: a handful of due articles (priority 0.5) against a
-// pile of due imported highlights (priority 0.6, importedPriority) must not
-// sort into two blocks just because their priorities differ. They should
-// spread through the queue in proportion to how many of each are due — three
-// articles among twenty-seven highlights land roughly every tenth slot, not
-// all three up front.
-func TestQueueInterleavesProportionallyByCount(t *testing.T) {
+// TestQueueRejectsAnUnknownKind: the two kinds partition the table, so a third
+// value is a caller bug rather than a request for everything. Answering it
+// with the whole table would silently undo the split.
+func TestQueueRejectsAnUnknownKind(t *testing.T) {
 	db := testStore(t)
 	now := time.Now()
 
-	highlights := make([]source.Highlight, 0, 27)
-	for i := 1; i <= 27; i++ {
-		highlights = append(highlights, source.Highlight{
-			ExternalID: "h" + strconv.Itoa(i),
-			Quote:      "Highlight " + strconv.Itoa(i),
-			UpdatedAt:  now,
-		})
-	}
-
-	documents := []source.Document{
-		{ExternalID: "1", Title: "Article 1", UpdatedAt: now},
-		{ExternalID: "2", Title: "Article 2", UpdatedAt: now},
-		{ExternalID: "3", Title: "Article 3", UpdatedAt: now},
-		// Archived so its own root topic is suspended and does not itself
-		// enter the queue — only its highlights should, keeping the count at
-		// exactly 3 due articles against 27 due highlights.
-		{ExternalID: "4", Title: "Annotated article", UpdatedAt: now, Highlights: highlights, IsArchived: true},
-	}
-	// delayDays 0 puts every highlight due today, alongside the articles —
-	// this test is about same-day ordering, not the multi-day spread that
-	// ExtractDelayDays already covers.
-	if _, err := db.UpsertDocuments("wallabag", documents, 0, now); err != nil {
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "1", Title: "An article", UpdatedAt: now},
+	}, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
-	queue, err := db.Queue(now, 30)
-	if err != nil {
-		t.Fatalf("Queue: %v", err)
+	if _, err := db.Queue(now, QueueKind("everything"), 10); err == nil {
+		t.Error("Queue accepted an unknown kind")
 	}
-	if len(queue) != 30 {
-		t.Fatalf("got %d queued, want 30", len(queue))
-	}
-
-	var articleIndexes []int
-	for i, item := range queue {
-		if item.IsRoot() {
-			articleIndexes = append(articleIndexes, i)
-		}
-	}
-	if len(articleIndexes) != 3 {
-		t.Fatalf("got %d articles in queue, want 3", len(articleIndexes))
-	}
-
-	// Fair interleave by rank puts the k-th of 3 articles at index
-	// floor((k-0.5)/3 * 30) among 30 due items: 4, 14, 24.
-	want := []int{4, 14, 24}
-	for i, index := range articleIndexes {
-		if index != want[i] {
-			t.Errorf("article %d landed at index %d, want %d (articles: %v); "+
-				"not interleaved in proportion to how many of each are due",
-				i, index, want[i], articleIndexes)
-		}
+	if _, err := db.CountDue(now, QueueKind("")); err == nil {
+		t.Error("CountDue accepted an empty kind — the store takes a resolved kind, not a request value")
 	}
 }
 
-// TestQueueRankIsStableAcrossRemovals guards the actual bug report: grading
-// one extract away used to shrink the denominator for every other extract's
-// fair-interleave fraction, which could jump an unrelated, untouched extract
-// across an article that never moved — reordering the queue for a reason
-// that had nothing to do with that extract. queue_rank is assigned once, on
-// first becoming due, and reading the queue again must not disturb it.
-func TestQueueRankIsStableAcrossRemovals(t *testing.T) {
+// TestExtractQueueHoldsBookAnnotations: a book's own root topic is always
+// suspended, because there is no body to read, so a book reaches the reader
+// only through the extract queue. Its passages arrive suspended too, awaiting
+// triage — and the moment a triage pass keeps one, it has to show up there.
+//
+// This is the case the split is most easily got wrong for: scoping the extract
+// queue to "extracts of articles", or joining through a parent that has to be
+// in circulation itself, would drop every book passage on the floor and leave
+// the queue looking empty for the material there is most of.
+func TestExtractQueueHoldsBookAnnotations(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	work := source.Document{
+		ExternalID: "book-1",
+		Title:      "A book",
+		Author:     "An author",
+		UpdatedAt:  now,
+		Highlights: []source.Highlight{
+			{ExternalID: "b1", Quote: "A passage from chapter one.", Chapter: "One", Ordinal: 1},
+			{ExternalID: "b2", Quote: "A passage from chapter two.", Chapter: "Two", Ordinal: 2},
+		},
+	}
+	// Triage: how an upload of a whole book arrives — parked, not queued.
+	result, err := db.ImportAnnotations(work, ImportOptions{Triage: true}, now)
+	if err != nil {
+		t.Fatalf("ImportAnnotations: %v", err)
+	}
+
+	// Nothing is in either queue yet: the root has no body, the passages are
+	// parked until triaged.
+	if queue, _ := db.Queue(now, QueueArticles, 10); len(queue) != 0 {
+		t.Errorf("article queue holds %d, want none — a book has no readable root", len(queue))
+	}
+	if queue, _ := db.Queue(now, QueueExtracts, 10); len(queue) != 0 {
+		t.Errorf("extract queue holds %d, want none before triage", len(queue))
+	}
+
+	annotations, err := db.DocumentAnnotations(result.DocumentID)
+	if err != nil {
+		t.Fatalf("DocumentAnnotations: %v", err)
+	}
+	if len(annotations) != 2 {
+		t.Fatalf("got %d annotations, want 2", len(annotations))
+	}
+
+	// A triage pass keeps one, through the same call the triage page makes.
+	// State back to new is what ends the suspension an untriaged import starts
+	// in — see triageSchedule, which this mirrors.
+	kept := annotations[0]
+	schedule := ir.Backlog(kept.Schedule, 0, now)
+	schedule.State = ir.StateNew
+	if err := db.KeepTriaged(kept.ID, schedule, now); err != nil {
+		t.Fatalf("KeepTriaged: %v", err)
+	}
+
+	queue, err := db.Queue(now, QueueExtracts, 10)
+	if err != nil {
+		t.Fatalf("Queue(extracts): %v", err)
+	}
+	if len(queue) != 1 {
+		t.Fatalf("extract queue holds %d, want the kept book passage", len(queue))
+	}
+	if queue[0].ID != kept.ID {
+		t.Errorf("queued element %d, want the kept book annotation %d", queue[0].ID, kept.ID)
+	}
+	if queue[0].DocumentTitle != "A book" {
+		t.Errorf("queued passage reports document %q, want %q", queue[0].DocumentTitle, "A book")
+	}
+}
+
+// TestQueueOrderIsStableAcrossRemovals guards the property that retired
+// queue_rank. Ordering used to be computed against the rest of the due
+// population — a fraction whose denominator shrank every time anything was
+// graded away — so removing one element could jump two untouched ones past
+// each other. Every ordering term is now a value on the row itself, and this
+// is the test that says so: grade the head of the queue away, and everything
+// behind it must keep its exact relative order.
+func TestQueueOrderIsStableAcrossRemovals(t *testing.T) {
 	db := testStore(t)
 	now := time.Now()
 
@@ -1053,84 +1092,105 @@ func TestQueueRankIsStableAcrossRemovals(t *testing.T) {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
-	before, err := db.Queue(now, 30)
+	before, err := db.Queue(now, QueueExtracts, 30)
 	if err != nil {
 		t.Fatalf("Queue: %v", err)
 	}
-	if len(before) != 9 {
-		t.Fatalf("got %d queued, want 9 (2 articles + 7 highlights)", len(before))
+	if len(before) != 7 {
+		t.Fatalf("got %d queued, want the 7 highlights", len(before))
 	}
 
-	// Record, for every extract, whether each article was ahead of or behind
-	// it — the relationship the fix must preserve.
-	type relation struct {
-		articleID, extractID int64
-		extractFirst         bool
-	}
-	var articleIDs []int64
-	for _, item := range before {
-		if item.IsRoot() {
-			articleIDs = append(articleIDs, item.ID)
-		}
-	}
-	order := func(queue []QueueItem) map[int64]int {
-		positions := make(map[int64]int, len(queue))
-		for i, item := range queue {
-			positions[item.ID] = i
-		}
-		return positions
-	}
-	beforePositions := order(before)
-	var relations []relation
-	for _, item := range before {
-		if item.IsRoot() {
-			continue
-		}
-		for _, articleID := range articleIDs {
-			relations = append(relations, relation{
-				articleID: articleID, extractID: item.ID,
-				extractFirst: beforePositions[item.ID] < beforePositions[articleID],
-			})
-		}
-	}
-
-	// Grade away the first-ranked extract — the one furthest toward the
-	// front — exactly like pressing "Next" on the top item in the queue.
-	var firstExtract Element
-	for _, item := range before {
-		if !item.IsRoot() {
-			firstExtract = item.Element
-			break
-		}
-	}
-	graded := ir.Next(firstExtract.Schedule, ir.GradeNext, now, firstExtract.ID)
-	if err := db.SaveSchedule(firstExtract.ID, graded, now); err != nil {
+	// Grade away the head of the queue, exactly like pressing "Next" on the
+	// top item.
+	head := before[0].Element
+	graded := ir.Next(head.Schedule, ir.GradeNext, now, head.ID)
+	if err := db.SaveSchedule(head.ID, graded, now); err != nil {
 		t.Fatalf("SaveSchedule: %v", err)
 	}
 
-	after, err := db.Queue(now, 30)
+	after, err := db.Queue(now, QueueExtracts, 30)
 	if err != nil {
 		t.Fatalf("Queue (after grading): %v", err)
 	}
-	if len(after) != 8 {
-		t.Fatalf("got %d queued after grading, want 8", len(after))
-	}
-	for _, item := range after {
-		if item.ID == firstExtract.ID {
-			t.Fatalf("graded extract %d is still in the queue", firstExtract.ID)
-		}
+	if len(after) != 6 {
+		t.Fatalf("got %d queued after grading, want 6", len(after))
 	}
 
-	afterPositions := order(after)
-	for _, rel := range relations {
-		if rel.extractID == firstExtract.ID {
-			continue // the one element that is supposed to be gone
+	for i, item := range after {
+		if item.ID != before[i+1].ID {
+			t.Fatalf("position %d holds element %d, want %d — grading the head "+
+				"reordered what was behind it", i, item.ID, before[i+1].ID)
 		}
-		nowExtractFirst := afterPositions[rel.extractID] < afterPositions[rel.articleID]
-		if nowExtractFirst != rel.extractFirst {
-			t.Errorf("extract %d vs article %d: was extractFirst=%v, now extractFirst=%v — "+
-				"an untouched extract crossed an article just from a different extract leaving the queue",
-				rel.extractID, rel.articleID, rel.extractFirst, nowExtractFirst)
+	}
+}
+
+// TestBuryIsPerQueue: "later today" moves an element to the back of its own
+// queue and must leave the other one alone. The bury terms live inside the
+// kind-filtered read, so skipping through a pile of extracts cannot disturb
+// the order a reading session was working through.
+func TestBuryIsPerQueue(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	highlights := make([]source.Highlight, 0, 3)
+	for i := 1; i <= 3; i++ {
+		highlights = append(highlights, source.Highlight{
+			ExternalID: "h" + strconv.Itoa(i),
+			Quote:      "Highlight " + strconv.Itoa(i),
+			UpdatedAt:  now,
+		})
+	}
+	documents := []source.Document{
+		{ExternalID: "1", Title: "Article 1", UpdatedAt: now},
+		{ExternalID: "2", Title: "Article 2", UpdatedAt: now},
+		{ExternalID: "3", Title: "Annotated", UpdatedAt: now, Highlights: highlights, IsArchived: true},
+	}
+	if _, err := db.UpsertDocuments("wallabag", documents, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	ids := func(items []QueueItem) []int64 {
+		out := make([]int64, len(items))
+		for i, item := range items {
+			out[i] = item.ID
+		}
+		return out
+	}
+
+	articlesBefore, _ := db.Queue(now, QueueArticles, 10)
+	extractsBefore, _ := db.Queue(now, QueueExtracts, 10)
+	if len(articlesBefore) != 2 || len(extractsBefore) != 3 {
+		t.Fatalf("got %d articles and %d extracts, want 2 and 3",
+			len(articlesBefore), len(extractsBefore))
+	}
+	wantArticles := ids(articlesBefore)
+
+	// Skip the head of the extract queue.
+	buried := extractsBefore[0].ID
+	if err := db.Bury(buried, now.Add(time.Second)); err != nil {
+		t.Fatalf("Bury: %v", err)
+	}
+
+	extractsAfter, _ := db.Queue(now, QueueExtracts, 10)
+	if len(extractsAfter) != 3 {
+		t.Fatalf("burying dropped an extract from today: %d remain", len(extractsAfter))
+	}
+	if extractsAfter[len(extractsAfter)-1].ID != buried {
+		t.Errorf("buried extract sits at position %d of its queue, want last",
+			indexOfElement(extractsAfter, buried))
+	}
+
+	// The reading queue never saw it.
+	articlesAfter, _ := db.Queue(now, QueueArticles, 10)
+	got := ids(articlesAfter)
+	if len(got) != len(wantArticles) {
+		t.Fatalf("article queue changed size after burying an extract: %v, want %v",
+			got, wantArticles)
+	}
+	for i := range wantArticles {
+		if got[i] != wantArticles[i] {
+			t.Fatalf("article queue reordered after burying an extract: %v, want %v",
+				got, wantArticles)
 		}
 	}
 }
@@ -1517,14 +1577,14 @@ func TestBurySinksWithinTodayAndClearsItself(t *testing.T) {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
-	first, _ := db.Queue(now, 10)
+	first, _ := db.Queue(now, QueueArticles, 10)
 	buried := first[0].ID
 
 	if err := db.Bury(buried, now); err != nil {
 		t.Fatalf("Bury: %v", err)
 	}
 
-	after, _ := db.Queue(now, 10)
+	after, _ := db.Queue(now, QueueArticles, 10)
 	if len(after) != 4 {
 		t.Fatalf("burying removed the element from today: %d remain", len(after))
 	}
@@ -1535,7 +1595,7 @@ func TestBurySinksWithinTodayAndClearsItself(t *testing.T) {
 
 	// Tomorrow it is ordinary again — the date stops matching, so nothing has
 	// to be cleared and nothing can stay buried by accident.
-	tomorrow, _ := db.Queue(now.AddDate(0, 0, 1), 10)
+	tomorrow, _ := db.Queue(now.AddDate(0, 0, 1), QueueArticles, 10)
 	if tomorrow[len(tomorrow)-1].ID == buried && len(tomorrow) > 1 {
 		if first[0].ID == buried {
 			t.Error("the element is still sorted last a day after being buried")
@@ -1563,7 +1623,7 @@ func TestRepeatedBuryIsARoundRobinNotAFixedCycle(t *testing.T) {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
-	first, err := db.Queue(now, 10)
+	first, err := db.Queue(now, QueueArticles, 10)
 	if err != nil || len(first) != 4 {
 		t.Fatalf("Queue: got %d elements, err %v", len(first), err)
 	}
@@ -1579,7 +1639,7 @@ func TestRepeatedBuryIsARoundRobinNotAFixedCycle(t *testing.T) {
 
 	assertOrder := func(t *testing.T, want []int64) {
 		t.Helper()
-		got, err := db.Queue(now, 10)
+		got, err := db.Queue(now, QueueArticles, 10)
 		if err != nil {
 			t.Fatalf("Queue: %v", err)
 		}
@@ -1644,7 +1704,7 @@ func TestExtractsAreDueLater(t *testing.T) {
 	}
 
 	// It is therefore not in today's queue — only the article is.
-	queue, _ := db.Queue(now, 10)
+	queue, _ := db.Queue(now, QueueArticles, 10)
 	if len(queue) != 1 {
 		t.Errorf("queue holds %d elements, want only the article", len(queue))
 	}
@@ -1701,7 +1761,7 @@ func TestImportedHighlightsSpreadAcrossTheWindow(t *testing.T) {
 	}
 
 	// And none of them are due today, which is the point of the delay.
-	due, _ := db.CountDue(now)
+	due, _ := db.CountDue(now, QueueArticles)
 	if due != 40 {
 		t.Errorf("%d due today, want just the 40 articles", due)
 	}

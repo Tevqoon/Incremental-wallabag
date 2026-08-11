@@ -139,6 +139,59 @@ type QueueItem struct {
 	ReadingTime   int
 }
 
+// QueueKind names one of the two queues.
+//
+// The two partition the elements table exactly — a root element is a whole
+// document, everything else was harvested out of one — so there is no third
+// value and deliberately no "both". A combined read would have to decide how
+// to order two populations against each other, and ordering them by priority
+// alone sorts them into blocks: every article (defaultPriority) ahead of every
+// imported highlight (importedPriority), which is the failure the queue used
+// to spend a whole ranking column avoiding. Keeping them apart is what makes
+// that column unnecessary rather than merely unused.
+type QueueKind string
+
+const (
+	// QueueArticles is the reading queue: whole documents.
+	QueueArticles QueueKind = "articles"
+
+	// QueueExtracts is the review queue: passages taken from a document,
+	// whichever route they arrived by. A book's own root topic is always
+	// suspended (there is no body to read — see importAnnotations), so a
+	// book contributes only to this queue, and its passages join it as soon
+	// as a triage pass unsuspends them.
+	QueueExtracts QueueKind = "extracts"
+)
+
+// predicate returns the SQL that selects this queue's half of the elements
+// table, aliased e.
+//
+// A fixed string literal per kind, never a value spliced in from a request:
+// the caller's job is to reject an unknown kind, which ParseQueueKind does,
+// and this errors rather than silently widening if one gets through anyway.
+func (k QueueKind) predicate() (string, error) {
+	switch k {
+	case QueueArticles:
+		return "e.parent_id IS NULL", nil
+	case QueueExtracts:
+		return "e.parent_id IS NOT NULL", nil
+	}
+	return "", fmt.Errorf("store: unknown queue kind %q", string(k))
+}
+
+// ParseQueueKind maps a request's own spelling of a queue onto one, defaulting
+// to the articles queue when nothing was asked for — the queue a reading
+// session starts in.
+func ParseQueueKind(value string) (QueueKind, bool) {
+	switch value {
+	case "", string(QueueArticles):
+		return QueueArticles, true
+	case string(QueueExtracts):
+		return QueueExtracts, true
+	}
+	return "", false
+}
+
 // elementColumns is shared by every read so the scan order cannot drift apart
 // from the query.
 const elementColumns = `
@@ -208,41 +261,53 @@ func (n nullableElement) apply(element *Element) {
 	element.TriagedAt = parseTime(n.triagedAt)
 }
 
-// Queue returns the elements due on the given day, most important first.
+// Queue returns one queue's elements due on the given day, most important
+// first.
 //
-// This is the whole scheduling read path. Because topics and items live in
-// the same table, articles and extracts interleave with no merging step —
-// which is exactly SuperMemo's behaviour and the reason the schema unifies
-// them.
+// This is the whole scheduling read path, and it reads exactly one of the two
+// queues — see QueueKind for why there is no combined mode.
 //
-// The ordering itself lives in queue_rank, a column rather than a computed
-// value — see assignQueueRanks for why. Here it is just one more ORDER BY
-// term, alongside priority, due date and a hash as tie-breaks for whatever
-// (rarely) shares a rank.
+// Ordering is priority, then due date, then a hash of the id. Every term is a
+// value on the row itself, which is what makes the order stable as the queue
+// drains: grading one element away cannot move any other, because nothing here
+// is computed relative to the rest of the population. (It once was, and that
+// is precisely what went wrong — see migration 017.) The hash is a
+// multiplicative scramble rather than the id itself, so that a batch of
+// highlights imported together, all sharing a priority, does not simply come
+// back in insertion order with the oldest import always first.
 //
 // Anything buried today sorts behind everything else still due, so working
 // through the rest of the queue brings it back around rather than losing it for
 // the day. Within that bucket, whichever was buried longest ago comes back
-// first — a round robin, keyed on buried_at rather than queue_rank, so
-// burying the same element again always sends it to the very back of the
-// line again rather than leaving it wherever it already was. Without this,
-// once everything due had been buried once, the bucket's internal order
-// collapsed back to queue_rank and every later "skip" replayed the exact
-// same sequence from the top, forever.
-func (s *Store) Queue(day time.Time, limit int) ([]QueueItem, error) {
-	if err := s.assignQueueRanks(day); err != nil {
+// first — a round robin keyed on buried_at, so burying the same element again
+// always sends it to the very back of the line rather than leaving it wherever
+// it already was. Because the bury terms sit inside this kind-filtered query,
+// "later today" is per queue: skipping an extract cycles it through the extract
+// queue and leaves the reading queue's order untouched.
+// A limit of zero or less returns everything due, which is the default: SQLite
+// treats a negative LIMIT as no limit, so the two are the same query. Callers
+// pass a cap when they are rendering a bounded list (a preview, a page the
+// reader asked to trim), never to decide how much reading a day contains —
+// nothing here has ever done that.
+func (s *Store) Queue(day time.Time, kind QueueKind, limit int) ([]QueueItem, error) {
+	predicate, err := kind.predicate()
+	if err != nil {
 		return nil, err
+	}
+	if limit <= 0 {
+		limit = -1
 	}
 
 	rows, err := s.db.Query(`
 		SELECT `+elementColumns+`, COALESCE(NULLIF(d.display_title, ''), d.title), d.url, d.reading_time
 		FROM elements e
 		JOIN documents d ON d.id = e.document_id
-		WHERE e.state NOT IN ('done', 'dismissed', 'suspended')
+		WHERE `+predicate+`
+		  AND e.state NOT IN ('done', 'dismissed', 'suspended')
 		  AND (e.due_on IS NULL OR e.due_on <= ?)
 		ORDER BY (CASE WHEN e.buried_on = ? THEN 1 ELSE 0 END) ASC,
 		         (CASE WHEN e.buried_on = ? THEN e.buried_at END) ASC,
-		         e.queue_rank ASC, e.priority ASC, e.due_on ASC,
+		         e.priority ASC, e.due_on ASC,
 		         (e.id * 2654435761) % 1000003 ASC
 		LIMIT ?`,
 		day.Format(dateFormat), day.Format(dateFormat), day.Format(dateFormat), limit,
@@ -268,54 +333,6 @@ func (s *Store) Queue(day time.Time, limit int) ([]QueueItem, error) {
 		queue = append(queue, item)
 	}
 	return queue, rows.Err()
-}
-
-// assignQueueRanks fills in queue_rank for any due, non-terminal element that
-// does not have one yet — an element newly due since the last read, or one
-// whose schedule just changed and had its rank cleared (see SaveSchedule).
-//
-// This is the whole fairness mechanism, and it only ever runs for additions.
-// Each unranked row gets a fractional position — (rank within its group -
-// 0.5) / size of that group, root articles and everything taken from one
-// being the two groups, both counted among what's due today — which spreads
-// the rarer group evenly through the more common one in proportion to
-// whatever is actually due. Crucially, the candidate rank is computed over
-// the *whole* due population, ranked and unranked together, but only ever
-// written to rows that were NULL: an element that already has a rank keeps
-// it untouched, no matter how the population around it changes. That is what
-// stops grading one element from reshuffling everything else — the previous,
-// fully-recomputed version of this query shrank every remaining element's
-// denominator on every single grade, which could visibly jump an unrelated
-// item across another for no reason connected to it.
-//
-// The hash is a multiplicative scramble of the id rather than the id itself.
-// Within one group, items sharing a priority — a batch of highlights
-// imported together, say — would otherwise rank by insertion order, which
-// groups the oldest imports first.
-func (s *Store) assignQueueRanks(day time.Time) error {
-	_, err := s.db.Exec(`
-		UPDATE elements
-		SET queue_rank = ranked.candidate_rank
-		FROM (
-			SELECT e.id AS id,
-			       (CAST(ROW_NUMBER() OVER (
-			           PARTITION BY (e.parent_id IS NULL)
-			           ORDER BY e.priority ASC, e.due_on ASC,
-			                    (e.id * 2654435761) % 1000003 ASC
-			       ) AS REAL) - 0.5)
-			       / COUNT(*) OVER (PARTITION BY (e.parent_id IS NULL)) AS candidate_rank
-			FROM elements e
-			WHERE e.state NOT IN ('done', 'dismissed', 'suspended')
-			  AND (e.due_on IS NULL OR e.due_on <= ?)
-		) AS ranked
-		WHERE elements.id = ranked.id
-		  AND elements.queue_rank IS NULL`,
-		day.Format(dateFormat),
-	)
-	if err != nil {
-		return fmt.Errorf("store: assign queue ranks: %w", err)
-	}
-	return nil
 }
 
 // ElementByID reads one element.
@@ -483,12 +500,6 @@ func (s *Store) CreateExtract(extract NewExtract, now time.Time) (int64, error) 
 
 // SaveSchedule writes back an element's scheduling state after grading.
 //
-// queue_rank is cleared, not carried over: a due date earned by this grade
-// (or a backlog button — see Backlog) is a new position in time, and the
-// rank belongs to whatever is due when it gets there, not a leftover from
-// wherever it happened to sit before. assignQueueRanks fills it back in the
-// next time this element is actually due and read.
-//
 // This also runs Backlog's reschedule, which is deliberately not a grade —
 // see SaveScheduleReviewed for the write path that also logs activity.
 func (s *Store) SaveSchedule(id int64, schedule ir.Schedule, now time.Time) error {
@@ -517,7 +528,7 @@ func saveSchedule(db dbtx, id int64, schedule ir.Schedule, now time.Time) error 
 	_, err := db.Exec(`
 		UPDATE elements SET
 		    state = ?, due_on = ?, interval_days = ?, afactor = ?, reps = ?,
-		    priority = ?, queue_rank = NULL, updated_at = ?
+		    priority = ?, updated_at = ?
 		WHERE id = ?`,
 		string(schedule.State), dueOn, schedule.IntervalDays, schedule.AFactor,
 		schedule.Reps, schedule.Priority, formatTime(now), id,
@@ -531,7 +542,7 @@ func saveSchedule(db dbtx, id int64, schedule ir.Schedule, now time.Time) error 
 // SetPriority changes an element's priority without otherwise rescheduling it.
 func (s *Store) SetPriority(id int64, priority float64, now time.Time) error {
 	_, err := s.db.Exec(
-		`UPDATE elements SET priority = ?, queue_rank = NULL, updated_at = ? WHERE id = ?`,
+		`UPDATE elements SET priority = ?, updated_at = ? WHERE id = ?`,
 		priority, formatTime(now), id,
 	)
 	if err != nil {
@@ -706,7 +717,7 @@ func rootTopicID(tx *sql.Tx, documentID int64) (int64, error) {
 func suspendIfActive(tx *sql.Tx, id int64, now time.Time) error {
 	_, err := tx.Exec(`
 		UPDATE elements
-		SET state = ?, due_on = NULL, queue_rank = NULL, updated_at = ?
+		SET state = ?, due_on = NULL, updated_at = ?
 		WHERE id = ? AND state IN (?, ?)`,
 		string(ir.StateSuspended), formatTime(now), id,
 		string(ir.StateNew), string(ir.StateReading),
@@ -1085,7 +1096,7 @@ func (s *Store) SetAnnotationChapter(id int64, chapter string, now time.Time) er
 // its interval and repetition count and resumes where it left off.
 func (s *Store) Suspend(id int64, now time.Time) error {
 	_, err := s.db.Exec(
-		`UPDATE elements SET state = ?, due_on = NULL, queue_rank = NULL, updated_at = ? WHERE id = ?`,
+		`UPDATE elements SET state = ?, due_on = NULL, updated_at = ? WHERE id = ?`,
 		string(ir.StateSuspended), formatTime(now), id,
 	)
 	if err != nil {
@@ -1097,7 +1108,7 @@ func (s *Store) Suspend(id int64, now time.Time) error {
 // Unsuspend returns an element to the queue, due today.
 func (s *Store) Unsuspend(id int64, today time.Time, now time.Time) error {
 	_, err := s.db.Exec(
-		`UPDATE elements SET state = ?, due_on = ?, queue_rank = NULL, updated_at = ? WHERE id = ?`,
+		`UPDATE elements SET state = ?, due_on = ?, updated_at = ? WHERE id = ?`,
 		string(ir.StateReading), today.Format(dateFormat), formatTime(now), id,
 	)
 	if err != nil {
@@ -1427,13 +1438,22 @@ func (s *Store) CountElements(state string) (int, error) {
 	return count, nil
 }
 
-// CountDue returns how many elements are due for review on or before day.
-func (s *Store) CountDue(day time.Time) (int, error) {
+// CountDue returns how many of one queue's elements are due on or before day.
+//
+// Takes a QueueKind for the same reason Queue does: the number under a queue's
+// heading has to count that queue, not both of them.
+func (s *Store) CountDue(day time.Time, kind QueueKind) (int, error) {
+	predicate, err := kind.predicate()
+	if err != nil {
+		return 0, err
+	}
+
 	var count int
-	err := s.db.QueryRow(`
-		SELECT COUNT(*) FROM elements
-		WHERE state NOT IN ('done', 'dismissed', 'suspended')
-		  AND (due_on IS NULL OR due_on <= ?)`,
+	err = s.db.QueryRow(`
+		SELECT COUNT(*) FROM elements e
+		WHERE `+predicate+`
+		  AND e.state NOT IN ('done', 'dismissed', 'suspended')
+		  AND (e.due_on IS NULL OR e.due_on <= ?)`,
 		day.Format(dateFormat),
 	).Scan(&count)
 	if err != nil {
@@ -1441,6 +1461,15 @@ func (s *Store) CountDue(day time.Time) (int, error) {
 	}
 	return count, nil
 }
+
+// ExtractsPageLimit is how many rows the extracts browse page renders at once.
+//
+// A real cap rather than a token one: this page has no paging, so it is the
+// whole of what a reader can reach in one view. It stays finite because a
+// library import runs to thousands of passages and the filters above the list
+// are the intended way through them — but the page reports the full match count
+// alongside, so a reader is never left thinking a truncated list is all there is.
+const ExtractsPageLimit = 200
 
 // ExtractFilter selects which extracts the browse page lists.
 type ExtractFilter struct {
@@ -1462,6 +1491,33 @@ type ExtractFilter struct {
 	Limit int
 }
 
+// extractFilterWhere is the selection ExtractFilter describes, shared verbatim
+// by the listing and by CountMatchingExtracts so the two cannot disagree about
+// what matches — the same reason elementColumns is a single constant. A count
+// that drifted from its list is exactly how a page ends up claiming to show
+// "200 of 1431" when neither number describes the same set.
+//
+// Expects the elements table aliased e and documents aliased d, and the
+// arguments extractFilterArgs returns, in that order.
+const extractFilterWhere = `
+	WHERE e.parent_id IS NOT NULL
+	  AND e.state NOT IN ('dismissed')
+	  AND (? = '' OR e.origin = ?)
+	  AND (? = 0 OR e.kind = 'item')
+	  AND (? = 0 OR e.missing_upstream = 1)
+	  AND (? = '' OR e.quote LIKE ? OR d.title LIKE ?)`
+
+// extractFilterArgs returns the bound parameters extractFilterWhere expects.
+func extractFilterArgs(filter ExtractFilter) []any {
+	pattern := "%" + filter.Query + "%"
+	return []any{
+		filter.Origin, filter.Origin,
+		filter.WithClozes,
+		filter.MissingOnly,
+		filter.Query, pattern, pattern,
+	}
+}
+
 // ExtractRow is one row of the extracts browse page.
 type ExtractRow struct {
 	Element
@@ -1472,16 +1528,19 @@ type ExtractRow struct {
 
 // Extracts lists extracts independently of what is due.
 //
-// The queue answers "what should I read now" and deliberately interleaves
-// articles with extracts; this answers "what have I harvested", which is a
-// different question and needs its own ordering — newest first by default,
-// because the thing you just pulled out is the thing you most likely want,
-// but see ExtractFilter.Sort for the other orderings the browse page offers.
+// The extract queue answers "which passages are due now", in priority order
+// and capped at a day's worth; this answers "what have I harvested", over
+// everything regardless of when it is next due. Different question, so its own
+// ordering — newest first by default, because the thing you just pulled out is
+// the thing you most likely want, but see ExtractFilter.Sort for the rest.
+//
+// ExtractsPageLimit rows unless the filter says otherwise. The page pairs this
+// with CountMatchingExtracts so that a truncated list can say so — a cap this
+// page cannot see past is fine, one it hides is not.
 func (s *Store) Extracts(filter ExtractFilter) ([]ExtractRow, error) {
 	if filter.Limit <= 0 {
-		filter.Limit = 200
+		filter.Limit = ExtractsPageLimit
 	}
-	pattern := "%" + filter.Query + "%"
 
 	// filter.Sort selects one of a fixed set of Go string literals below, so
 	// it is safe to splice into the query directly — it never carries user
@@ -1500,20 +1559,10 @@ func (s *Store) Extracts(filter ExtractFilter) ([]ExtractRow, error) {
 		SELECT `+elementColumns+`, COALESCE(NULLIF(d.display_title, ''), d.title), d.url,
 		       (SELECT COUNT(*) FROM cloze_ranges c WHERE c.element_id = e.id)
 		FROM elements e
-		JOIN documents d ON d.id = e.document_id
-		WHERE e.parent_id IS NOT NULL
-		  AND e.state NOT IN ('dismissed')
-		  AND (? = '' OR e.origin = ?)
-		  AND (? = 0 OR e.kind = 'item')
-		  AND (? = 0 OR e.missing_upstream = 1)
-		  AND (? = '' OR e.quote LIKE ? OR d.title LIKE ?)
+		JOIN documents d ON d.id = e.document_id`+extractFilterWhere+`
 		ORDER BY `+orderBy+`
 		LIMIT ?`,
-		filter.Origin, filter.Origin,
-		filter.WithClozes,
-		filter.MissingOnly,
-		filter.Query, pattern, pattern,
-		filter.Limit,
+		append(extractFilterArgs(filter), filter.Limit)...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("store: list extracts: %w", err)
@@ -1536,6 +1585,26 @@ func (s *Store) Extracts(filter ExtractFilter) ([]ExtractRow, error) {
 		extracts = append(extracts, row)
 	}
 	return extracts, rows.Err()
+}
+
+// CountMatchingExtracts returns how many extracts a filter matches in total,
+// ignoring its Limit — what the browse page compares its rendered row count
+// against to know whether it has truncated, and by how much.
+//
+// Shares extractFilterWhere with the listing itself rather than restating the
+// predicate, so the two can never come to describe different sets.
+func (s *Store) CountMatchingExtracts(filter ExtractFilter) (int, error) {
+	var count int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*)
+		FROM elements e
+		JOIN documents d ON d.id = e.document_id`+extractFilterWhere,
+		extractFilterArgs(filter)...,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("store: count matching extracts: %w", err)
+	}
+	return count, nil
 }
 
 // CountExtracts returns how many extracts exist, by origin.

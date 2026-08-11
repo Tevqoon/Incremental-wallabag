@@ -6,8 +6,9 @@ This is vibecoded slop solving a particular problem of mine. Should be fine sinc
 A self-hosted incremental reader for [wallabag](https://wallabag.org), in the
 SuperMemo sense: articles enter a prioritised queue, you read a slice, pull out
 the passages that matter as **extracts**, and the article goes back in the queue
-at a longer interval. Extracts are themselves queue items you re-read and refine,
-and a refined extract can carry **cloze deletions** that become Anki cards.
+at a longer interval. Extracts have a prioritised queue of their own that you
+re-read and refine, and a refined extract can carry **cloze deletions** that
+become Anki cards.
 
 The point is being able to read a thousand articles at once by refusing to finish
 any of them.
@@ -87,11 +88,33 @@ no image rebuild. `config.local.yaml` is gitignored.
 
 | | |
 |---|---|
-| **Queue** | What is due today, most important first. Articles and extracts interleave by priority. |
-| **Read next** | Jumps straight to the most important due element. |
-| **Extracts** | Everything harvested, filterable by origin — your own extracts and the ones imported from wallabag highlights. |
+| **Queue** | Articles due today, most important first. |
+| **Read next** | Jumps straight to the most important due article. |
+| **Review** | The same page's other tab: extracts due today, most important first. Passages you took, wallabag highlights and book annotations alike. |
+| **Extracts** | Everything harvested whether it is due or not, filterable by origin — your own extracts and the ones imported from wallabag highlights. |
 | **Library** | Everything synced or uploaded, searchable — for finding a specific work, or putting an archived one back in the queue. |
 | **Import** | Upload a book's annotations: a KOReader JSON export, the JSON an annotation extractor produced, or a PDF still carrying its own annotations. |
+
+**Articles and extracts are two separate queues**, two tabs on the same page,
+each with its own due count and its own "start" button. Reading articles and
+refining extracts are different sittings, and every decision you make keeps you
+in the queue you are already in: grade an extract and the next extract comes up,
+grade an article and the next article does. **Later today** works the same way —
+it sends the element to the back of its own queue, so skipping through extracts
+never disturbs the order a reading session was working through.
+
+(They used to be one list, blended so that whichever kind was rarer spread
+evenly through the commoner one. That is closer to SuperMemo, and the machinery
+for it is in the history if you want it back — but it only pays off if you
+actually work a single mixed queue.)
+
+**There is no daily cap.** Nothing limits how much you read in a day, and
+nothing hides material that has piled up: a backlog — from a first import, or
+from missing a day's review — is yours to work through, postpone with **Later**,
+or drain by suspending in bulk from the Library. `queue_page_limit` exists only
+to trim a very long *page*, defaults to 0 (list everything), and never affects
+what **Read next** offers; when it does cut a list short, the page says
+"showing 60 of 137" rather than leaving you to notice.
 
 Articles you have **archived in wallabag do not enter the queue**: they stay in
 the Library, keep their extracts, and can be put back with one click. Their
@@ -154,11 +177,11 @@ top. A passage's page, colour and your own note on it are all kept.
 
 A book yields far more passages than an article, so by default they arrive
 **suspended** and a **triage pass** gates them: one at a time, in the book's own
-order, each one kept (into the queue on the usual delay), parked, left as it is,
-or deleted. That is a different thing from the reading queue, which interleaves
-everything by priority — going through a work means going through it front to
-back, with the chapter you were just in still in mind. A short piece can skip
-the pass and go straight into the queue; the upload form asks.
+order, each one kept (into the extract queue on the usual delay), parked, left
+as it is, or deleted. That is a different thing from the extract queue, which is
+ordered by priority — going through a work means going through it front to back,
+with the chapter you were just in still in mind. A short piece can skip the pass
+and go straight into the queue; the upload form asks.
 
 Re-uploading is how these are corrected. A work is identified by its normalised
 title and author, and each passage by a content hash, so exporting a book again

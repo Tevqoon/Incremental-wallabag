@@ -4,6 +4,15 @@
   <p class="meta">
     {{.Manual}} taken here · {{.Imported}} imported from wallabag
   </p>
+  {{if .Truncated}}
+    <!-- This page has no paging, so a large harvest is always cut off
+         somewhere. Saying where is what keeps that an honest cap instead of a
+         list that looks complete and is not. -->
+    <p class="meta">
+      Showing the first {{.Showing}} of {{.Matching}} matching — narrow with the
+      search box or the filters below to reach the rest.
+    </p>
+  {{end}}
 
   <form class="search" method="get" action="/extracts">
     <input type="search" name="q" value="{{.Query}}" placeholder="Search extract text or article">

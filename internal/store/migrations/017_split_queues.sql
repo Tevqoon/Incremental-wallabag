@@ -1,0 +1,26 @@
+-- Articles and extracts stopped interleaving and became two separate queues,
+-- which retires queue_rank entirely.
+--
+-- That column only ever had one job: making the fair interleave stable. The
+-- interleave gave each due element a fractional position within its own group
+-- — (rank in group - 0.5) / size of group, roots and extracts being the two
+-- groups — so that the rarer kind spread evenly through the commoner one.
+-- Recomputed on every read, that was unstable: grading one element away shrank
+-- the denominator for every other element of its kind, which could visibly
+-- jump an untouched item across another for no reason connected to it.
+-- Migration 008 fixed that by freezing each position in a column, assigned
+-- once when an element first became due and never recomputed (see the
+-- assignQueueRanks that used to live in elements.go).
+--
+-- With the two kinds read as separate queues, none of that machinery has
+-- anything left to do. Ordering is now priority, due date and a hash of the
+-- id — every term a value on the row itself, nothing computed relative to the
+-- rest of the population — so the instability that queue_rank existed to
+-- absorb cannot arise in the first place. Dropping the column also drops the
+-- obligation, easy to forget in a new write path, to null it out on every
+-- change that could move an element in the queue.
+--
+-- buried_on and buried_at stay. "Later today" is unaffected by the split: the
+-- bury terms sit inside the same kind-filtered query, so skipping an element
+-- now cycles it through its own queue and leaves the other one alone.
+ALTER TABLE elements DROP COLUMN queue_rank;
