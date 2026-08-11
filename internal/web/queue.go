@@ -40,34 +40,102 @@ var stateTagLabels = map[ir.State]string{
 // scheduled interval, so a document just added at a provider shows up without
 // a restart. It blocks for the duration of the sync, on purpose: the queue
 // page it redirects back to should already reflect what was fetched.
+//
+// Returns to whichever queue the button was pressed from. A sync brings in new
+// articles and new highlights alike, so both tabs have a reason to want it, and
+// neither should be bounced to the other for asking.
 func (s *Server) handleSyncNow(w http.ResponseWriter, r *http.Request) {
+	kind, ok := requestQueueKind(w, r)
+	if !ok {
+		return
+	}
 	if s.syncNow != nil {
 		if err := s.syncNow(r.Context()); err != nil {
 			s.logger.Error("manual sync failed", "error", err)
 		}
 	}
-	s.redirect(w, r, "/queue")
+	s.redirect(w, r, queuePath(kind))
+}
+
+// queueOf reports which queue an element belongs to. The two queues partition
+// the elements table on exactly the distinction IsRoot already draws, so an
+// element never has to be told which queue it came from — every redirect back
+// into a session derives it from the element just acted on. That is what keeps
+// grading an extract inside the extract queue and grading an article inside the
+// reading queue, with no hidden form field to lose.
+func queueOf(element store.Element) store.QueueKind {
+	if element.IsRoot() {
+		return store.QueueArticles
+	}
+	return store.QueueExtracts
+}
+
+// queuePath and nextPath build the two URLs a queue is reached by. Spelled out
+// here rather than formatted at each call site, so the parameter name only
+// exists in one place.
+func queuePath(kind store.QueueKind) string { return "/queue?kind=" + string(kind) }
+func nextPath(kind store.QueueKind) string  { return "/next?kind=" + string(kind) }
+
+// requestQueueKind reads which queue a request is about, rejecting anything
+// that is not one of the two rather than quietly falling back — a typo'd kind
+// should not silently show the reading queue and leave the reader thinking
+// their extracts have vanished.
+func requestQueueKind(w http.ResponseWriter, r *http.Request) (store.QueueKind, bool) {
+	kind, ok := store.ParseQueueKind(r.FormValue("kind"))
+	if !ok {
+		http.Error(w, "unknown queue", http.StatusBadRequest)
+		return "", false
+	}
+	return kind, true
 }
 
 // queueData is what the queue page renders.
 type queueData struct {
 	Title string
+	Kind  store.QueueKind
 	Items []store.QueueItem
-	Due   int
+
+	// Due is this queue's own due count; ArticlesDue and ExtractsDue carry
+	// both, since the tabs show a count each and the reader needs to see the
+	// other queue filling up without having to open it.
+	Due         int
+	ArticlesDue int
+	ExtractsDue int
+
 	Total int
 	Today time.Time
 }
 
-// handleQueue shows what is due today, most important first.
+// IsExtracts reports which tab is active, for a template that cannot compare
+// typed constants itself.
+func (d queueData) IsExtracts() bool { return d.Kind == store.QueueExtracts }
+
+// handleQueue shows what is due today in one of the two queues, most important
+// first.
+//
+// Articles and extracts used to interleave here, blended by a stored rank in
+// proportion to how many of each were due. They are now two lists reached by
+// the same page, because the interleave was answering a question — "what next,
+// across everything?" — that a reader who works in article sessions and extract
+// sessions never asks. See store.QueueKind for what that bought.
+//
+// dailyLimit applies per queue rather than across both. "How much this queue
+// offers in a day" is what the number has always meant on the page it appears
+// on, and splitting one budget between two lists would make each queue's length
+// depend on how full the other one happened to be.
 func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
+	kind, ok := requestQueueKind(w, r)
+	if !ok {
+		return
+	}
 	today := s.today()
 
-	items, err := s.store.Queue(today, s.dailyLimit)
+	items, err := s.store.Queue(today, kind, s.dailyLimit)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
-	due, err := s.store.CountDue(today)
+	articlesDue, extractsDue, err := s.dueCounts(today)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -78,29 +146,59 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	due := articlesDue
+	title := "Queue"
+	if kind == store.QueueExtracts {
+		due, title = extractsDue, "Extract queue"
+	}
+
 	s.render(w, "queue.html", queueData{
-		Title: "Queue",
-		Items: items,
-		Due:   due,
-		Total: total,
-		Today: today,
+		Title:       title,
+		Kind:        kind,
+		Items:       items,
+		Due:         due,
+		ArticlesDue: articlesDue,
+		ExtractsDue: extractsDue,
+		Total:       total,
+		Today:       today,
 	})
 }
 
-// handleNext jumps to the most important due element, or back to the queue when
-// nothing is left.
+// dueCounts reads both queues' due counts, which every page showing one of
+// them also wants the other of.
+func (s *Server) dueCounts(today time.Time) (articles, extracts int, err error) {
+	articles, err = s.store.CountDue(today, store.QueueArticles)
+	if err != nil {
+		return 0, 0, err
+	}
+	extracts, err = s.store.CountDue(today, store.QueueExtracts)
+	if err != nil {
+		return 0, 0, err
+	}
+	return articles, extracts, nil
+}
+
+// handleNext jumps to the most important due element in one queue, or back to
+// that queue's list when nothing is left.
 //
 // This is where grading lands, so that finishing one element moves straight
 // into the next without a stop at the list — which is what makes a reading
-// session feel like a session rather than a series of visits.
+// session feel like a session rather than a series of visits. The queue comes
+// from the request rather than being rediscovered, so a session stays in the
+// queue it started in instead of drifting into the other one.
 func (s *Server) handleNext(w http.ResponseWriter, r *http.Request) {
-	items, err := s.store.Queue(s.today(), 1)
+	kind, ok := requestQueueKind(w, r)
+	if !ok {
+		return
+	}
+
+	items, err := s.store.Queue(s.today(), kind, 1)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
 	if len(items) == 0 {
-		http.Redirect(w, r, "/queue", http.StatusSeeOther)
+		http.Redirect(w, r, queuePath(kind), http.StatusSeeOther)
 		return
 	}
 	http.Redirect(w, r, "/read/"+strconv.FormatInt(items[0].ID, 10), http.StatusSeeOther)
@@ -143,12 +241,16 @@ func (s *Server) handleGrade(w http.ResponseWriter, r *http.Request) {
 	// it is due, so it bypasses the scheduler entirely. The real clock, not
 	// s.today()'s truncated date: repeated burying is ordered by the moment
 	// each one happened, not just which calendar day — see Store.Bury.
+	//
+	// "Later today" is per queue now: Store.Queue's bury terms sit inside its
+	// kind filter, so this sends the element to the back of its own queue, and
+	// the redirect below returns to that same queue to pick up the next one.
 	if grade == ir.GradeBury {
 		if err := s.store.Bury(id, time.Now()); err != nil {
 			s.fail(w, err)
 			return
 		}
-		s.redirect(w, r, "/next")
+		s.redirect(w, r, nextPath(queueOf(element)))
 		return
 	}
 
@@ -157,7 +259,7 @@ func (s *Server) handleGrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.redirect(w, r, "/next")
+	s.redirect(w, r, nextPath(queueOf(element)))
 }
 
 // applyGrade is the whole scheduling and write-back effect of grading an
@@ -498,10 +600,10 @@ func (s *Server) tagTarget(w http.ResponseWriter, r *http.Request) (int64, store
 //
 // Behaves exactly like a grade: it is a complete decision about this element,
 // so it redirects rather than staying put and swapping something in place —
-// on the reader page, that means on to whatever is next, same as pressing
-// Next or Sooner would. A list page instead sends its own current URL as
-// redirect, so rescheduling a row from there returns to that row's list
-// rather than dropping into the reading queue.
+// on the reader page, that means on to whatever is next in the same queue this
+// element belongs to, exactly as pressing Next or Sooner would. A list page
+// instead sends its own current URL as redirect, so rescheduling a row from
+// there returns to that row's list rather than dropping into a queue.
 func (s *Server) handleBacklog(w http.ResponseWriter, r *http.Request) {
 	id, err := elementID(r)
 	if err != nil {
@@ -538,7 +640,7 @@ func (s *Server) handleBacklog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.redirect(w, r, redirectTarget(r, "/next"))
+	s.redirect(w, r, redirectTarget(r, nextPath(queueOf(element))))
 }
 
 // redirectTarget reads where a POST wants to land afterwards, falling back
@@ -901,11 +1003,11 @@ func findExtractBulkAction(value string) (extractBulkAction, bool) {
 
 // handleExtracts lists everything harvested, independently of what is due.
 //
-// Separate from the queue on purpose. The queue interleaves articles and
-// extracts by priority — that mixing is much of what makes incremental reading
-// work — so filtering it by kind would undermine the ordering it exists to
-// provide. This page answers the other question: what have I pulled out, and
-// what still needs turning into cards.
+// Separate from the extract queue on purpose, and not made redundant by it.
+// That queue answers "which passages are due now", ordered by priority and
+// capped at a day's worth. This page answers a different question — what have
+// I pulled out, and what still needs turning into cards — over everything
+// harvested, due or not, with its own filters and orderings.
 func (s *Server) handleExtracts(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 

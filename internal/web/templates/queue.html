@@ -1,11 +1,21 @@
 {{define "content"}}
 <section class="queue">
   <div class="queue-head">
-    <h1>Queue</h1>
-    <button type="button" hx-post="/sync" title="Fetch anything new from wallabag right now, instead of waiting for the next scheduled sync">
+    <h1>{{.Title}}</h1>
+    <button type="button" hx-post="/sync?kind={{.Kind}}" title="Fetch anything new from wallabag right now, instead of waiting for the next scheduled sync">
       Sync now
     </button>
   </div>
+
+  <!-- Two queues rather than one interleaved list: articles are read in
+       sessions, extracts are reviewed in sessions, and the two are different
+       sittings. Each tab carries its own due count so the queue you are not
+       in cannot quietly pile up unseen. -->
+  <nav class="filters">
+    <a href="/queue?kind=articles" class="{{if not .IsExtracts}}on{{end}}">Articles {{.ArticlesDue}}</a>
+    <a href="/queue?kind=extracts" class="{{if .IsExtracts}}on{{end}}">Extracts {{.ExtractsDue}}</a>
+  </nav>
+
   <p class="meta">
     {{.Due}} due today · {{.Total}} elements in total
   </p>
@@ -38,15 +48,30 @@
     </ol>
 
     <p class="continue">
-      <a class="button primary" href="/next">Start reading</a>
+      <a class="button primary" href="/next?kind={{.Kind}}">
+        {{if .IsExtracts}}Start reviewing{{else}}Start reading{{end}}
+      </a>
     </p>
   {{else}}
     <div class="empty">
-      <p>Nothing is due today.</p>
-      <p class="meta">
-        New articles appear here as they sync from wallabag, and extracts come
-        back on their own schedule.
-      </p>
+      {{if .IsExtracts}}
+        <p>No extracts are due today.</p>
+        <p class="meta">
+          Passages you take while reading come back on their own schedule, as do
+          highlights imported from wallabag and from uploaded books.
+          {{if .ArticlesDue}}
+            <a href="/queue?kind=articles">{{.ArticlesDue}} articles are due</a>.
+          {{end}}
+        </p>
+      {{else}}
+        <p>Nothing is due today.</p>
+        <p class="meta">
+          New articles appear here as they sync from wallabag.
+          {{if .ExtractsDue}}
+            <a href="/queue?kind=extracts">{{.ExtractsDue}} extracts are due</a>.
+          {{end}}
+        </p>
+      {{end}}
     </div>
   {{end}}
 </section>

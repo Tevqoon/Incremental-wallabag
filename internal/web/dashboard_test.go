@@ -35,7 +35,7 @@ func TestDashboardEmptyState(t *testing.T) {
 	}
 
 	body := response.Body.String()
-	if !strings.Contains(body, "Nothing is due today.") {
+	if !strings.Contains(body, "No articles are due today.") {
 		t.Errorf("dashboard does not show the empty queue-preview state:\n%s", body)
 	}
 	if !strings.Contains(body, `class="tile-value">0<`) {
@@ -122,12 +122,16 @@ func TestDashboardShowsWeeklyArticlesAndWords(t *testing.T) {
 }
 
 // TestDashboardNavLinksPresent guards the split between the dashboard (home)
-// and the queue (its own page now) — both must be reachable from the nav.
+// and the queues (their own page now) — all must be reachable from the nav,
+// the extract queue included: it is the one a reader never lands in by
+// accident, so losing its link would lose the queue.
 func TestDashboardNavLinksPresent(t *testing.T) {
 	server, _, _ := newTestServer(t, true)
 
 	body := get(t, server, "/").Body.String()
-	if !strings.Contains(body, `href="/queue"`) {
-		t.Errorf("nav is missing the Queue link:\n%s", body)
+	for _, link := range []string{"/queue?kind=articles", "/queue?kind=extracts"} {
+		if !strings.Contains(body, `href="`+link+`"`) {
+			t.Errorf("nav is missing %s:\n%s", link, body)
+		}
 	}
 }

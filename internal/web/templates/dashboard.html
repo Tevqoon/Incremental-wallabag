@@ -51,12 +51,20 @@
       {{end}}
     </ol>
     <p class="continue">
-      <a class="button primary" href="/next">Start reading</a>
-      <a class="button" href="/queue">Full queue ({{.Due}} due)</a>
+      <a class="button primary" href="/next?kind=articles">Start reading</a>
+      <a class="button" href="/queue?kind=articles">Full queue ({{.Due}} due)</a>
+      {{if .ExtractsDue}}
+        <a class="button" href="/queue?kind=extracts">Extracts ({{.ExtractsDue}} due)</a>
+      {{end}}
     </p>
   {{else}}
     <div class="empty">
-      <p>Nothing is due today.</p>
+      <p>No articles are due today.</p>
+      {{if .ExtractsDue}}
+        <p class="meta">
+          <a href="/queue?kind=extracts">{{.ExtractsDue}} extracts are due</a>.
+        </p>
+      {{end}}
     </div>
   {{end}}
 

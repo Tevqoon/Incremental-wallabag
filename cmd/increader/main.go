@@ -188,11 +188,17 @@ func runSync(settings config.Config, logger *slog.Logger, full bool) error {
 	if err != nil {
 		return err
 	}
-	due, err := db.CountDue(time.Now().In(settings.Location))
+	today := time.Now().In(settings.Location)
+	articles, err := db.CountDue(today, store.QueueArticles)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("queue: %d elements, %d due today\n", total, due)
+	extracts, err := db.CountDue(today, store.QueueExtracts)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("queue: %d elements, %d articles and %d extracts due today\n",
+		total, articles, extracts)
 	return nil
 }
 

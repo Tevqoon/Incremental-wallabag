@@ -21,7 +21,9 @@ timezone: Europe/Ljubljana
 # How often sources are polled in the background.
 sync_interval: 30m
 
-# Maximum elements the queue offers in a day.
+# Maximum elements a queue offers in a day. Applies to the article queue and
+# the extract queue separately, so this is the length of each list rather than
+# a budget split between them.
 daily_limit: 60
 
 # How long before a new extract first comes back — whether made here or

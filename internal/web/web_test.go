@@ -154,6 +154,116 @@ func TestQueueListsTheArticle(t *testing.T) {
 	}
 }
 
+// TestQueuePagesShowOneKindEach is the split as the reader meets it: two tabs
+// on one page, each listing only its own material. An article showing up under
+// Extracts (or the reverse) would mean the page had gone back to a single
+// blended list.
+func TestQueuePagesShowOneKindEach(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if _, err := db.CreateExtract(store.NewExtract{
+		ParentID: 1, DocumentID: 1,
+		Title: "A harvested passage", Quote: "A harvested passage",
+		ContentHTML: "<p>A harvested passage</p>",
+	}, time.Now()); err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+
+	articles := get(t, server, "/queue?kind=articles").Body.String()
+	if !strings.Contains(articles, "A test article") {
+		t.Error("the article queue does not list the article")
+	}
+	if strings.Contains(articles, "A harvested passage") {
+		t.Error("the article queue is listing an extract")
+	}
+
+	extracts := get(t, server, "/queue?kind=extracts").Body.String()
+	if !strings.Contains(extracts, "A harvested passage") {
+		t.Error("the extract queue does not list the extract")
+	}
+	if !strings.Contains(extracts, "Extract queue") {
+		t.Errorf("the extract queue is not titled as one:\n%s", extracts)
+	}
+}
+
+// TestQueueRejectsAnUnknownKind: a mistyped kind must not quietly fall through
+// to the reading queue, which would look exactly like an emptied extract queue.
+func TestQueueRejectsAnUnknownKind(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	for _, path := range []string{"/queue?kind=everything", "/next?kind=everything"} {
+		if response := get(t, server, path); response.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400", path, response.Code)
+		}
+	}
+}
+
+// TestGradingAnExtractStaysInTheExtractQueue is the property that makes two
+// queues usable at all: every redirect out of a decision derives its queue
+// from the element decided about, so a review session keeps handing back
+// extracts instead of dropping the reader into the reading queue. "Later
+// today" is included because burying takes its own early-return path out of
+// handleGrade and would be the easy one to leave behind.
+func TestGradingAnExtractStaysInTheExtractQueue(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	id, err := db.CreateExtract(store.NewExtract{
+		ParentID: 1, DocumentID: 1,
+		Title: "A passage", Quote: "A passage", ContentHTML: "<p>A passage</p>",
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+	path := "/elements/" + itoa(id)
+
+	for _, action := range []struct {
+		name     string
+		endpoint string
+		form     url.Values
+	}{
+		{"grade", path + "/grade", url.Values{"grade": {"next"}}},
+		{"later today", path + "/grade", url.Values{"grade": {"bury"}}},
+		{"backlog", path + "/backlog", url.Values{"days": {"7"}}},
+	} {
+		response := post(t, server, action.endpoint, action.form)
+		if got := response.Header().Get("Location"); got != "/next?kind=extracts" {
+			t.Errorf("%s: Location = %q, want /next?kind=extracts", action.name, got)
+		}
+	}
+
+	// And the article's own grade still lands in the reading queue.
+	response := post(t, server, "/elements/1/grade", url.Values{"grade": {"next"}})
+	if got := response.Header().Get("Location"); got != "/next?kind=articles" {
+		t.Errorf("grading the article: Location = %q, want /next?kind=articles", got)
+	}
+}
+
+// TestNextStaysWithinItsQueue: /next must never hand back the other queue's
+// material, even when its own is empty — that is what stops a review session
+// from silently turning into a reading session.
+func TestNextStaysWithinItsQueue(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	id, err := db.CreateExtract(store.NewExtract{
+		ParentID: 1, DocumentID: 1,
+		Title: "A passage", Quote: "A passage", ContentHTML: "<p>A passage</p>",
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+
+	if got := get(t, server, "/next?kind=extracts").Header().Get("Location"); got != "/read/"+itoa(id) {
+		t.Errorf("Location = %q, want the extract %d", got, id)
+	}
+
+	// Finish the extract; the extract queue is now empty and must fall back to
+	// its own list rather than offering the still-due article.
+	post(t, server, "/elements/"+itoa(id)+"/grade", url.Values{"grade": {"done"}})
+	if got := get(t, server, "/next?kind=extracts").Header().Get("Location"); got != "/queue?kind=extracts" {
+		t.Errorf("Location = %q, want the extract queue's own list", got)
+	}
+}
+
 // TestDashboardListsThePreview covers the home page's queue preview — the
 // same due material the full queue page shows, just capped to a handful of
 // items rather than everything due.
@@ -300,13 +410,22 @@ func TestExtractRoundTrip(t *testing.T) {
 		t.Error("the extract did not record its position in the parent")
 	}
 
-	// A new extract is due immediately, so it can be refined in this session.
-	queue, err := db.Queue(time.Now(), 10)
+	// A new extract is due immediately, so it can be refined in this session —
+	// in the extract queue, which is now where it comes back rather than
+	// interleaved into the reading queue alongside its own parent.
+	articles, err := db.Queue(time.Now(), store.QueueArticles, 10)
 	if err != nil {
-		t.Fatalf("Queue: %v", err)
+		t.Fatalf("Queue(articles): %v", err)
 	}
-	if len(queue) != 2 {
-		t.Errorf("queue holds %d elements, want the article plus its extract", len(queue))
+	if len(articles) != 1 {
+		t.Errorf("article queue holds %d elements, want the article", len(articles))
+	}
+	extracts, err := db.Queue(time.Now(), store.QueueExtracts, 10)
+	if err != nil {
+		t.Fatalf("Queue(extracts): %v", err)
+	}
+	if len(extracts) != 1 {
+		t.Errorf("extract queue holds %d elements, want the new extract", len(extracts))
 	}
 }
 
@@ -694,8 +813,10 @@ func TestGradeReschedulesAndMovesOn(t *testing.T) {
 
 	// htmx must be told to navigate; a 303 would nest a whole page inside the
 	// element the button targeted.
-	if got := recorder.Header().Get("HX-Redirect"); got != "/next" {
-		t.Errorf("HX-Redirect = %q, want %q", got, "/next")
+	// Back into the queue this element belongs to, so a reading session stays
+	// a reading session rather than drifting into the extract queue.
+	if got := recorder.Header().Get("HX-Redirect"); got != "/next?kind=articles" {
+		t.Errorf("HX-Redirect = %q, want %q", got, "/next?kind=articles")
 	}
 
 	after, _ := db.ElementByID(1)
@@ -719,7 +840,7 @@ func TestGradeDismissRemovesFromQueue(t *testing.T) {
 
 	post(t, server, "/elements/1/grade", url.Values{"grade": {"dismiss"}})
 
-	queue, err := db.Queue(time.Now(), 10)
+	queue, err := db.Queue(time.Now(), store.QueueArticles, 10)
 	if err != nil {
 		t.Fatalf("Queue: %v", err)
 	}
@@ -751,8 +872,8 @@ func TestBacklogPutsAnElementOff(t *testing.T) {
 	if response.Code != http.StatusSeeOther {
 		t.Fatalf("status = %d, want 303", response.Code)
 	}
-	if got := response.Header().Get("Location"); got != "/next" {
-		t.Errorf("Location = %q, want /next (the default with no redirect field)", got)
+	if got := response.Header().Get("Location"); got != "/next?kind=articles" {
+		t.Errorf("Location = %q, want the element's own queue (the default with no redirect field)", got)
 	}
 
 	element, _ := db.ElementByID(1)
@@ -798,7 +919,7 @@ func TestBacklogRejectsUnsafeRedirectTargets(t *testing.T) {
 		response := post(t, server, "/elements/1/backlog", url.Values{
 			"days": {"7"}, "redirect": {bad},
 		})
-		if got := response.Header().Get("Location"); got != "/next" {
+		if got := response.Header().Get("Location"); got != "/next?kind=articles" {
 			t.Errorf("redirect %q: Location = %q, want the /next fallback", bad, got)
 		}
 	}
@@ -972,9 +1093,9 @@ func TestNextFallsBackToQueueWhenEmpty(t *testing.T) {
 
 	post(t, server, "/elements/1/grade", url.Values{"grade": {"done"}})
 
-	response := get(t, server, "/next")
-	if got := response.Header().Get("Location"); got != "/queue" {
-		t.Errorf("Location = %q, want /queue when nothing is due", got)
+	response := get(t, server, "/next?kind=articles")
+	if got := response.Header().Get("Location"); got != "/queue?kind=articles" {
+		t.Errorf("Location = %q, want the same queue's list when nothing is due", got)
 	}
 }
 
@@ -1718,7 +1839,7 @@ func TestSuspendAndUnsuspend(t *testing.T) {
 		t.Errorf("state = %q, want suspended", element.Schedule.State)
 	}
 
-	queue, _ := db.Queue(time.Now(), 10)
+	queue, _ := db.Queue(time.Now(), store.QueueArticles, 10)
 	if len(queue) != 0 {
 		t.Errorf("suspended article is still queued")
 	}
@@ -1733,7 +1854,7 @@ func TestSuspendAndUnsuspend(t *testing.T) {
 		t.Fatalf("unsuspend: status = %d", response.Code)
 	}
 
-	queue, _ = db.Queue(time.Now(), 10)
+	queue, _ = db.Queue(time.Now(), store.QueueArticles, 10)
 	if len(queue) != 1 {
 		t.Errorf("unsuspending did not return the article to the queue")
 	}
@@ -2810,7 +2931,7 @@ func TestLibraryBulkQueue(t *testing.T) {
 
 	// 3, not 2: element 1 is newTestServer's own seeded article, still new
 	// and already due, alongside the two just unsuspended.
-	queue, _ := db.Queue(time.Now(), 10)
+	queue, _ := db.Queue(time.Now(), store.QueueArticles, 10)
 	if len(queue) != 3 {
 		t.Errorf("queue has %d items, want 3 (the seeded article plus the 2 just unsuspended)", len(queue))
 	}
@@ -2976,7 +3097,7 @@ func TestBuryKeepsItTodayButLast(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	before, _ := db.Queue(time.Now(), 10)
+	before, _ := db.Queue(time.Now(), store.QueueArticles, 10)
 	first := before[0].ID
 
 	if response := post(t, server, "/elements/"+itoa(first)+"/grade", url.Values{
@@ -2986,7 +3107,7 @@ func TestBuryKeepsItTodayButLast(t *testing.T) {
 		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
 	}
 
-	after, _ := db.Queue(time.Now(), 10)
+	after, _ := db.Queue(time.Now(), store.QueueArticles, 10)
 	if len(after) != len(before) {
 		t.Errorf("burying removed the element from today: %d then %d", len(before), len(after))
 	}
@@ -3053,7 +3174,7 @@ func TestNewExtractIsNotDueToday(t *testing.T) {
 		t.Errorf("new extract due %v, want %v", children[0].Schedule.DueOn, want)
 	}
 
-	queue, _ := db.Queue(time.Now(), 10)
+	queue, _ := db.Queue(time.Now(), store.QueueExtracts, 10)
 	for _, item := range queue {
 		if item.ID == children[0].ID {
 			t.Error("a freshly made extract is back in today's queue")

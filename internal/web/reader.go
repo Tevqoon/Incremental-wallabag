@@ -122,7 +122,10 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	due, err := s.store.CountDue(s.today())
+	// This element's own queue, not both of them: the count is read as "how
+	// much of this session is left", and a reader working through extracts is
+	// not told anything useful by a number that also counts unread articles.
+	due, err := s.store.CountDue(s.today(), queueOf(element))
 	if err != nil {
 		s.fail(w, err)
 		return

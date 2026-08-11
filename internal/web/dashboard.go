@@ -35,11 +35,16 @@ type dashboardData struct {
 	Title string
 	Today time.Time
 
-	// Queue & backlog health
-	Due     int
-	Total   int
-	Preview []store.QueueItem
-	Counts  map[string]int
+	// Queue & backlog health. Preview is the reading queue, which is where a
+	// session starts; ExtractsDue carries the other queue's size so that a
+	// growing extract backlog is visible from here without opening it — the
+	// one thing separate queues cost that the old interleave gave away for
+	// free, by putting extracts in front of you whether you asked or not.
+	Due         int
+	ExtractsDue int
+	Total       int
+	Preview     []store.QueueItem
+	Counts      map[string]int
 
 	// Reading composition
 	Tags           []store.Tag
@@ -68,12 +73,12 @@ type dashboardData struct {
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	today := s.today()
 
-	preview, err := s.store.Queue(today, dashboardPreviewLimit)
+	preview, err := s.store.Queue(today, store.QueueArticles, dashboardPreviewLimit)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
-	due, err := s.store.CountDue(today)
+	due, extractsDue, err := s.dueCounts(today)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -142,6 +147,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		Title:           "Dashboard",
 		Today:           today,
 		Due:             due,
+		ExtractsDue:     extractsDue,
 		Total:           total,
 		Preview:         preview,
 		Counts:          counts,

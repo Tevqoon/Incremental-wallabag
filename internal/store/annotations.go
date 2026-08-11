@@ -324,10 +324,10 @@ func (s *Store) CountTriage(documentID int64) (TriageCounts, error) {
 // order, or ErrNotFound when the pass is finished.
 //
 // Reading order rather than priority order, which is what makes this a
-// different thing from the main queue: going through a book once, front to
+// different thing from the extract queue: going through a book once, front to
 // back, is a pass over a work — the chapter you were just in is the context
-// for the passage you are looking at now. The main queue deliberately
-// interleaves everything and would destroy exactly that.
+// for the passage you are looking at now. Priority order would destroy exactly
+// that, which is why triage is its own pass and not a filter on the queue.
 func (s *Store) NextUntriaged(documentID int64) (Element, error) {
 	var (
 		element  Element
@@ -403,7 +403,7 @@ func (s *Store) SuspendTriaged(id int64, now time.Time) error {
 	return s.inTransaction(func(tx *sql.Tx) error {
 		result, err := tx.Exec(`
 			UPDATE elements SET
-			    state = ?, due_on = NULL, queue_rank = NULL,
+			    state = ?, due_on = NULL,
 			    triaged_at = ?, updated_at = ?
 			WHERE id = ?`,
 			string(ir.StateSuspended), formatTime(now), formatTime(now), id,
