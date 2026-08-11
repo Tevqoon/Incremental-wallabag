@@ -148,7 +148,7 @@ func (s *Server) handleGrade(w http.ResponseWriter, r *http.Request) {
 			s.fail(w, err)
 			return
 		}
-		s.redirect(w, r, "/next")
+		s.redirect(w, r, redirectTarget(r, "/next"))
 		return
 	}
 
@@ -157,7 +157,7 @@ func (s *Server) handleGrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.redirect(w, r, "/next")
+	s.redirect(w, r, redirectTarget(r, "/next"))
 }
 
 // applyGrade is the whole scheduling and write-back effect of grading an
