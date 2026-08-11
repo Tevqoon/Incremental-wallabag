@@ -222,9 +222,21 @@ h1 { font-size: 1.5rem; line-height: 1.25; margin: 0 0 0.35rem; }
   color: var(--muted);
 }
 
+/* white-space: pre-wrap rather than the plain "pre" a <pre> tag defaults to:
+   a <pre> is as often a publishing platform's "preserve my line breaks" block
+   for quoted verse or prose as it is real code (Substack's own preformatted-
+   text block is exactly this), and the plain default disables wrapping
+   entirely, forcing a single unreadable line off the edge of the screen on
+   anything narrower than the line itself. Wrapping still keeps every space,
+   blank line and indent exactly as they were — a real snippet keeps its
+   shape, just soft-wraps instead of scrolling, the same trade both
+   .cloze-preview and GitHub's own mobile view make. overflow-wrap covers the
+   one thing wrapping alone cannot: a single unbroken token — a long hash, an
+   unspaced URL — with no natural place to break at all. */
 #article pre {
   font: 0.85rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
-  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   padding: 0.75rem;
   background: color-mix(in srgb, var(--fg) 5%, transparent);
   border-radius: 3px;
@@ -246,8 +258,9 @@ h1 { font-size: 1.5rem; line-height: 1.25; margin: 0 0 0.35rem; }
 
 /* ir.renderTable's one wrapper: lets a grid wider than the reader's own
    prose column scroll sideways in place rather than forcing the whole page
-   wider, the same problem .cloze-preview and #article pre solve the same
-   way for a long unbroken line. */
+   wider. Scrolling, not wrapping like .cloze-preview and #article pre below
+   — a table's columns are not free to reflow the way a line of text is
+   without losing what lines up with what. */
 #article .table-wrap { overflow-x: auto; }
 #article table {
   border-collapse: collapse;
