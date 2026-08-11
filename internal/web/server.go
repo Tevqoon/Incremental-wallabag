@@ -43,13 +43,13 @@ var pageNames = []string{
 // struct rather than package-level variables, so a test can build a Server with
 // its own store and no global setup.
 type Server struct {
-	store        *store.Store
-	sources      map[string]source.Source
-	dailyLimit   int
-	extractDelay int
-	logger       *slog.Logger
-	policy       *bluemonday.Policy
-	pages        map[string]*template.Template
+	store          *store.Store
+	sources        map[string]source.Source
+	queuePageLimit int
+	extractDelay   int
+	logger         *slog.Logger
+	policy         *bluemonday.Policy
+	pages          map[string]*template.Template
 
 	// publish asks the syncer to drain the outbox now. Optional: without it
 	// queued writes still go out on the next sync, just later.
@@ -63,9 +63,12 @@ type Server struct {
 
 // Options configures a Server.
 type Options struct {
-	Store      *store.Store
-	Sources    map[string]source.Source
-	DailyLimit int
+	Store   *store.Store
+	Sources map[string]source.Source
+	// QueuePageLimit caps how many rows the queue page renders, per queue.
+	// Zero renders everything due, which is the default — see
+	// config.Config.QueuePageLimit for why this is only ever a display cap.
+	QueuePageLimit int
 
 	// ExtractDelay is how many days ahead a newly made extract becomes due.
 	ExtractDelay int
@@ -90,15 +93,15 @@ type Options struct {
 // time someone opens that page.
 func New(options Options) (*Server, error) {
 	server := &Server{
-		store:        options.Store,
-		sources:      options.Sources,
-		dailyLimit:   options.DailyLimit,
-		extractDelay: options.ExtractDelay,
-		logger:       options.Logger,
-		policy:       newPolicy(),
-		pages:        make(map[string]*template.Template),
-		publish:      options.Publish,
-		syncNow:      options.SyncNow,
+		store:          options.Store,
+		sources:        options.Sources,
+		queuePageLimit: options.QueuePageLimit,
+		extractDelay:   options.ExtractDelay,
+		logger:         options.Logger,
+		policy:         newPolicy(),
+		pages:          make(map[string]*template.Template),
+		publish:        options.Publish,
+		syncNow:        options.SyncNow,
 	}
 
 	for _, name := range pageNames {

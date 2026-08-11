@@ -108,6 +108,14 @@ evenly through the commoner one. That is closer to SuperMemo, and the machinery
 for it is in the history if you want it back — but it only pays off if you
 actually work a single mixed queue.)
 
+**There is no daily cap.** Nothing limits how much you read in a day, and
+nothing hides material that has piled up: a backlog — from a first import, or
+from missing a day's review — is yours to work through, postpone with **Later**,
+or drain by suspending in bulk from the Library. `queue_page_limit` exists only
+to trim a very long *page*, defaults to 0 (list everything), and never affects
+what **Read next** offers; when it does cut a list short, the page says
+"showing 60 of 137" rather than leaving you to notice.
+
 Articles you have **archived in wallabag do not enter the queue**: they stay in
 the Library, keep their extracts, and can be put back with one click. Their
 highlights are still imported, which matters because in a real library that is

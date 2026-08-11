@@ -284,10 +284,18 @@ func (n nullableElement) apply(element *Element) {
 // it already was. Because the bury terms sit inside this kind-filtered query,
 // "later today" is per queue: skipping an extract cycles it through the extract
 // queue and leaves the reading queue's order untouched.
+// A limit of zero or less returns everything due, which is the default: SQLite
+// treats a negative LIMIT as no limit, so the two are the same query. Callers
+// pass a cap when they are rendering a bounded list (a preview, a page the
+// reader asked to trim), never to decide how much reading a day contains —
+// nothing here has ever done that.
 func (s *Store) Queue(day time.Time, kind QueueKind, limit int) ([]QueueItem, error) {
 	predicate, err := kind.predicate()
 	if err != nil {
 		return nil, err
+	}
+	if limit <= 0 {
+		limit = -1
 	}
 
 	rows, err := s.db.Query(`
@@ -1454,6 +1462,15 @@ func (s *Store) CountDue(day time.Time, kind QueueKind) (int, error) {
 	return count, nil
 }
 
+// ExtractsPageLimit is how many rows the extracts browse page renders at once.
+//
+// A real cap rather than a token one: this page has no paging, so it is the
+// whole of what a reader can reach in one view. It stays finite because a
+// library import runs to thousands of passages and the filters above the list
+// are the intended way through them — but the page reports the full match count
+// alongside, so a reader is never left thinking a truncated list is all there is.
+const ExtractsPageLimit = 200
+
 // ExtractFilter selects which extracts the browse page lists.
 type ExtractFilter struct {
 	// Origin restricts to OriginManual or OriginImport; empty means both.
@@ -1474,6 +1491,33 @@ type ExtractFilter struct {
 	Limit int
 }
 
+// extractFilterWhere is the selection ExtractFilter describes, shared verbatim
+// by the listing and by CountMatchingExtracts so the two cannot disagree about
+// what matches — the same reason elementColumns is a single constant. A count
+// that drifted from its list is exactly how a page ends up claiming to show
+// "200 of 1431" when neither number describes the same set.
+//
+// Expects the elements table aliased e and documents aliased d, and the
+// arguments extractFilterArgs returns, in that order.
+const extractFilterWhere = `
+	WHERE e.parent_id IS NOT NULL
+	  AND e.state NOT IN ('dismissed')
+	  AND (? = '' OR e.origin = ?)
+	  AND (? = 0 OR e.kind = 'item')
+	  AND (? = 0 OR e.missing_upstream = 1)
+	  AND (? = '' OR e.quote LIKE ? OR d.title LIKE ?)`
+
+// extractFilterArgs returns the bound parameters extractFilterWhere expects.
+func extractFilterArgs(filter ExtractFilter) []any {
+	pattern := "%" + filter.Query + "%"
+	return []any{
+		filter.Origin, filter.Origin,
+		filter.WithClozes,
+		filter.MissingOnly,
+		filter.Query, pattern, pattern,
+	}
+}
+
 // ExtractRow is one row of the extracts browse page.
 type ExtractRow struct {
 	Element
@@ -1489,11 +1533,14 @@ type ExtractRow struct {
 // everything regardless of when it is next due. Different question, so its own
 // ordering — newest first by default, because the thing you just pulled out is
 // the thing you most likely want, but see ExtractFilter.Sort for the rest.
+//
+// ExtractsPageLimit rows unless the filter says otherwise. The page pairs this
+// with CountMatchingExtracts so that a truncated list can say so — a cap this
+// page cannot see past is fine, one it hides is not.
 func (s *Store) Extracts(filter ExtractFilter) ([]ExtractRow, error) {
 	if filter.Limit <= 0 {
-		filter.Limit = 200
+		filter.Limit = ExtractsPageLimit
 	}
-	pattern := "%" + filter.Query + "%"
 
 	// filter.Sort selects one of a fixed set of Go string literals below, so
 	// it is safe to splice into the query directly — it never carries user
@@ -1512,20 +1559,10 @@ func (s *Store) Extracts(filter ExtractFilter) ([]ExtractRow, error) {
 		SELECT `+elementColumns+`, COALESCE(NULLIF(d.display_title, ''), d.title), d.url,
 		       (SELECT COUNT(*) FROM cloze_ranges c WHERE c.element_id = e.id)
 		FROM elements e
-		JOIN documents d ON d.id = e.document_id
-		WHERE e.parent_id IS NOT NULL
-		  AND e.state NOT IN ('dismissed')
-		  AND (? = '' OR e.origin = ?)
-		  AND (? = 0 OR e.kind = 'item')
-		  AND (? = 0 OR e.missing_upstream = 1)
-		  AND (? = '' OR e.quote LIKE ? OR d.title LIKE ?)
+		JOIN documents d ON d.id = e.document_id`+extractFilterWhere+`
 		ORDER BY `+orderBy+`
 		LIMIT ?`,
-		filter.Origin, filter.Origin,
-		filter.WithClozes,
-		filter.MissingOnly,
-		filter.Query, pattern, pattern,
-		filter.Limit,
+		append(extractFilterArgs(filter), filter.Limit)...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("store: list extracts: %w", err)
@@ -1548,6 +1585,26 @@ func (s *Store) Extracts(filter ExtractFilter) ([]ExtractRow, error) {
 		extracts = append(extracts, row)
 	}
 	return extracts, rows.Err()
+}
+
+// CountMatchingExtracts returns how many extracts a filter matches in total,
+// ignoring its Limit — what the browse page compares its rendered row count
+// against to know whether it has truncated, and by how much.
+//
+// Shares extractFilterWhere with the listing itself rather than restating the
+// predicate, so the two can never come to describe different sets.
+func (s *Store) CountMatchingExtracts(filter ExtractFilter) (int, error) {
+	var count int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*)
+		FROM elements e
+		JOIN documents d ON d.id = e.document_id`+extractFilterWhere,
+		extractFilterArgs(filter)...,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("store: count matching extracts: %w", err)
+	}
+	return count, nil
 }
 
 // CountExtracts returns how many extracts exist, by origin.

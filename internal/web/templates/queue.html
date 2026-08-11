@@ -17,8 +17,19 @@
   </nav>
 
   <p class="meta">
-    {{.Due}} due today · {{.Total}} elements in total
+    {{if .Truncated}}
+      showing {{.Showing}} of {{.Due}} due today · {{.Total}} elements in total
+    {{else}}
+      {{.Due}} due today · {{.Total}} elements in total
+    {{end}}
   </p>
+  {{if .Truncated}}
+    <p class="meta">
+      The rest are still queued and still reachable — Read next always takes the
+      most important one. Raise <code>queue_page_limit</code> (or set it to 0)
+      to list them all.
+    </p>
+  {{end}}
 
   {{if .Items}}
     <ol class="items">

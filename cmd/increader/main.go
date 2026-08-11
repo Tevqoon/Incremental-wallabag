@@ -225,12 +225,12 @@ func serve(settings config.Config, logger *slog.Logger) error {
 	}
 
 	reader, err := web.New(web.Options{
-		Store:        db,
-		Sources:      byName,
-		DailyLimit:   settings.DailyLimit,
-		ExtractDelay: settings.ExtractDelayDays,
-		Logger:       logger,
-		Publish:      sync.Publish,
+		Store:          db,
+		Sources:        byName,
+		QueuePageLimit: settings.QueuePageLimit,
+		ExtractDelay:   settings.ExtractDelayDays,
+		Logger:         logger,
+		Publish:        sync.Publish,
 		SyncNow: func(ctx context.Context) error {
 			// Reconciling here too, rather than waiting for the scheduled
 			// loop's daily check: a manual sync is exactly the moment

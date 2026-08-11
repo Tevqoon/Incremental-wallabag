@@ -110,6 +110,17 @@ type queueData struct {
 // typed constants itself.
 func (d queueData) IsExtracts() bool { return d.Kind == store.QueueExtracts }
 
+// Truncated reports whether queuePageLimit cut the list short of what is
+// actually due. Derived by comparing the rows rendered against the unlimited
+// count rather than by looking at the limit itself, so it stays right however
+// the limit is configured — and so the page can never again show sixty rows
+// under a heading that says a hundred and thirty-seven are due, without
+// saying which it means.
+func (d queueData) Truncated() bool { return len(d.Items) < d.Due }
+
+// Showing is how many rows were actually rendered.
+func (d queueData) Showing() int { return len(d.Items) }
+
 // handleQueue shows what is due today in one of the two queues, most important
 // first.
 //
@@ -119,10 +130,12 @@ func (d queueData) IsExtracts() bool { return d.Kind == store.QueueExtracts }
 // across everything?" — that a reader who works in article sessions and extract
 // sessions never asks. See store.QueueKind for what that bought.
 //
-// dailyLimit applies per queue rather than across both. "How much this queue
-// offers in a day" is what the number has always meant on the page it appears
-// on, and splitting one budget between two lists would make each queue's length
-// depend on how full the other one happened to be.
+// queuePageLimit applies per queue rather than across both, and is zero — no
+// limit — by default: everything due is listed. It caps rendering only. Nothing
+// here or anywhere else caps a day's reading, and a queue that has fallen
+// behind is a backlog to work through or postpone, not something to hide half
+// of. When a limit is set and does cut the list short, the page says so; see
+// queueData.Truncated.
 func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	kind, ok := requestQueueKind(w, r)
 	if !ok {
@@ -130,7 +143,7 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	}
 	today := s.today()
 
-	items, err := s.store.Queue(today, kind, s.dailyLimit)
+	items, err := s.store.Queue(today, kind, s.queuePageLimit)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -962,7 +975,20 @@ type extractsData struct {
 	Missing     int
 	CurrentURL  string
 	BulkActions []extractBulkAction
+
+	// Matching is how many extracts the current filter selects in total, as
+	// against the len(Extracts) actually rendered. The page has no paging, so
+	// a large harvest is always cut off somewhere; showing both numbers is
+	// what keeps that a visible cap rather than a silently shortened list.
+	Matching int
+	Limit    int
 }
+
+// Truncated reports whether the filter matched more than the page rendered.
+func (d extractsData) Truncated() bool { return d.Matching > len(d.Extracts) }
+
+// Showing is how many rows were actually rendered.
+func (d extractsData) Showing() int { return len(d.Extracts) }
 
 // extractBulkAction is the extracts page's counterpart to libraryBulkAction:
 // same shape, applied to a checked extract rather than a checked document,
@@ -1034,6 +1060,11 @@ func (s *Server) handleExtracts(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	matching, err := s.store.CountMatchingExtracts(filter)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
 	imported, err := s.store.CountExtracts(store.OriginImport)
 	if err != nil {
 		s.fail(w, err)
@@ -1063,6 +1094,8 @@ func (s *Server) handleExtracts(w http.ResponseWriter, r *http.Request) {
 		Missing:     missing,
 		CurrentURL:  r.URL.RequestURI(),
 		BulkActions: extractBulkActions,
+		Matching:    matching,
+		Limit:       store.ExtractsPageLimit,
 	})
 }
 

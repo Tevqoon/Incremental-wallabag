@@ -99,11 +99,11 @@ func newTestServerWithDelay(t *testing.T, delayDays int, withContent ...bool) (*
 
 	provider := &fakeSource{body: articleBody}
 	server, err := New(Options{
-		Store:        db,
-		Sources:      map[string]source.Source{"wallabag": provider},
-		DailyLimit:   60,
-		ExtractDelay: delayDays,
-		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Store:          db,
+		Sources:        map[string]source.Source{"wallabag": provider},
+		QueuePageLimit: 0, // no limit, as in production
+		ExtractDelay:   delayDays,
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -183,6 +183,94 @@ func TestQueuePagesShowOneKindEach(t *testing.T) {
 	}
 	if !strings.Contains(extracts, "Extract queue") {
 		t.Errorf("the extract queue is not titled as one:\n%s", extracts)
+	}
+}
+
+// seedArticles adds n further articles, all due today, on top of the one
+// newTestServer already seeded.
+func seedArticles(t *testing.T, db *store.Store, n int) {
+	t.Helper()
+	docs := make([]source.Document, 0, n)
+	for i := 2; i <= n+1; i++ {
+		docs = append(docs, source.Document{
+			ExternalID: itoa(int64(i)),
+			Title:      "Article " + itoa(int64(i)),
+			UpdatedAt:  time.Now(),
+		})
+	}
+	if _, err := db.UpsertDocuments("wallabag", docs, 0, time.Now()); err != nil {
+		t.Fatalf("seed articles: %v", err)
+	}
+}
+
+// TestQueueListsEverythingDueByDefault is the default the config now ships:
+// no limit. A backlog — from a migration, or from missing a day — is a pile to
+// work through, and the page that exists to show it must actually show it.
+func TestQueueListsEverythingDueByDefault(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+	seedArticles(t, db, 99)
+
+	body := get(t, server, "/queue?kind=articles").Body.String()
+	if rows := strings.Count(body, `<li class="item`); rows != 100 {
+		t.Errorf("queue page listed %d rows, want all 100 due", rows)
+	}
+	if !strings.Contains(body, "100 due today") {
+		t.Errorf("queue page does not report 100 due:\n%s", body)
+	}
+	if strings.Contains(body, "showing") {
+		t.Error("queue page claims to be truncated when nothing was cut")
+	}
+}
+
+// TestQueueSaysWhenItTruncates: a limit is allowed, silence about it is not.
+// The old behaviour rendered 60 rows under a heading saying "137 due today" and
+// said nothing about the gap, which read as material having gone missing.
+func TestQueueSaysWhenItTruncates(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+	server.queuePageLimit = 10
+	seedArticles(t, db, 99)
+
+	body := get(t, server, "/queue?kind=articles").Body.String()
+	if rows := strings.Count(body, `<li class="item`); rows != 10 {
+		t.Errorf("queue page listed %d rows, want the configured 10", rows)
+	}
+	if !strings.Contains(body, "showing 10 of 100 due today") {
+		t.Errorf("queue page does not say it truncated:\n%s", body)
+	}
+
+	// And the cap is a display cap only: Read next still reaches the backlog.
+	if got := get(t, server, "/next?kind=articles").Header().Get("Location"); !strings.HasPrefix(got, "/read/") {
+		t.Errorf("Read next gave %q, want an element despite the page limit", got)
+	}
+}
+
+// TestExtractsPageSaysWhenItTruncates: /extracts has no paging, so its cap is
+// the whole of what a reader can see there. It must report the full match
+// count rather than presenting a cut-off list as everything harvested.
+func TestExtractsPageSaysWhenItTruncates(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	total := store.ExtractsPageLimit + 5
+	for i := 0; i < total; i++ {
+		if _, err := db.CreateExtract(store.NewExtract{
+			ParentID: 1, DocumentID: 1,
+			Title: "Passage " + itoa(int64(i)), Quote: "Passage " + itoa(int64(i)),
+			ContentHTML: "<p>Passage</p>",
+		}, time.Now()); err != nil {
+			t.Fatalf("CreateExtract: %v", err)
+		}
+	}
+
+	body := get(t, server, "/extracts").Body.String()
+	want := "Showing the first " + itoa(int64(store.ExtractsPageLimit)) + " of " + itoa(int64(total))
+	if !strings.Contains(body, want) {
+		t.Errorf("extracts page does not report %q", want)
+	}
+
+	// Under the cap it says nothing, rather than nagging about a complete list.
+	under := get(t, server, "/extracts?q=Passage+7").Body.String()
+	if strings.Contains(under, "Showing the first") {
+		t.Error("extracts page claims truncation on a list that fits")
 	}
 }
 
@@ -1585,10 +1673,10 @@ func newEnrichedServer(t *testing.T, highlights []source.Highlight) (*Server, *s
 		highlights: highlights,
 	}
 	server, err := New(Options{
-		Store:      db,
-		Sources:    map[string]source.Source{"wallabag": provider},
-		DailyLimit: 60,
-		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Store:          db,
+		Sources:        map[string]source.Source{"wallabag": provider},
+		QueuePageLimit: 0,
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

@@ -33,8 +33,23 @@ type Config struct {
 	// SyncInterval is how often sources are polled in the background.
 	SyncInterval Duration `yaml:"sync_interval"`
 
-	// DailyLimit caps how many elements the queue offers per day.
-	DailyLimit int `yaml:"daily_limit"`
+	// QueuePageLimit caps how many rows the queue page renders at once. Zero,
+	// the default, renders everything due.
+	//
+	// A display cap and nothing else. It never gated a reading session — "Read
+	// next" and every grade redirect fetch the single most important due
+	// element, ignoring this entirely — so a smaller number never meant less
+	// reading, only a shorter list. Under its old name (daily_limit) it read
+	// as a workload cap, which is what made a page listing 60 rows under a
+	// heading saying "137 due today" so confusing. Whatever it is set to, the
+	// page now says when it has truncated.
+	QueuePageLimit int `yaml:"queue_page_limit"`
+
+	// DailyLimit is the former name of QueuePageLimit, kept only so that a
+	// config still carrying it fails loudly rather than having the setting
+	// silently ignored. A pointer so an absent key is distinguishable from a
+	// zero one.
+	DailyLimit *int `yaml:"daily_limit"`
 
 	// ExtractDelayDays is how long before a newly made or newly imported
 	// extract first becomes due. Zero means today.
@@ -113,7 +128,6 @@ func Load(path string) (Config, error) {
 		Database:         "./increader.db",
 		Timezone:         "Local",
 		SyncInterval:     Duration{30 * time.Minute},
-		DailyLimit:       60,
 		ExtractDelayDays: 10,
 	}
 	if err := yaml.Unmarshal([]byte(expanded), &config); err != nil {
@@ -126,8 +140,14 @@ func Load(path string) (Config, error) {
 	}
 	config.Location = location
 
-	if config.DailyLimit <= 0 {
-		return Config{}, fmt.Errorf("config: daily_limit must be positive, got %d", config.DailyLimit)
+	if config.DailyLimit != nil {
+		return Config{}, fmt.Errorf("config: daily_limit has been renamed to queue_page_limit, " +
+			"and 0 (the new default) now means no limit — it only ever capped how many rows the " +
+			"queue page rendered, never how much you could read")
+	}
+	if config.QueuePageLimit < 0 {
+		return Config{}, fmt.Errorf("config: queue_page_limit cannot be negative, got %d (0 means no limit)",
+			config.QueuePageLimit)
 	}
 	if config.ExtractDelayDays < 0 {
 		return Config{}, fmt.Errorf("config: extract_delay_days cannot be negative, got %d",
