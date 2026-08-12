@@ -405,6 +405,57 @@ func (s *Store) ReconcileMissing(sourceName string, present []string) (marked, c
 	return marked, cleared, err
 }
 
+// MissingCandidates returns the external ids of documents that ReconcileMissing
+// would flag missing given present, without changing anything.
+//
+// This exists to make Reconcile's second-listing safeguard cheap in the
+// overwhelmingly common case where nothing is missing: the caller runs this
+// first, against a single listing, and only pays for a second listing (and a
+// real ReconcileMissing call) when it comes back non-empty. Building present
+// the same way ReconcileMissing does — a temp table rather than an IN (...)
+// list built from bound parameters — for the same reason: a personal library
+// can exceed SQLite's default bound parameter count, and a temp table has no
+// such ceiling.
+func (s *Store) MissingCandidates(sourceName string, present []string) ([]string, error) {
+	var candidates []string
+	err := s.inTransaction(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`CREATE TEMP TABLE present_ids (external_id TEXT PRIMARY KEY)`); err != nil {
+			return fmt.Errorf("store: create temp table: %w", err)
+		}
+		defer tx.Exec(`DROP TABLE present_ids`)
+
+		insert, err := tx.Prepare(`INSERT OR IGNORE INTO present_ids VALUES (?)`)
+		if err != nil {
+			return fmt.Errorf("store: prepare temp insert: %w", err)
+		}
+		defer insert.Close()
+		for _, externalID := range present {
+			if _, err := insert.Exec(externalID); err != nil {
+				return fmt.Errorf("store: populate temp table: %w", err)
+			}
+		}
+
+		rows, err := tx.Query(`
+			SELECT external_id FROM documents
+			WHERE source = ? AND missing_upstream = 0
+			  AND external_id NOT IN (SELECT external_id FROM present_ids)`,
+			sourceName)
+		if err != nil {
+			return fmt.Errorf("store: query missing candidates: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var externalID string
+			if err := rows.Scan(&externalID); err != nil {
+				return fmt.Errorf("store: scan missing candidate: %w", err)
+			}
+			candidates = append(candidates, externalID)
+		}
+		return rows.Err()
+	})
+	return candidates, err
+}
+
 // DeleteDocument permanently removes a document and everything under it — its
 // root topic, every extract and cloze taken from it, its tags — via the
 // schema's ON DELETE CASCADE.

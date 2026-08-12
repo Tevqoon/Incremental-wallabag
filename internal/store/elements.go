@@ -1430,6 +1430,53 @@ func (s *Store) ReconcileMissingHighlights(sourceName string, present []string) 
 	return marked, cleared, err
 }
 
+// MissingHighlightCandidates returns the external_refs of extracts that
+// ReconcileMissingHighlights would flag missing given present, without
+// changing anything — the highlight-level counterpart of
+// Store.MissingCandidates, used the same way: check cheaply against one
+// listing, and only pay for a second listing when this comes back non-empty.
+func (s *Store) MissingHighlightCandidates(sourceName string, present []string) ([]string, error) {
+	var candidates []string
+	err := s.inTransaction(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`CREATE TEMP TABLE present_refs (external_ref TEXT PRIMARY KEY)`); err != nil {
+			return fmt.Errorf("store: create temp table: %w", err)
+		}
+		defer tx.Exec(`DROP TABLE present_refs`)
+
+		insert, err := tx.Prepare(`INSERT OR IGNORE INTO present_refs VALUES (?)`)
+		if err != nil {
+			return fmt.Errorf("store: prepare temp insert: %w", err)
+		}
+		defer insert.Close()
+		for _, ref := range present {
+			if _, err := insert.Exec(ref); err != nil {
+				return fmt.Errorf("store: populate temp table: %w", err)
+			}
+		}
+
+		rows, err := tx.Query(`
+			SELECT external_ref FROM elements
+			WHERE missing_upstream = 0
+			  AND external_ref IS NOT NULL AND external_ref <> ''
+			  AND external_ref NOT IN (SELECT external_ref FROM present_refs)
+			  AND document_id IN (SELECT id FROM documents WHERE source = ?)`,
+			sourceName)
+		if err != nil {
+			return fmt.Errorf("store: query missing highlight candidates: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var ref string
+			if err := rows.Scan(&ref); err != nil {
+				return fmt.Errorf("store: scan missing highlight candidate: %w", err)
+			}
+			candidates = append(candidates, ref)
+		}
+		return rows.Err()
+	})
+	return candidates, err
+}
+
 // BackfillHighlightPushes gives a missed extract push a fresh chance, two
 // ways: queuing one for an extract that has never had one queued at all —
 // made before the push-back feature existed, say — and separately resetting
