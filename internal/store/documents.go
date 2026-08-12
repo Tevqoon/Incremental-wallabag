@@ -292,6 +292,62 @@ func (s *Store) DocumentByID(id int64) (Document, error) {
 	return document, nil
 }
 
+// DocumentByExternalID reads a document by its provider identity — the
+// counterpart to the (source, external_id) lookup UpsertDocuments already
+// does inline for its own upsert decision, exposed here for a caller outside
+// this package that needs the same lookup on its own: internal/ingest's
+// repair pass, which has just written to wallabag and knows the entry's id
+// there, but not (and has no reason to keep) increader's own row id for it.
+//
+// Returns ErrNotFound rather than a zero Document when there is no match —
+// which for a repair pass immediately after creating a brand new wallabag
+// entry is the expected, ordinary case: nothing local exists yet, because the
+// row this would find is only created by the next sync's UpsertDocuments,
+// not by the create itself.
+func (s *Store) DocumentByExternalID(sourceName, externalID string) (Document, error) {
+	var id int64
+	err := s.db.QueryRow(
+		`SELECT id FROM documents WHERE source = ? AND external_id = ?`,
+		sourceName, externalID,
+	).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Document{}, fmt.Errorf("store: document %s/%s: %w", sourceName, externalID, ErrNotFound)
+	}
+	if err != nil {
+		return Document{}, fmt.Errorf("store: look up document %s/%s: %w", sourceName, externalID, err)
+	}
+	// Delegating to DocumentByID rather than duplicating its SELECT/Scan list
+	// keeps there being exactly one place that has to agree with Document's
+	// field layout.
+	return s.DocumentByID(id)
+}
+
+// ClearDocumentContent forgets a document's fetched article body, putting it
+// back into the same "not yet fetched" state a document has right after a
+// metadata-only sync first creates it (see insertDocument's hasContent and
+// updateDocument's own has_content handling).
+//
+// This exists for exactly one caller: internal/ingest's repair pass, after a
+// content PATCH has replaced this document's body at the provider. The local
+// copy in content_html is now the *old* text — a paywall preview, most
+// often — and has_content still claims it is up to date. Clearing both is
+// what makes the reading path re-fetch the real body the next time this
+// document is opened, rather than serving the stale one it already cached.
+//
+// Deliberately does not touch anything else: not has_content's counterpart
+// for extract anchors (see ClearExtractAnchors, a separate call for a
+// separate reason), not tags, not scheduling.
+func (s *Store) ClearDocumentContent(id int64) error {
+	_, err := s.db.Exec(
+		`UPDATE documents SET content_html = '', has_content = 0 WHERE id = ?`,
+		id,
+	)
+	if err != nil {
+		return fmt.Errorf("store: clear content of document %d: %w", id, err)
+	}
+	return nil
+}
+
 // ReconcileMissing flags documents whose external_id is absent from present
 // as missing upstream, and clears the flag on any that have reappeared in it.
 //
