@@ -215,7 +215,18 @@ h1 { font-size: 1.5rem; line-height: 1.25; margin: 0 0 0.35rem; }
   margin: 2rem 0 0.75em;
 }
 
-#article blockquote {
+/* .triage-body shares this and the pre/img rules below with #article: it
+   renders the same shape of sanitised, source-derived HTML — an annotation
+   or highlight's own content_html — straight from the sanitiser, without
+   going through ir.Article.Render first the way #article's content does.
+   A <blockquote> reaching this container carries its tag exactly as the
+   source wrote it, never rewritten the way ir.renderTag rewrites one that
+   lost its wrapper to collectBlocks' leaf rule (see insideBlockquote's own
+   doc comment in internal/ir/render.go), but without a selector matching
+   .triage-body too, that untouched tag rendered here with no styling at
+   all looks identical to the bug the leaf rule causes elsewhere: a quote
+   with no left border, indistinguishable from the prose around it. */
+#article blockquote, .triage-body blockquote {
   margin-left: 0;
   padding-left: 1rem;
   border-left: 2px solid var(--rule);
@@ -233,7 +244,7 @@ h1 { font-size: 1.5rem; line-height: 1.25; margin: 0 0 0.35rem; }
    .cloze-preview and GitHub's own mobile view make. overflow-wrap covers the
    one thing wrapping alone cannot: a single unbroken token — a long hash, an
    unspaced URL — with no natural place to break at all. */
-#article pre {
+#article pre, .triage-body pre {
   font: 0.85rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -248,7 +259,11 @@ h1 { font-size: 1.5rem; line-height: 1.25; margin: 0 0 0.35rem; }
    that reserved box down to fit rather than fighting it. Drop the attributes
    without dropping this rule and every image collapses to zero height on
    the swap that inserts it — see migrations/011_image_dimensions.sql. */
-#article img { max-width: 100%; height: auto; }
+/* Without this, a highlight or annotation whose content_html carries an
+   <img> at its original intrinsic size — .triage-body never runs it through
+   ir.renderImage, which is what scales #article's own images down — can
+   force the whole triage card wider than the viewport. */
+#article img, .triage-body img { max-width: 100%; height: auto; }
 
 /* One image, centred, no caption — see ir.Image. A figcaption next to it in
    the source becomes its own ordinary block, not a child of this element, so

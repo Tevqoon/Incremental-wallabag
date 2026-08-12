@@ -319,6 +319,19 @@ func renderTag(node *html.Node) (tag, class string) {
 	case atom.Blockquote:
 		return "blockquote", ""
 	case atom.Li:
+		// A quoted list — <blockquote><ul><li>...</li></ul></blockquote>,
+		// the same pull-quote shape as insideBlockquote's own doc comment
+		// but with a list in place of paragraphs — hits the identical leaf
+		// rule: the <li>s claim the blocks, so without this check the quote
+		// styling below would apply to every other tag but never to one
+		// that also happens to be a list item. Rendering the block as
+		// <blockquote class="list-item"> rather than swapping the class for
+		// something quote-specific keeps both CSS rules — the bullet and
+		// the left border — applying at once, since neither is keyed off
+		// the other.
+		if insideBlockquote(node) {
+			return "blockquote", "list-item"
+		}
 		return "p", "list-item"
 	default:
 		// store.annotationHTML marks a reader's own note on an imported

@@ -83,6 +83,17 @@ func TestExtractHTMLPreservesInlineMarkup(t *testing.T) {
 			given: Range{StartBlock: 0, StartOffset: 0, EndBlock: 0, EndOffset: 9},
 			want:  `<p>a &lt; b &amp; c</p>`,
 		},
+		{
+			// Same leaf-rule shape as insideBlockquote's own doc comment in
+			// render.go, but exercised through HTML() rather than Render():
+			// extracting a passage out of a multi-paragraph pull quote must
+			// not lose the quote's own tag just because collectBlocks made
+			// the inner <p> the block, not the <blockquote>.
+			name:  "extracting from a multi-paragraph blockquote keeps its tag",
+			html:  `<blockquote><p>First quoted line.</p><p>Second quoted line.</p></blockquote>`,
+			given: Range{StartBlock: 0, StartOffset: 0, EndBlock: 1, EndOffset: 19},
+			want:  `<blockquote>First quoted line.</blockquote><blockquote>Second quoted line.</blockquote>`,
+		},
 	}
 
 	for _, test := range tests {
@@ -183,6 +194,18 @@ func TestRenderMarksExtracts(t *testing.T) {
 			name: "a quote paragraph nested one level deeper than the blockquote still keeps quote styling",
 			html: `<blockquote><div><p>Quoted line.</p></div></blockquote>`,
 			want: `<blockquote data-b="0">Quoted line.</blockquote>`,
+		},
+		{
+			// A quoted bulleted list — <blockquote><ul><li>...</li></ul></blockquote>
+			// — hits the same leaf rule as the multi-paragraph case above, but
+			// atom.Li has its own switch case in renderTag, so without its own
+			// insideBlockquote check the quote's border would apply to every
+			// other tag but this one. Rendered as <blockquote class="list-item">
+			// so the bullet (keyed on the class) and the left border (keyed on
+			// the tag) both still apply.
+			name: "a quoted list item keeps both its bullet and its quote styling",
+			html: `<blockquote><ul><li>Quoted item.</li></ul></blockquote>`,
+			want: `<blockquote class="list-item" data-b="0">Quoted item.</blockquote>`,
 		},
 		{
 			name: "a stale mark is skipped rather than breaking the page",

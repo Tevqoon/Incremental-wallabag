@@ -60,6 +60,17 @@ func (a *Article) HTML(r Range) (string, error) {
 // extractTag decides what element wraps a clipped block. Preformatted text and
 // quotations carry meaning in their tag; everything else becomes a paragraph,
 // because a list item or table cell makes no sense outside its container.
+//
+// insideBlockquote (shared with renderTag in render.go) catches the same
+// shape that motivates it there: a multi-paragraph pull quote —
+// <blockquote><p>...</p><p>...</p></blockquote>, what Substack's own editor
+// writes for any quote of more than one paragraph — never has a block whose
+// node is the <blockquote> itself, since collectBlocks' leaf rule lets the
+// inner <p>s claim the blocks instead. Selecting text from such a passage and
+// extracting it would otherwise store the extract as a bare <p>, losing the
+// quote styling permanently at the point of extraction rather than just at
+// one render — every future render of that stored extract inherits the loss,
+// not just the article's own live view of it.
 func extractTag(node *html.Node) string {
 	switch node.DataAtom {
 	case atom.Pre:
@@ -67,6 +78,9 @@ func extractTag(node *html.Node) string {
 	case atom.Blockquote:
 		return "blockquote"
 	default:
+		if insideBlockquote(node) {
+			return "blockquote"
+		}
 		return "p"
 	}
 }
