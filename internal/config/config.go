@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -81,6 +82,15 @@ type Config struct {
 
 	Sources Sources `yaml:"sources"`
 
+	// Ingest holds one-shot, operator-run importers — deliberately not
+	// nested under Sources. A Sources entry is *polled* on SyncInterval and
+	// carries a sync watermark in the database; Substack is neither. It has
+	// no "changed since" listing to poll, only a fixed archive an operator
+	// walks by hand when their subscription happens to be active, so
+	// putting it under sources: would imply a background sync that does
+	// not exist and never will for this provider.
+	Ingest Ingest `yaml:"ingest"`
+
 	// Location is the resolved Timezone, filled in by Load.
 	Location *time.Location `yaml:"-"`
 }
@@ -88,6 +98,43 @@ type Config struct {
 // Sources holds per-provider configuration. Adding a provider adds a field.
 type Sources struct {
 	Wallabag Wallabag `yaml:"wallabag"`
+}
+
+// Ingest holds one-shot importers — see Config.Ingest for why these are
+// kept separate from Sources.
+type Ingest struct {
+	Substack Substack `yaml:"substack"`
+}
+
+// Substack configures the substack importer (internal/substack, driven by
+// the "import-substack" subcommand). See internal/substack's own package
+// doc for what it does with these; this type only carries what YAML can
+// spell.
+type Substack struct {
+	// Host is the publication's own domain, e.g. "example.substack.com", or
+	// a custom domain the publication has mapped onto Substack.
+	Host string `yaml:"host"`
+
+	// SessionCookie is the substack.sid cookie value from a browser signed
+	// into an account with an active paid subscription to Host. A secret —
+	// see internal/substack.Config.SessionID for why it must never be
+	// logged or reported.
+	SessionCookie string `yaml:"session_cookie"`
+
+	// CacheDir is where fetched posts are cached between runs. Defaults to
+	// ./substack-cache when empty — see Load.
+	CacheDir string `yaml:"cache_dir"`
+
+	// Tag is applied to every document this importer hands back, so a
+	// backfilled Substack post is easy to find in wallabag afterward.
+	// Defaults to the publication's own subdomain (the first label of
+	// Host) when empty — see Load.
+	Tag string `yaml:"tag"`
+}
+
+// Enabled reports whether enough is configured to run the substack importer.
+func (s Substack) Enabled() bool {
+	return s.Host != "" && s.SessionCookie != ""
 }
 
 // Wallabag is one wallabag account's connection details.
@@ -189,6 +236,29 @@ func Load(path string) (Config, error) {
 	}
 	if config.Database == "" {
 		return Config{}, fmt.Errorf("config: database path is required")
+	}
+
+	// A Host with no SessionCookie is not "not configured" — it is
+	// half-configured, and the importer would fail only when actually run,
+	// on a VPS over ssh, minutes into an archive walk. Rejecting it here,
+	// the same way the daily_limit rename is rejected above, means the
+	// operator finds out at config load instead.
+	if config.Ingest.Substack.Host != "" && config.Ingest.Substack.SessionCookie == "" {
+		return Config{}, fmt.Errorf(
+			"config: ingest.substack.host is set but session_cookie is empty; " +
+				"either set both or neither",
+		)
+	}
+	if config.Ingest.Substack.Host != "" {
+		if config.Ingest.Substack.CacheDir == "" {
+			config.Ingest.Substack.CacheDir = "./substack-cache"
+		}
+		if config.Ingest.Substack.Tag == "" {
+			// The publication's subdomain, i.e. the first label of Host:
+			// "example.substack.com" and a custom-mapped "example.com"
+			// both yield "example", which is a reasonable tag either way.
+			config.Ingest.Substack.Tag = strings.SplitN(config.Ingest.Substack.Host, ".", 2)[0]
+		}
 	}
 
 	return config, nil

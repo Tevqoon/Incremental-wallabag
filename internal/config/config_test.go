@@ -107,3 +107,84 @@ func TestAnnotationDelayRejectsNegative(t *testing.T) {
 		t.Error("Load accepted a negative annotation_delay_spread_days")
 	}
 }
+
+// TestIngestSubstackIsRead exercises a full ingest.substack block, including
+// ${VAR} substitution — the same mechanism sources.wallabag relies on for
+// its own secrets, so Substack's session cookie must go through it too
+// rather than ever sitting in the committed config.yaml directly.
+func TestIngestSubstackIsRead(t *testing.T) {
+	t.Setenv("SUBSTACK_SID", "s%3Atest-cookie-value")
+
+	body := minimal + `
+ingest:
+  substack:
+    host: example.substack.com
+    session_cookie: ${SUBSTACK_SID}
+    cache_dir: /data/substack-cache
+    tag: newsletter
+`
+	config, err := Load(write(t, body))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	sub := config.Ingest.Substack
+	if sub.Host != "example.substack.com" {
+		t.Errorf("Host = %q, want %q", sub.Host, "example.substack.com")
+	}
+	if sub.SessionCookie != "s%3Atest-cookie-value" {
+		t.Errorf("SessionCookie = %q, want the substituted env value", sub.SessionCookie)
+	}
+	if sub.CacheDir != "/data/substack-cache" {
+		t.Errorf("CacheDir = %q, want %q", sub.CacheDir, "/data/substack-cache")
+	}
+	if sub.Tag != "newsletter" {
+		t.Errorf("Tag = %q, want %q", sub.Tag, "newsletter")
+	}
+	if !sub.Enabled() {
+		t.Error("Enabled() = false, want true with host and cookie both set")
+	}
+}
+
+// TestIngestSubstackHostWithoutCookieIsRejected: a half-configured importer
+// that fails only when actually run — minutes into an archive walk, on a
+// VPS over ssh — is worse than one that refuses to load at all.
+func TestIngestSubstackHostWithoutCookieIsRejected(t *testing.T) {
+	body := minimal + "ingest:\n  substack:\n    host: example.substack.com\n"
+	_, err := Load(write(t, body))
+	if err == nil {
+		t.Fatal("Load accepted ingest.substack.host with no session_cookie")
+	}
+	if !strings.Contains(err.Error(), "session_cookie") {
+		t.Errorf("error does not name the missing setting: %v", err)
+	}
+}
+
+// TestIngestSubstackDefaults: an operator who sets only host and
+// session_cookie still gets a usable cache directory and a sensible tag,
+// derived from the publication's own subdomain.
+func TestIngestSubstackDefaults(t *testing.T) {
+	body := minimal + "ingest:\n  substack:\n    host: example.substack.com\n    session_cookie: s%3Aabc\n"
+	config, err := Load(write(t, body))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	sub := config.Ingest.Substack
+	if sub.CacheDir != "./substack-cache" {
+		t.Errorf("CacheDir = %q, want default %q", sub.CacheDir, "./substack-cache")
+	}
+	if sub.Tag != "example" {
+		t.Errorf("Tag = %q, want default %q (the subdomain)", sub.Tag, "example")
+	}
+}
+
+// TestIngestSubstackNotConfiguredIsDisabled: the zero value must not be
+// mistaken for a real, if minimal, configuration.
+func TestIngestSubstackNotConfiguredIsDisabled(t *testing.T) {
+	config, err := Load(write(t, minimal))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if config.Ingest.Substack.Enabled() {
+		t.Error("Enabled() = true with no ingest.substack block at all")
+	}
+}
