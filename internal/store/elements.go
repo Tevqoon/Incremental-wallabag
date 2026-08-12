@@ -674,6 +674,205 @@ func (s *Store) DeleteCloze(elementID int64, ordinal int) error {
 	return nil
 }
 
+// RemapExternalRef repoints a local extract's provider identity from oldRef
+// to newRef without touching anything else about the row — in particular
+// none of the scheduling columns (due_on, interval_days, afactor, reps,
+// priority, state) that anchor an incremental-reading history to it.
+//
+// This exists because wallabag has no way to update an annotation's location
+// in place — UpdateHighlightLocation (internal/wallabag/write.go) can only
+// give a highlight a position by creating a new annotation and deleting the
+// old one, so the annotation id (increader's own external_ref) necessarily
+// changes even though, semantically, it is still the very same highlight the
+// reader already reviewed some number of times. Without this call, a
+// re-anchor would look to increader exactly like the old annotation
+// disappearing and an unrelated new one appearing — discarding the schedule
+// built up on it — rather than what it actually is, one highlight moving.
+//
+// Both of the following are treated as success, not failure, which is what
+// makes this safe to call again after a previous run died partway through:
+//
+//   - IsDuplicate: the partial unique index elements_external_ref
+//     (document_id, external_ref) rejects the UPDATE when some other row
+//     under this document already carries newRef. The most likely way that
+//     happens is insertHighlights' own adopt-by-quote path (see "Not found
+//     under this exact ref" above) having already matched oldRef's row by
+//     its still-unchanged quote and moved it onto newRef itself, on a sync
+//     that ran between the failed attempt and this retry. Either way the
+//     end state this call exists to produce — this document's highlight
+//     carrying newRef — already holds.
+//   - Zero rows matched oldRef: either nothing local ever carried it (an
+//     annotation that existed only upstream, never synced down before this
+//     re-anchor touched it), or an earlier, since-interrupted run of this
+//     exact call already completed it. Both are "nothing left to do".
+//
+// missing_upstream is cleared alongside the ref for the same reason
+// insertHighlights' own adopt path clears it (elements.go, the `err == nil`
+// case above): a highlight this call just repointed to a live, current
+// upstream id is demonstrably not missing, whatever a Reconcile pass before
+// this run may have flagged it as.
+func (s *Store) RemapExternalRef(documentID int64, oldRef, newRef string) error {
+	_, err := s.db.Exec(`
+		UPDATE elements SET external_ref = ?, missing_upstream = 0
+		WHERE document_id = ? AND external_ref = ?`,
+		newRef, documentID, oldRef,
+	)
+	if err != nil {
+		if IsDuplicate(err) {
+			return nil
+		}
+		return fmt.Errorf("store: remap external ref %q to %q on document %d: %w",
+			oldRef, newRef, documentID, err)
+	}
+	return nil
+}
+
+// RequeueDocumentRoot puts a document's root topic back in the reading
+// queue after its body has been replaced with materially more text than it
+// had before — the Substack backfill's actual point, not a side effect of
+// it: a preview the operator dismissed, worked through to done, or parked
+// suspended was a decision about the preview, not about the article that
+// has since replaced it, and now that the real article exists there is
+// something worth reading that was not there before.
+//
+// due_on is set to today unconditionally, regardless of whatever state this
+// root was in beforehand — done, dismissed, suspended, anything. state
+// becomes StateReading if the reader had already gotten partway through the
+// preview (read_block > 0), so the queue treats this as "continue" rather
+// than "start over", or StateNew otherwise.
+//
+// read_block itself is deliberately left untouched, and that is what makes
+// the StateReading branch actually useful rather than cosmetic: Substack's
+// paywall truncates the article body rather than re-rendering a shorter
+// version of it (confirmed against real preview/full response pairs — the
+// preview is a literal byte-prefix of the full body_html), so whatever
+// block index the reader had reached in the preview sits at approximately
+// the same point in the full article, right around where the paywall used
+// to cut it off. Resuming there instead of at block 0 is the entire reason
+// this call does not also reset reading progress.
+//
+// interval_days, afactor, reps and priority are left untouched for the same
+// reason: this is a requeue, not a fresh import. The reader's past
+// engagement with this article, however partial, is real history — the
+// same history Suspend and Unsuspend already take care to preserve — not
+// noise to discard just because the body underneath it grew.
+//
+// today carries no fuzz or spread at all, unlike an imported annotation's
+// first due date (ir.FuzzedAnnotationDelay) or a fresh extract's
+// (ir.FuzzedFirstDueDays). Both of those exist because extracts and
+// imported highlights arrive in the hundreds per batch, and spreading them
+// out is what stops one import from burying the reader's daily extract
+// review under itself for weeks. A requeued article is not that kind of
+// arrival: this call runs once per grown document, not hundreds of times
+// per batch, and the article reading queue — unlike the bounded daily
+// extract review — is allowed to be arbitrarily long. An operator who ran
+// this backfill specifically to get an article's real text back in front of
+// them gets exactly that by seeing it due today, not on some
+// deterministically-scattered date nobody asked for. Fuzzing a value
+// nothing here actually needs spread out would just be copying a pattern
+// that solves a different problem.
+//
+// Only ever the root (parent_id IS NULL): an extract's own children keep
+// their own schedule entirely untouched by this call — they are being
+// re-anchored (see ClearExtractAnchors), not rescheduled, and requeuing the
+// article itself has no bearing on when a highlight taken from it next
+// comes up for review.
+//
+// Returns whether a root topic was actually found and updated — false for a
+// document id with no root element at all, which should never happen for
+// anything that went through UpsertDocuments, but is worth reporting to the
+// caller rather than silently doing nothing.
+func (s *Store) RequeueDocumentRoot(documentID int64, today time.Time) (bool, error) {
+	result, err := s.db.Exec(`
+		UPDATE elements SET
+		    due_on = ?,
+		    state = CASE WHEN read_block > 0 THEN ? ELSE ? END
+		WHERE document_id = ? AND parent_id IS NULL`,
+		today.Format(dateFormat), string(ir.StateReading), string(ir.StateNew),
+		documentID,
+	)
+	if err != nil {
+		return false, fmt.Errorf("store: requeue document %d: %w", documentID, err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("store: count requeued rows for document %d: %w", documentID, err)
+	}
+	return changed > 0, nil
+}
+
+// ClearExtractAnchors forgets where a document's extracts sit in its body —
+// NULLing start_block, start_offset, end_block, end_offset — so the next time
+// the document is opened, anchorHighlights (internal/web/server.go) re-locates
+// every one of them from scratch against whatever body is fetched then.
+//
+// This is the least obvious of the four store additions ingest needs, and the
+// most important: skipping it after a content PATCH does not fail loudly, it
+// fails silently.
+//
+// Why it is necessary. An extract's start_block/start_offset/end_block/
+// end_offset were measured against the article body that existed in wallabag
+// at the time it was anchored — for a Substack paywall preview that has since
+// been backfilled with the real article, that is the *preview's* body, which
+// is both shorter than and differently laid out from the full text about to
+// replace it. anchorHighlights will not repair this on its own, for two
+// independent reasons:
+//
+//   - Its pending filter (server.go, around line 363) only offers an extract
+//     that has no start_block at all. One that is already anchored — however
+//     stale that anchor now is — is skipped outright; there is no "anchored,
+//     but check whether it should still be" path.
+//   - Even routed past that filter somehow, the recovery check the same
+//     function makes (server.go, around line 411) short-circuits when the
+//     recovered *text* at the stored position is unchanged from what is
+//     already saved. That check exists to catch a moved passage, but it
+//     compares text, and text is exactly what does not change here — it is
+//     the *position* that went stale, and a preview's offsets stay well
+//     within bounds against a longer article (ir.Valid never trips), so
+//     nothing about this ever surfaces as an error. The highlight silently
+//     renders against whatever paragraph now happens to sit at the old
+//     offset, which after an in-place preview-to-full-text swap is very
+//     rarely the paragraph it was actually taken from.
+//
+// NULLing the four position columns is what defeats both guards at once:
+// HasRange becomes false, which is exactly the "needs anchoring" state the
+// pending filter is looking for, putting the extract back through
+// AnchorExtract's own re-location on next open rather than through either of
+// the checks above.
+//
+// Offsets only — content_html is deliberately left untouched. If the
+// re-location that follows fails for any reason (the passage's quote no
+// longer appears verbatim in the new body — the far edge of the same
+// truncated-quote problem RemapExternalRef exists for, say), this extract
+// degrades to a detached passage still showing its own last-known text,
+// exactly as any other extract whose anchor search fails already does. Also
+// clearing content_html here would instead degrade it to a blank one on that
+// same failure, which is a strictly worse outcome for the reader for no
+// benefit: the whole point of storing quote and content_html independently
+// of the position is that the passage survives even when the position does
+// not.
+//
+// Returns the number of extracts actually cleared — rows that already had no
+// anchor (a root topic; an extract imported from a listing and never
+// opened) do not count, which is also what makes a second call over the same
+// document report zero rather than repeating work that already happened.
+func (s *Store) ClearExtractAnchors(documentID int64) (int, error) {
+	result, err := s.db.Exec(`
+		UPDATE elements SET
+		    start_block = NULL, start_offset = NULL, end_block = NULL, end_offset = NULL
+		WHERE document_id = ? AND parent_id IS NOT NULL AND start_block IS NOT NULL`,
+		documentID,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("store: clear extract anchors for document %d: %w", documentID, err)
+	}
+	cleared, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("store: count cleared anchors for document %d: %w", documentID, err)
+	}
+	return int(cleared), nil
+}
+
 // insertRootTopic creates the queue entry for a newly imported document and
 // returns its id.
 //

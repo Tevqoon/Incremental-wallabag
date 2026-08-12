@@ -2,9 +2,11 @@
 //
 // Subcommands:
 //
-//	increader serve        run the web server and the background sync loop
-//	increader sync         sync every configured source once, then exit
-//	increader healthcheck  probe a running instance (used by the container)
+//	increader serve             run the web server and the background sync loop
+//	increader sync              sync every configured source once, then exit
+//	increader healthcheck       probe a running instance (used by the container)
+//	increader import-substack   backfill a Substack archive into wallabag in place
+//	increader version           print the build version and exit
 package main
 
 import (
@@ -26,8 +28,10 @@ import (
 	_ "time/tzdata"
 
 	"github.com/Tevqoon/increader/internal/config"
+	"github.com/Tevqoon/increader/internal/ingest"
 	"github.com/Tevqoon/increader/internal/source"
 	"github.com/Tevqoon/increader/internal/store"
+	"github.com/Tevqoon/increader/internal/substack"
 	"github.com/Tevqoon/increader/internal/syncer"
 	"github.com/Tevqoon/increader/internal/version"
 	"github.com/Tevqoon/increader/internal/wallabag"
@@ -45,7 +49,7 @@ func main() {
 
 // commands are the subcommands increader accepts.
 var commands = map[string]bool{
-	"serve": true, "sync": true, "healthcheck": true, "version": true,
+	"serve": true, "sync": true, "healthcheck": true, "version": true, "import-substack": true,
 }
 
 // splitCommand separates a leading subcommand from the flags.
@@ -71,6 +75,8 @@ func run() error {
 	flags := flag.NewFlagSet("increader", flag.ExitOnError)
 	configPath := flags.String("config", "config.yaml", "path to the configuration file")
 	full := flags.Bool("full", false, "sync: ignore the watermark and re-read every entry")
+	commit := flags.Bool("commit", false, "import-substack: apply changes instead of only reporting them")
+	host := flags.String("host", "", "import-substack: override the configured publication host")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -111,8 +117,10 @@ func run() error {
 		return runSync(settings, logger, *full)
 	case "serve":
 		return serve(settings, logger)
+	case "import-substack":
+		return importSubstack(settings, logger, *commit, *host)
 	default:
-		return fmt.Errorf("unknown command %q (want serve, sync, healthcheck or version)", command)
+		return fmt.Errorf("unknown command %q (want serve, sync, healthcheck, import-substack or version)", command)
 	}
 }
 
@@ -199,6 +207,141 @@ func runSync(settings config.Config, logger *slog.Logger, full bool) error {
 	}
 	fmt.Printf("queue: %d elements, %d articles and %d extracts due today\n",
 		total, articles, extracts)
+	return nil
+}
+
+// importSubstack backfills one Substack publication's archive into wallabag
+// in place — replacing paywall previews with full posts on the same entry,
+// re-anchoring any highlights already made on it — using internal/substack
+// to fetch and internal/ingest as the sink that does the reconciling. See
+// those two packages' doc comments for the design; this function is only
+// the wiring between them.
+//
+// The plan is always built and printed before anything is written, whether
+// or not commit is set — Gather, BuildPlan and the first WriteReport all run
+// unconditionally. That ordering is deliberate, not an optimisation left for
+// later: it makes it structurally impossible for -commit to apply a plan
+// that was never shown to the operator first, because there is only one
+// place BuildPlan is called and Apply always runs after it, never instead of
+// it.
+func importSubstack(settings config.Config, logger *slog.Logger, commit bool, hostOverride string) error {
+	if hostOverride != "" {
+		settings.Ingest.Substack.Host = hostOverride
+	}
+	if !settings.Ingest.Substack.Enabled() {
+		return fmt.Errorf("import-substack: ingest.substack is not configured (need host and session_cookie); " +
+			"see config.yaml's commented-out ingest.substack block")
+	}
+	if !settings.Sources.Wallabag.Enabled() {
+		return fmt.Errorf("import-substack: sources.wallabag is not configured; this command reconciles " +
+			"into wallabag and cannot do that without it")
+	}
+
+	if commit {
+		fmt.Println("=== import-substack: APPLYING — changes will be written to wallabag and the local store ===")
+	} else {
+		fmt.Println("=== import-substack: DRY RUN — reporting only, nothing will be written (pass -commit to apply) ===")
+	}
+
+	// openStore builds a *wallabag.Client internally and discards it once
+	// it has wrapped it in a source.Source, because every other caller only
+	// ever needs the Source. This command needs the raw Client too — Gather
+	// and Apply both take one directly — so it is built again here rather
+	// than widening openStore's return signature for the sake of this one
+	// caller.
+	client, err := wallabag.New(wallabag.Config{
+		URL:          settings.Sources.Wallabag.URL,
+		ClientID:     settings.Sources.Wallabag.ClientID,
+		ClientSecret: settings.Sources.Wallabag.ClientSecret,
+		Username:     settings.Sources.Wallabag.Username,
+		Password:     settings.Sources.Wallabag.Password,
+	})
+	if err != nil {
+		return fmt.Errorf("import-substack: %w", err)
+	}
+	src := wallabag.NewSource(client)
+
+	db, err := store.Open(settings.Database)
+	if err != nil {
+		return fmt.Errorf("import-substack: %w", err)
+	}
+	defer db.Close()
+
+	// A full archive walk runs at roughly 1.5s per post (RequestGap, kept
+	// deliberately polite toward a service with no documented rate limit)
+	// over a few hundred posts for an established publication, plus the
+	// wallabag reconcile pass afterward — comfortably past runSync's own
+	// 30-minute budget, which only ever covers a single incremental sync.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
+	defer cancel()
+
+	imp, err := substack.New(substack.Config{
+		Host:      settings.Ingest.Substack.Host,
+		SessionID: settings.Ingest.Substack.SessionCookie,
+		CacheDir:  settings.Ingest.Substack.CacheDir,
+	})
+	if err != nil {
+		return fmt.Errorf("import-substack: %w", err)
+	}
+
+	docs, result, err := imp.Ingest(ctx, logger)
+	if err != nil {
+		return fmt.Errorf("import-substack: fetch archive: %w", err)
+	}
+	fmt.Printf("substack: %d archive pages, %d posts found (%d cached, %d fetched, %d skipped as non-newsletter)\n",
+		result.Pages, result.Posts, result.Cached, result.Fetched, result.SkippedNonNewsletter)
+	for _, warning := range result.Warnings {
+		fmt.Println("substack warning:", warning)
+	}
+
+	// Appended, not replaced: a post can already carry tags of its own (a
+	// section name Substack itself assigns, say), and this importer's own
+	// tag is only meant to make a backfilled entry easy to find afterward,
+	// not to erase whatever else already described it.
+	for i := range docs {
+		docs[i].Tags = append(docs[i].Tags, settings.Ingest.Substack.Tag)
+	}
+
+	snap, err := ingest.Gather(ctx, client, docs)
+	if err != nil {
+		return fmt.Errorf("import-substack: %w", err)
+	}
+	now := time.Now()
+	plan := ingest.BuildPlan(docs, snap, now)
+	if err := ingest.WriteReport(os.Stdout, plan, nil); err != nil {
+		return fmt.Errorf("import-substack: write report: %w", err)
+	}
+
+	if !commit {
+		fmt.Println("=== import-substack: dry run complete — nothing was written; re-run with -commit to apply the plan above ===")
+		return nil
+	}
+
+	applied, err := ingest.Apply(ctx, client, src, plan, logger)
+	if err != nil {
+		// Apply itself only returns an error for something that aborted the
+		// whole batch (a cancelled context); a single bad entry or
+		// annotation is recorded in applied.Errors / AnnotationFailures
+		// instead and must not fail the command, since it would still leave
+		// every entry applied before the failure correctly written.
+		return fmt.Errorf("import-substack: apply: %w", err)
+	}
+
+	repaired, err := ingest.Repair(ctx, db, applied, now, logger)
+	if err != nil {
+		return fmt.Errorf("import-substack: repair: %w", err)
+	}
+
+	if err := ingest.WriteReport(os.Stdout, plan, &applied); err != nil {
+		return fmt.Errorf("import-substack: write report: %w", err)
+	}
+	fmt.Printf("repair: %d entries repaired locally, %d skipped (no local row yet), %d errors\n",
+		repaired.Repaired, repaired.Skipped, len(repaired.Errors))
+	for _, repairErr := range repaired.Errors {
+		fmt.Println("repair warning:", repairErr)
+	}
+	fmt.Println("=== import-substack: apply complete — changes were written to wallabag and the local store ===")
+
 	return nil
 }
 

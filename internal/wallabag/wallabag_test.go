@@ -612,3 +612,86 @@ func TestCreateHighlightTruncatesLongQuotes(t *testing.T) {
 		t.Errorf("short quote was altered: got %v, want %q unchanged", body["quote"], short)
 	}
 }
+
+// TestTruncateQuoteRescuesWideRuneCutMidSequence pins the fix behind
+// truncateQuote's trim loop: a rune wider than 2 bytes, cut early enough to
+// leave more than one dangling byte at maxHighlightQuoteLength, must not
+// merely have its very last byte removed — the single-byte trim this
+// replaced left the rest of an incomplete sequence behind, and
+// encoding/json's own handling of invalid UTF-8 turned that leftover into
+// an actual U+FFFD character in wallabag's stored quote (confirmed against
+// a live account on 2026-08-12; see truncateQuote's own comment).
+//
+// A 4-byte emoji is used rather than another 2-byte rune like "é" (already
+// covered by TestCreateHighlightTruncatesLongQuotes): a 2-byte rune can only
+// ever leave one dangling byte behind, which the old single-byte trim
+// already handled correctly by accident. Only a wider rune exposes the gap.
+func TestTruncateQuoteRescuesWideRuneCutMidSequence(t *testing.T) {
+	// 898 plain bytes plus the emoji's first two bytes lands the cut at
+	// maxHighlightQuoteLength exactly two bytes into the emoji's 4-byte
+	// encoding — the case a single fixed-size trim cannot rescue.
+	prefix := strings.Repeat("a", maxHighlightQuoteLength-2)
+	quote := prefix + "😀" + "more text after the emoji to keep the quote past the cutoff"
+
+	got := truncateQuote(quote)
+
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncateQuote produced invalid UTF-8: %q", got)
+	}
+	if strings.ContainsRune(got, utf8.RuneError) {
+		t.Errorf("truncateQuote result contains a replacement character it should have trimmed away entirely: %q", got)
+	}
+	if !strings.HasPrefix(got, prefix) {
+		t.Errorf("truncateQuote dropped part of the clean, untouched prefix: %q", got)
+	}
+}
+
+// TestTrimTruncationMarkerStripsWhatTruncateQuoteAdds is the inverse's own
+// coverage: every marker truncateQuote can leave behind, alone and in the
+// combination the pre-fix bug actually produced (debris then the ellipsis
+// appended after it — see truncateQuote's own comment), plus the two
+// baseline cases TrimTruncationMarker's doc comment is upfront about: a
+// quote that happened to end in an ellipsis on its own, which this cannot
+// tell apart from a truncated one and trims anyway, and a plain quote with
+// no marker at all.
+func TestTrimTruncationMarkerStripsWhatTruncateQuoteAdds(t *testing.T) {
+	tests := []struct {
+		name  string
+		quote string
+		want  string
+	}{
+		{
+			name:  "ellipsis-terminated, as a real truncation leaves it",
+			quote: "a passage cut short…",
+			want:  "a passage cut short",
+		},
+		{
+			name:  "U+FFFD-terminated, debris from the pre-fix truncateQuote",
+			quote: "a passage cut mid-rune�",
+			want:  "a passage cut mid-rune",
+		},
+		{
+			name:  "both together: debris then the ellipsis truncateQuote appends after it, the exact shape the pre-fix bug produced",
+			quote: "a passage cut mid-rune�…",
+			want:  "a passage cut mid-rune",
+		},
+		{
+			name:  "genuinely ends in an ellipsis and was never truncated — indistinguishable from a real one, trimmed anyway",
+			quote: "she trailed off…",
+			want:  "she trailed off",
+		},
+		{
+			name:  "untouched quote with neither marker",
+			quote: "an ordinary complete sentence.",
+			want:  "an ordinary complete sentence.",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := TrimTruncationMarker(test.quote); got != test.want {
+				t.Errorf("TrimTruncationMarker(%q) = %q, want %q", test.quote, got, test.want)
+			}
+		})
+	}
+}

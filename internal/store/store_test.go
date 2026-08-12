@@ -2482,3 +2482,424 @@ func TestBackfillHighlightPushesResetsAbandonedWrites(t *testing.T) {
 		t.Errorf("attempts = %d, want reset to 0", revived[0].Attempts)
 	}
 }
+
+// TestDocumentByExternalIDFindsMatch pins the (source, external_id) lookup
+// against the same identity UpsertDocuments itself upserts on.
+func TestDocumentByExternalIDFindsMatch(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "42", Title: "Found by provider id", UpdatedAt: now},
+	}, 0, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	document, err := db.DocumentByExternalID("wallabag", "42")
+	if err != nil {
+		t.Fatalf("DocumentByExternalID: %v", err)
+	}
+	if document.Title != "Found by provider id" {
+		t.Errorf("title = %q, want the synced document", document.Title)
+	}
+}
+
+// TestDocumentByExternalIDMissingIsNotFound covers the case ingest's repair
+// pass relies on being ordinary rather than an error: a wallabag entry that
+// was just created has no local row yet, because that row is only made by
+// the next sync's UpsertDocuments, not by the create itself.
+func TestDocumentByExternalIDMissingIsNotFound(t *testing.T) {
+	db := testStore(t)
+
+	_, err := db.DocumentByExternalID("wallabag", "no-such-id")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestClearDocumentContent covers the repair-pass call that forgets a
+// document's cached body after its content has been replaced upstream, so
+// the reading path re-fetches the real thing instead of serving the stale
+// copy it already has — and that it touches nothing else about the document.
+func TestClearDocumentContent(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
+		ExternalID: "1", Title: "A preview", Author: "Some Author",
+		ContentHTML: "<p>Only the preview.</p>", UpdatedAt: now,
+	}}, 0, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	if err := db.ClearDocumentContent(1); err != nil {
+		t.Fatalf("ClearDocumentContent: %v", err)
+	}
+
+	document, err := db.DocumentByID(1)
+	if err != nil {
+		t.Fatalf("DocumentByID: %v", err)
+	}
+	if document.ContentHTML != "" {
+		t.Errorf("content_html = %q, want cleared", document.ContentHTML)
+	}
+	if document.HasContent {
+		t.Error("has_content is still true after ClearDocumentContent")
+	}
+	if document.Title != "A preview" || document.Author != "Some Author" {
+		t.Errorf("ClearDocumentContent touched fields beyond content: title=%q author=%q",
+			document.Title, document.Author)
+	}
+}
+
+// TestRemapExternalRefPreservesScheduling is the test the whole design turns
+// on: re-anchoring a wallabag highlight always changes its annotation id
+// (UpdateHighlightLocation is create-then-delete, since wallabag cannot
+// relocate an annotation in place), and RemapExternalRef exists so that id
+// change carries no cost to the reader — everything already decided about
+// this passage, on this row, must survive untouched.
+func TestRemapExternalRefPreservesScheduling(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
+		ExternalID: "1", Title: "An article", UpdatedAt: now,
+		Highlights: []source.Highlight{{ExternalID: "100", Quote: "A passage worth keeping."}},
+	}}, 0, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	extracts, err := db.ChildrenOf(1)
+	if err != nil || len(extracts) != 1 {
+		t.Fatalf("ChildrenOf: %v (extracts=%+v)", err, extracts)
+	}
+	extractID := extracts[0].ID
+
+	// Give it a real reading history, the way actually reviewing it several
+	// times would: this is what must not move.
+	if err := db.SaveSchedule(extractID, ir.Schedule{
+		State: ir.StateReading, IntervalDays: 21, AFactor: 2.6, Reps: 4,
+		Priority: 0.35, DueOn: now.AddDate(0, 0, 21),
+	}, now); err != nil {
+		t.Fatalf("SaveSchedule: %v", err)
+	}
+
+	if err := db.RemapExternalRef(1, "100", "200"); err != nil {
+		t.Fatalf("RemapExternalRef: %v", err)
+	}
+
+	element, err := db.ElementByID(extractID)
+	if err != nil {
+		t.Fatalf("ElementByID: %v", err)
+	}
+	if element.ExternalRef != "200" {
+		t.Errorf("external ref = %q, want the new one, 200", element.ExternalRef)
+	}
+	if element.Quote != "A passage worth keeping." {
+		t.Errorf("quote = %q, want untouched", element.Quote)
+	}
+	if element.Schedule.IntervalDays != 21 || element.Schedule.AFactor != 2.6 ||
+		element.Schedule.Reps != 4 || element.Schedule.Priority != 0.35 {
+		t.Errorf("RemapExternalRef disturbed scheduling: %+v", element.Schedule)
+	}
+	if element.Schedule.DueOn.Format("2006-01-02") != now.AddDate(0, 0, 21).Format("2006-01-02") {
+		t.Errorf("due_on = %v, want unchanged", element.Schedule.DueOn)
+	}
+}
+
+// TestRemapExternalRefToleratesDuplicateCollision covers the retry case the
+// partial unique index on (document_id, external_ref) creates: newRef is
+// already claimed by some other row under the same document — most likely
+// insertHighlights' own adopt-by-quote path having gotten there first on an
+// intervening sync — so the UPDATE hits the unique constraint. That must be
+// treated as "already done", not surfaced as a failure, and it must not
+// disturb either row.
+func TestRemapExternalRefToleratesDuplicateCollision(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
+		ExternalID: "1", Title: "An article", UpdatedAt: now,
+		Highlights: []source.Highlight{
+			{ExternalID: "100", Quote: "The first passage."},
+			{ExternalID: "999", Quote: "A completely different passage."},
+		},
+	}}, 0, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	// "999" is already in use by the second highlight, so remapping "100"
+	// onto it must collide rather than silently steal it.
+	if err := db.RemapExternalRef(1, "100", "999"); err != nil {
+		t.Fatalf("RemapExternalRef: want the collision swallowed, got error: %v", err)
+	}
+
+	extracts, err := db.ChildrenOf(1)
+	if err != nil || len(extracts) != 2 {
+		t.Fatalf("ChildrenOf: %v (extracts=%+v)", err, extracts)
+	}
+	refs := map[string]bool{}
+	for _, e := range extracts {
+		refs[e.ExternalRef] = true
+	}
+	if !refs["100"] || !refs["999"] {
+		t.Errorf("refs after a collided remap = %v, want both rows unchanged (100 and 999)", refs)
+	}
+}
+
+// TestRemapExternalRefNoMatchIsNotAnError covers the other idempotence case:
+// oldRef matching nothing local, either because this exact remap already
+// completed on an earlier, interrupted run, or because the row was never
+// synced down in the first place.
+func TestRemapExternalRefNoMatchIsNotAnError(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
+		ExternalID: "1", Title: "An article", UpdatedAt: now,
+	}}, 0, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	if err := db.RemapExternalRef(1, "no-such-old-ref", "new-ref"); err != nil {
+		t.Errorf("RemapExternalRef with nothing to match: %v, want nil", err)
+	}
+}
+
+// TestClearExtractAnchorsPreservesSchedulingAndPassage is ClearExtractAnchors'
+// own load-bearing test: it must forget *only* the position an extract was
+// last located at, leaving its passage, its rendered HTML and everything
+// about its reading schedule exactly as they were — the position is what went
+// stale when the parent's body changed underneath it, nothing else did.
+func TestClearExtractAnchorsPreservesSchedulingAndPassage(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
+		ExternalID: "1", Title: "A preview, soon to be replaced", UpdatedAt: now,
+	}}, 0, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	extractID, err := db.CreateExtract(NewExtract{
+		ParentID: 1, DocumentID: 1, Origin: OriginManual,
+		Quote:       "A passage anchored against the old preview body.",
+		ContentHTML: "<p>A passage anchored against the old preview body.</p>",
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+
+	if err := db.AnchorExtract(extractID, ir.Range{StartBlock: 3, StartOffset: 10, EndBlock: 3, EndOffset: 40},
+		"A passage anchored against the old preview body.",
+		"<p>A passage anchored against the old preview body.</p>", now); err != nil {
+		t.Fatalf("AnchorExtract: %v", err)
+	}
+
+	if err := db.SaveSchedule(extractID, ir.Schedule{
+		State: ir.StateReading, IntervalDays: 12, AFactor: 2.2, Reps: 2,
+		Priority: 0.4, DueOn: now.AddDate(0, 0, 12),
+	}, now); err != nil {
+		t.Fatalf("SaveSchedule: %v", err)
+	}
+
+	cleared, err := db.ClearExtractAnchors(1)
+	if err != nil {
+		t.Fatalf("ClearExtractAnchors: %v", err)
+	}
+	if cleared != 1 {
+		t.Errorf("cleared = %d, want 1", cleared)
+	}
+
+	element, err := db.ElementByID(extractID)
+	if err != nil {
+		t.Fatalf("ElementByID: %v", err)
+	}
+	if element.HasRange {
+		t.Error("HasRange is still true after ClearExtractAnchors")
+	}
+	if element.Quote != "A passage anchored against the old preview body." {
+		t.Errorf("quote = %q, want untouched", element.Quote)
+	}
+	if element.ContentHTML != "<p>A passage anchored against the old preview body.</p>" {
+		t.Errorf("content_html = %q, want untouched — a failed re-location must degrade to the old text, not a blank", element.ContentHTML)
+	}
+	if element.Schedule.IntervalDays != 12 || element.Schedule.AFactor != 2.2 ||
+		element.Schedule.Reps != 2 || element.Schedule.Priority != 0.4 {
+		t.Errorf("ClearExtractAnchors disturbed scheduling: %+v", element.Schedule)
+	}
+	if element.Schedule.DueOn.Format("2006-01-02") != now.AddDate(0, 0, 12).Format("2006-01-02") {
+		t.Errorf("due_on = %v, want unchanged", element.Schedule.DueOn)
+	}
+
+	// A second pass over the same document has nothing left to clear — the
+	// root topic has no anchor to begin with, and the extract's is already
+	// gone.
+	clearedAgain, err := db.ClearExtractAnchors(1)
+	if err != nil {
+		t.Fatalf("second ClearExtractAnchors: %v", err)
+	}
+	if clearedAgain != 0 {
+		t.Errorf("second pass cleared = %d, want 0", clearedAgain)
+	}
+}
+
+// TestRequeueDocumentRootFromEveryPriorState covers the "regardless of prior
+// state" half of the requirement: done, dismissed and suspended must all
+// come back into the queue — the operator's dismissal or completion was a
+// decision about the preview, not about the article that replaced it.
+func TestRequeueDocumentRootFromEveryPriorState(t *testing.T) {
+	for _, prior := range []ir.State{ir.StateDone, ir.StateDismissed, ir.StateSuspended} {
+		t.Run(string(prior), func(t *testing.T) {
+			db := testStore(t)
+			now := time.Now()
+
+			if _, err := db.UpsertDocuments("wallabag", []source.Document{
+				{ExternalID: "1", Title: "A backfilled post", UpdatedAt: now},
+			}, 0, 0, now); err != nil {
+				t.Fatalf("UpsertDocuments: %v", err)
+			}
+			if err := db.SaveSchedule(1, ir.Schedule{State: prior}, now); err != nil {
+				t.Fatalf("SaveSchedule: %v", err)
+			}
+
+			today := now.AddDate(0, 0, 3)
+			changed, err := db.RequeueDocumentRoot(1, today)
+			if err != nil {
+				t.Fatalf("RequeueDocumentRoot: %v", err)
+			}
+			if !changed {
+				t.Fatal("RequeueDocumentRoot reported no change")
+			}
+
+			element, err := db.ElementByID(1)
+			if err != nil {
+				t.Fatalf("ElementByID: %v", err)
+			}
+			if element.Schedule.State != ir.StateNew {
+				t.Errorf("state = %q, want %q (read_block is 0)", element.Schedule.State, ir.StateNew)
+			}
+			if element.Schedule.DueOn.Format("2006-01-02") != today.Format("2006-01-02") {
+				t.Errorf("due_on = %v, want today (%v)", element.Schedule.DueOn, today)
+			}
+		})
+	}
+}
+
+// TestRequeueDocumentRootPicksReadingWhenPartiallyRead covers the
+// read_block-driven state choice: a reader who was partway through the
+// preview should land back in StateReading, "continue", rather than
+// StateNew, "start over" — read_block itself must survive untouched, since
+// Substack truncates rather than re-renders and the old position is still
+// approximately right in the full article.
+func TestRequeueDocumentRootPicksReadingWhenPartiallyRead(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "1", Title: "A backfilled post", UpdatedAt: now},
+	}, 0, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+	if err := db.SaveSchedule(1, ir.Schedule{State: ir.StateDone}, now); err != nil {
+		t.Fatalf("SaveSchedule: %v", err)
+	}
+	if err := db.SetReadBlock(1, 7); err != nil {
+		t.Fatalf("SetReadBlock: %v", err)
+	}
+
+	changed, err := db.RequeueDocumentRoot(1, now)
+	if err != nil {
+		t.Fatalf("RequeueDocumentRoot: %v", err)
+	}
+	if !changed {
+		t.Fatal("RequeueDocumentRoot reported no change")
+	}
+
+	element, err := db.ElementByID(1)
+	if err != nil {
+		t.Fatalf("ElementByID: %v", err)
+	}
+	if element.Schedule.State != ir.StateReading {
+		t.Errorf("state = %q, want %q (read_block > 0)", element.Schedule.State, ir.StateReading)
+	}
+	if element.ReadBlock != 7 {
+		t.Errorf("read_block = %d, want untouched (7) — resuming near the old paywall boundary depends on this", element.ReadBlock)
+	}
+}
+
+// TestRequeueDocumentRootPreservesSchedulingAndLeavesChildrenAlone covers
+// the rest of what must survive: interval_days, afactor, reps and priority
+// are history, not noise to discard on a requeue, and an extract's own
+// schedule belongs to it, not to whether its parent article was just
+// requeued.
+func TestRequeueDocumentRootPreservesSchedulingAndLeavesChildrenAlone(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "1", Title: "A backfilled post", UpdatedAt: now},
+	}, 0, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+	if err := db.SaveSchedule(1, ir.Schedule{
+		State: ir.StateDone, IntervalDays: 30, AFactor: 2.8, Reps: 5, Priority: 0.2,
+	}, now); err != nil {
+		t.Fatalf("SaveSchedule: %v", err)
+	}
+
+	extractID, err := db.CreateExtract(NewExtract{
+		ParentID: 1, DocumentID: 1, Origin: OriginManual,
+		Quote: "A passage taken before the backfill.", ContentHTML: "<p>A passage taken before the backfill.</p>",
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+	if err := db.SaveSchedule(extractID, ir.Schedule{
+		State: ir.StateReading, IntervalDays: 4, AFactor: 2.1, Reps: 1, Priority: 0.6,
+		DueOn: now.AddDate(0, 0, 4),
+	}, now); err != nil {
+		t.Fatalf("SaveSchedule on extract: %v", err)
+	}
+
+	if _, err := db.RequeueDocumentRoot(1, now); err != nil {
+		t.Fatalf("RequeueDocumentRoot: %v", err)
+	}
+
+	root, err := db.ElementByID(1)
+	if err != nil {
+		t.Fatalf("ElementByID(root): %v", err)
+	}
+	if root.Schedule.IntervalDays != 30 || root.Schedule.AFactor != 2.8 ||
+		root.Schedule.Reps != 5 || root.Schedule.Priority != 0.2 {
+		t.Errorf("RequeueDocumentRoot disturbed the root's own scheduling: %+v", root.Schedule)
+	}
+
+	extract, err := db.ElementByID(extractID)
+	if err != nil {
+		t.Fatalf("ElementByID(extract): %v", err)
+	}
+	if extract.Schedule.State != ir.StateReading || extract.Schedule.IntervalDays != 4 ||
+		extract.Schedule.Reps != 1 {
+		t.Errorf("requeuing the root disturbed a child extract's own schedule: %+v", extract.Schedule)
+	}
+	if extract.Quote != "A passage taken before the backfill." {
+		t.Errorf("quote = %q, want untouched", extract.Quote)
+	}
+}
+
+// TestRequeueDocumentRootMissingReturnsFalse covers the no-root case: a
+// document id with no root element (should never happen for anything that
+// went through UpsertDocuments, but is worth reporting rather than silently
+// doing nothing).
+func TestRequeueDocumentRootMissingReturnsFalse(t *testing.T) {
+	db := testStore(t)
+
+	changed, err := db.RequeueDocumentRoot(999, time.Now())
+	if err != nil {
+		t.Fatalf("RequeueDocumentRoot: %v", err)
+	}
+	if changed {
+		t.Error("changed = true for a document with no root element, want false")
+	}
+}

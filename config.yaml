@@ -70,3 +70,55 @@ sources:
     client_secret: ${WALLABAG_CLIENT_SECRET}
     username: ${WALLABAG_USERNAME}
     password: ${WALLABAG_PASSWORD}
+
+# One-shot, operator-run importer — deliberately not nested under sources:
+# above. A sources: entry is polled on sync_interval and carries a watermark
+# in the database; this is not. Substack has no "changed since" listing,
+# only a fixed archive walked by hand while a subscription happens to be
+# active, so putting it under sources: would imply a background sync that
+# does not exist. Run with:
+#   increader import-substack            (dry run: reports only, writes nothing)
+#   increader import-substack -commit    (applies the plan the dry run printed)
+#
+# Commented out entirely by default, not just secret-free: host and
+# session_cookie must be set together or not at all — Load treats a host
+# with no cookie as a hard error, on the theory that an importer which only
+# fails once you actually run it is worse than one that refuses to load. A
+# real host here with SUBSTACK_SID unset would trip that error for every
+# operator who has no interest in Substack. Uncomment the whole block below
+# and fill in host to use it.
+#
+# ingest:
+#   substack:
+#     # The publication's own domain, or a custom domain it has mapped onto
+#     # Substack.
+#     host: example.substack.com
+#
+#     # The substack.sid cookie from a browser signed into an account with
+#     # an active paid subscription to host, above.
+#     #
+#     # IMPORTANT: the value legitimately begins with "s%3A" (the
+#     # URL-escaped form of "s:") — that prefix is part of the cookie
+#     # itself, not URL-escaping applied on top of it. Paste it in whole;
+#     # stripping the "s%3A" produces a cookie substack will not recognise.
+#     #
+#     # Also note the ${...} substitution below only recognises the braced
+#     # form — a bare $SUBSTACK_SID would be left completely alone rather
+#     # than substituted, per the file header above.
+#     #
+#     # To find it in Safari: Settings -> Advanced -> "Show features for web
+#     # developers", then with a Substack page open, Develop -> Show Web
+#     # Inspector -> Storage -> Cookies.
+#     session_cookie: ${SUBSTACK_SID}
+#
+#     # Where fetched posts are cached between runs, so a later run made
+#     # after the subscription has lapsed again can skip re-fetching
+#     # anything already captured while it was active. Defaults to
+#     # ./substack-cache when left unset.
+#     # cache_dir: ./substack-cache
+#
+#     # Applied to every document this importer hands to wallabag, so a
+#     # backfilled post is easy to find afterward. Defaults to the
+#     # publication's own subdomain (the first label of host, above) when
+#     # left unset.
+#     # tag: example

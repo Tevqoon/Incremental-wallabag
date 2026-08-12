@@ -293,6 +293,164 @@ func TestRecoverQuoteStripsInvisibleFormatting(t *testing.T) {
 	}
 }
 
+// TestQuoteOccurrencesCounts covers the basic zero/one/many shape a caller
+// asking "would this land unambiguously" needs: no match, exactly one, and
+// the ambiguous case computeRanges itself resolves silently by taking the
+// first (see TestComputeRangesFirstOccurrenceWins) — the case a caller of
+// QuoteOccurrences most needs visibility into, since computeRanges will
+// never tell it that a choice was even made.
+func TestQuoteOccurrencesCounts(t *testing.T) {
+	html := `<p>The fox jumps.</p><p>Something else.</p><p>The fox jumps.</p><p>The fox jumps.</p>`
+
+	tests := []struct {
+		name  string
+		quote string
+		want  int
+	}{
+		{"not present", "no such phrase", 0},
+		{"present once", "Something else", 1},
+		{"present three times", "The fox jumps", 3},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := QuoteOccurrences(html, test.quote)
+			if len(got) != test.want {
+				t.Errorf("QuoteOccurrences = %v, want %d occurrences", got, test.want)
+			}
+		})
+	}
+}
+
+// TestQuoteOccurrencesWhitespaceTolerant covers the same zero-width
+// whitespace tolerance locateQuote itself relies on for a quote spanning a
+// paragraph boundary — quoteRegex is shared between locateQuote and
+// locateQuoteAll specifically so this and TestComputeRangesAcrossParagraphsWithNoGap
+// can never drift apart on what counts as a match.
+func TestQuoteOccurrencesWhitespaceTolerant(t *testing.T) {
+	html := `<p>First paragraph ends here.</p><p>Second paragraph starts here.</p>`
+	quote := "ends here.\n\nSecond paragraph starts"
+
+	got := QuoteOccurrences(html, quote)
+	if len(got) != 1 {
+		t.Fatalf("QuoteOccurrences = %v, want exactly one match spanning the paragraph boundary", got)
+	}
+}
+
+// TestQuoteOccurrencesSpansInlineMarkup checks a quote crossing into inline
+// markup resolves to a single occurrence at the right offset into the
+// flattened text — the same text computeRanges itself searches, confirmed
+// here independently rather than assumed to agree with computeRanges just
+// because both call flattenText.
+func TestQuoteOccurrencesSpansInlineMarkup(t *testing.T) {
+	html := `<p>Some text with <em>an emphasised phrase</em> right here.</p>`
+	quote := "with an emphasised phrase right"
+
+	got := QuoteOccurrences(html, quote)
+	if len(got) != 1 {
+		t.Fatalf("QuoteOccurrences = %v, want one match spanning the <em>", got)
+	}
+
+	flat := flattenText(collectTextNodes(parseBody(html)))
+	want := strings.Index(flat, "with")
+	if want < 0 {
+		t.Fatal("test premise is wrong: flattened text does not contain \"with\"")
+	}
+	if got[0] != want {
+		t.Errorf("start offset = %d, want %d (where \"with\" begins in the flattened text)", got[0], want)
+	}
+}
+
+// TestQuoteAnchoredResolvesToMatchingText is QuoteAnchored's basic promise:
+// ranges computeRanges itself just produced for quote must be reported as
+// still anchored to that same quote.
+func TestQuoteAnchoredResolvesToMatchingText(t *testing.T) {
+	html := `<p>Before text. </p><p>The quick brown fox jumps over the lazy dog.</p>`
+	quote := "quick brown fox"
+
+	ranges := computeRanges(html, quote)
+	if ranges == nil {
+		t.Fatal("test premise is wrong: computeRanges could not find the quote")
+	}
+	encoded, err := json.Marshal(ranges)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+
+	if !QuoteAnchored(html, encoded, quote) {
+		t.Error("QuoteAnchored = false, want true for ranges that resolve to the quote unchanged")
+	}
+}
+
+// TestQuoteAnchoredFalseWhenTextHasChanged covers the actual reason this
+// function exists: the article changed upstream since the location was
+// computed, so the stored ranges still resolve to something, but no longer
+// to the passage the highlight was originally anchored to.
+func TestQuoteAnchoredFalseWhenTextHasChanged(t *testing.T) {
+	html := `<p>Before text. </p><p>The quick brown fox jumps over the lazy dog.</p>`
+	ranges := computeRanges(html, "quick brown fox")
+	if ranges == nil {
+		t.Fatal("test premise is wrong: computeRanges could not find the quote")
+	}
+	encoded, err := json.Marshal(ranges)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+
+	changed := `<p>Before text. </p><p>The slow green turtle crawls under the tall fence.</p>`
+	if QuoteAnchored(changed, encoded, "quick brown fox") {
+		t.Error("QuoteAnchored = true, want false when the resolved text no longer matches the quote")
+	}
+}
+
+// TestQuoteAnchoredFalseOnMalformedJSON and TestQuoteAnchoredFalseOnEmptyRanges
+// cover the fail-closed contract: neither malformed input nor the absence of
+// any location should panic or be mistaken for "anchored".
+func TestQuoteAnchoredFalseOnMalformedJSON(t *testing.T) {
+	html := `<p>Some ordinary paragraph.</p>`
+	if QuoteAnchored(html, json.RawMessage(`not json`), "anything") {
+		t.Error("QuoteAnchored = true, want false for malformed JSON")
+	}
+}
+
+func TestQuoteAnchoredFalseOnEmptyRanges(t *testing.T) {
+	html := `<p>Some ordinary paragraph.</p>`
+	if QuoteAnchored(html, nil, "anything") {
+		t.Error("QuoteAnchored = true, want false for a nil ranges value")
+	}
+	if QuoteAnchored(html, json.RawMessage(`[]`), "anything") {
+		t.Error("QuoteAnchored = true, want false for an empty (but present) ranges array")
+	}
+}
+
+// TestQuoteAnchoredHandlesTruncatedQuote covers the case QuoteAnchored's own
+// doc comment calls out explicitly: a caller may hand it the truncated quote
+// wallabag itself stores (see truncateQuote, maxHighlightQuoteLength), which
+// can never equal the full text a resolved range recovers. Without the
+// truncated-quote handling, this would report every sufficiently long
+// highlight as unanchored regardless of whether it had moved at all.
+func TestQuoteAnchoredHandlesTruncatedQuote(t *testing.T) {
+	full := strings.TrimSpace(strings.Repeat("word ", 400)) + " final."
+	html := "<p>" + full + "</p>"
+
+	ranges := computeRanges(html, full)
+	if ranges == nil {
+		t.Fatal("test premise is wrong: computeRanges could not find the full quote")
+	}
+	encoded, err := json.Marshal(ranges)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+
+	truncated := truncateQuote(full)
+	if !strings.HasSuffix(truncated, "…") {
+		t.Fatal("test premise is wrong: truncateQuote did not actually truncate")
+	}
+
+	if !QuoteAnchored(html, encoded, truncated) {
+		t.Error("QuoteAnchored = false, want true for ranges resolving to text starting with the truncated quote's body")
+	}
+}
+
 // TestSourceResolveRange is the public entry point importHighlights and
 // anchorHighlights actually use: decoding the raw JSON a Highlight carries
 // and recovering text from it, matching source.RangeResolver.

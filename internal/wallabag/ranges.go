@@ -1,6 +1,7 @@
 package wallabag
 
 import (
+	"encoding/json"
 	"regexp"
 	"strconv"
 	"strings"
@@ -112,6 +113,48 @@ func computeRanges(rawHTML, quote string) []serializedRange {
 	}}
 }
 
+// QuoteOccurrences reports where quote occurs in rawHTML, as offsets into the
+// same flattened text computeRanges locates against — the concatenation of
+// every text node's data, in document order, with nothing inserted between
+// elements (see flattenText). Matching is the same whitespace-tolerant sense
+// locateQuote itself uses, via the shared locateQuoteAll.
+//
+// This exists for a caller outside this package that needs to ask "would
+// creating a highlight from this quote land unambiguously in this HTML" —
+// wallabag's own annotator resolves a highlight by quote-search exactly like
+// this when the caller does not have a range yet, so more than one
+// occurrence is not a hypothetical, it is the same ambiguity computeRanges
+// itself resolves by silently taking the first match (see
+// TestComputeRangesFirstOccurrenceWins). A caller that cares whether that
+// silent choice picked the right passage needs the full count and location
+// of every occurrence, not just the one computeRanges quietly settled on.
+//
+// Only the START offset of each occurrence is reported, not the full
+// [start,end) pair computeRanges itself needs: a caller asking "how many,
+// and roughly where" has no use for the end offset, and adding it back is a
+// trivial extension the day something does.
+//
+// Returns nil if rawHTML cannot be parsed, or quote does not occur at all —
+// not an empty non-nil slice, matching locateQuoteAll's own convention for
+// "no matches", which in turn matches regexp.FindAllStringIndex's.
+func QuoteOccurrences(rawHTML, quote string) []int {
+	root := parseBody(rawHTML)
+	if root == nil {
+		return nil
+	}
+	flat := flattenText(collectTextNodes(root))
+
+	matches := locateQuoteAll(flat, quote)
+	if matches == nil {
+		return nil
+	}
+	starts := make([]int, len(matches))
+	for i, match := range matches {
+		starts[i] = match[0]
+	}
+	return starts
+}
+
 // parseBody parses rawHTML and returns its <body> — the root every path is
 // computed relative to. html.Parse always produces a full document even from
 // a bare fragment, wrapping it in <html><body>...; that wrapper is exactly
@@ -173,25 +216,54 @@ func flattenText(nodes []*html.Node) string {
 // tolerant search pattern out of a literal quote.
 var whitespaceRun = regexp.MustCompile(`\s+`)
 
-// locateQuote finds quote's [start, end) byte range within flat, the whole
-// article's text with no separators inserted between elements — matching
-// annotator's own concatenation, which inserts none either.
-//
-// Matching is whitespace-tolerant, and deliberately tolerates a whitespace
-// run in quote matching zero characters in flat, not just a different run:
-// increader's own multi-block quotes join separate blocks with a blank line
-// for readability, but adjacent block elements carry no whitespace between
+// quoteRegex builds the whitespace-tolerant search pattern both locateQuote
+// and locateQuoteAll match with, out of a literal quote: each run of
+// whitespace in quote becomes \s* — not just a different run of whitespace,
+// but optionally none at all — against the search text. That zero-width
+// tolerance is deliberate, not a looser bound picked for safety: increader's
+// own multi-block quotes join separate blocks with a blank line for
+// readability, but adjacent block elements carry no whitespace between
 // their text nodes at the DOM level, so a quote spanning a paragraph break
 // would otherwise never match at all.
-func locateQuote(flat, quote string) (start, end int, ok bool) {
+//
+// Factored out into one helper specifically so locateQuote (first match) and
+// locateQuoteAll (every match) can never drift into two different notions of
+// "matches this quote" — the two are meant to agree on every location a
+// quote is found, one just enumerates where locateQuote's own free variable
+// choice of "first" landed among.
+//
+// Returns ok=false for an empty or all-whitespace quote, or a pattern
+// regexp.Compile rejects (QuoteMeta escapes everything itself, but the \s*
+// substitution runs after escaping and has not been proven to always yield
+// something Compile accepts for arbitrary input).
+func quoteRegex(quote string) (*regexp.Regexp, bool) {
 	trimmed := strings.TrimSpace(quote)
 	if trimmed == "" {
-		return 0, 0, false
+		return nil, false
 	}
 	pattern := regexp.QuoteMeta(trimmed)
 	pattern = whitespaceRun.ReplaceAllString(pattern, `\s*`)
 	re, err := regexp.Compile(pattern)
 	if err != nil {
+		return nil, false
+	}
+	return re, true
+}
+
+// locateQuote finds quote's [start, end) byte range within flat, the whole
+// article's text with no separators inserted between elements — matching
+// annotator's own concatenation, which inserts none either. See quoteRegex
+// for what "finds" tolerates.
+//
+// Only the first match is returned: computeRanges, this function's only
+// caller, needs exactly one range to serialize, and taking the first is the
+// same pragmatic tie-break increader's own paste-to-extract fallback makes
+// for the identical ambiguity (see TestComputeRangesFirstOccurrenceWins). A
+// caller that instead needs to know about every match — whether the first
+// one was even the right choice — wants locateQuoteAll, not this.
+func locateQuote(flat, quote string) (start, end int, ok bool) {
+	re, ok := quoteRegex(quote)
+	if !ok {
 		return 0, 0, false
 	}
 	loc := re.FindStringIndex(flat)
@@ -199,6 +271,28 @@ func locateQuote(flat, quote string) (start, end int, ok bool) {
 		return 0, 0, false
 	}
 	return loc[0], loc[1], true
+}
+
+// locateQuoteAll is locateQuote's every-match counterpart: every
+// non-overlapping [start, end) byte range within flat where quote matches,
+// in the same whitespace-tolerant sense locateQuote itself resolves against
+// — built from the identical quoteRegex, so the "first match" and "every
+// match" questions can never silently disagree about what counts as a match
+// for the same quote. That drift — one of the two getting its own,
+// independently-typed-out copy of the \s* substitution that later falls out
+// of sync with the other — is exactly the bug this shared helper exists to
+// make structurally impossible rather than merely unlikely.
+//
+// Returns nil, not an empty non-nil slice, when quote does not occur at all
+// or cannot be turned into a pattern — matching FindAllStringIndex's own
+// convention for "no matches", which QuoteOccurrences, this function's
+// caller outside this package, in turn also relies on.
+func locateQuoteAll(flat, quote string) [][]int {
+	re, ok := quoteRegex(quote)
+	if !ok {
+		return nil
+	}
+	return re.FindAllStringIndex(flat, -1)
 }
 
 // nodeAtOffset finds the text node containing byte offset target, within the
@@ -556,4 +650,77 @@ func extractBetween(nodes []*html.Node, startNode *html.Node, startByte int, end
 	// range whose end comes before its start, or a boundary from a
 	// different tree entirely.
 	return "", false
+}
+
+// QuoteAnchored reports whether ranges still resolve against rawHTML to text
+// matching quote — the check a caller outside this package needs before
+// trusting that a highlight's already-stored location still points at the
+// right passage, rather than at whatever the source article now happens to
+// have in that spot after an upstream edit. It is recoverQuote plus exactly
+// one more question: recoverQuote alone reports what text a range resolves
+// to today, saying nothing about whether that is still the text anyone
+// actually meant to highlight.
+//
+// ranges is json.RawMessage, not []serializedRange, because that is the
+// exact shape a caller holding a source.Highlight has to give: see that
+// field's own comment in source.go for why it is carried opaquely rather
+// than as a typed slice outside this package in the first place.
+//
+// Comparison is whitespace-tolerant rather than byte-exact, deliberately: a
+// quote as a caller holds it may have travelled through storage or been
+// reformatted since it was first extracted, and increader's own multi-block
+// quotes join separate blocks with a blank line that has no counterpart at
+// the DOM level at all (the same gap locateQuote's own \s* tolerance exists
+// to cross). None of that reflects the article having actually changed
+// underneath the highlight, so a byte-exact comparison would report a
+// perfectly still-anchored highlight as having moved for no reason but its
+// own formatting history. Fields+Join is a coarser normalisation than
+// locateQuote's regex — it cannot tolerate a whitespace run collapsing to
+// zero characters at a block boundary the way locateQuote can — but nothing
+// here needs that: unlike locateQuote, this is not searching for quote
+// inside a larger text, it is comparing two already-delimited strings for
+// equivalence, where collapsing all whitespace runs to a single space is
+// sufficient and simpler.
+//
+// A quote wallabag truncated to maxHighlightQuoteLength bytes and suffixed
+// with "…" (see truncateQuote) is handled explicitly: recovered text that
+// merely starts with the truncated quote's own body is still reported as
+// anchored. A truncated quote can never equal the full text a resolved range
+// recovers — it is missing everything past the cut, by construction — so
+// without this every highlight long enough to have been truncated would be
+// reported as unanchored regardless of whether it had actually moved at all,
+// which is exactly backwards for the callers this exists to serve.
+//
+// Malformed JSON, an empty ranges array, or a resolution that fails all
+// report false rather than panicking or returning an error: recoverQuote and
+// the xpath-resolution it calls into already fail closed on a malformed or
+// stale range for the same reason (the article having changed, or the range
+// simply never having been valid), and this adds nothing past their own
+// best-effort convention beyond the final text comparison.
+func QuoteAnchored(rawHTML string, ranges json.RawMessage, quote string) bool {
+	if len(ranges) == 0 {
+		return false
+	}
+	var parsed []serializedRange
+	if err := json.Unmarshal(ranges, &parsed); err != nil {
+		return false
+	}
+
+	recovered, ok := recoverQuote(rawHTML, parsed)
+	if !ok {
+		return false
+	}
+
+	normalize := func(s string) string { return strings.Join(strings.Fields(s), " ") }
+	recoveredNorm := normalize(recovered)
+	quoteNorm := normalize(quote)
+
+	if recoveredNorm == quoteNorm {
+		return true
+	}
+
+	if body, wasTruncated := strings.CutSuffix(quoteNorm, "…"); wasTruncated && body != "" {
+		return strings.HasPrefix(recoveredNorm, body)
+	}
+	return false
 }
