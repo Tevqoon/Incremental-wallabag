@@ -346,8 +346,17 @@ func (s *Syncer) reconcileMissingDocuments(ctx context.Context, provider source.
 	if err != nil {
 		return 0, 0, fmt.Errorf("missing candidates: %w", err)
 	}
+
+	// No candidates means nothing can newly go missing, so the second listing
+	// is skipped and this stays a single-request operation in the common case.
+	// ReconcileMissing is still called, because it does two jobs: it flags what
+	// has gone, and it clears the flag from anything that has come back. Only
+	// the first depends on a candidate existing. Returning early here instead
+	// would leave a document that was wrongly flagged once — which is exactly
+	// what the race below produces — carrying that flag until some unrelated
+	// candidate happened to trigger this path again.
 	if len(candidates) == 0 {
-		return 0, 0, nil
+		return s.store.ReconcileMissing(name, present)
 	}
 
 	second, err := provider.Fetch(ctx, time.Time{})
@@ -389,8 +398,11 @@ func (s *Syncer) reconcileMissingHighlights(ctx context.Context, provider source
 	if err != nil {
 		return 0, 0, fmt.Errorf("missing highlight candidates: %w", err)
 	}
+	// Still called with no candidates, for the same reason as its document
+	// counterpart above: this clears a stale flag as well as setting a new one,
+	// and only the setting half needs a candidate.
 	if len(candidates) == 0 {
-		return 0, 0, nil
+		return s.store.ReconcileMissingHighlights(name, present)
 	}
 
 	second, err := provider.Fetch(ctx, time.Time{})

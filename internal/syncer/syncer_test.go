@@ -441,6 +441,50 @@ func TestReconcileSkipsSecondListingWhenNoDocumentsAreMissing(t *testing.T) {
 	}
 }
 
+// TestReconcileClearsAStaleFlagEvenWithNoCandidates is the other half of the
+// candidate shortcut, and the reason it cannot be a plain early return.
+//
+// ReconcileMissing does two jobs: it flags what has gone, and it clears the
+// flag from anything that has come back. Only the flagging half needs a
+// candidate. Skipping the call outright when there are none would strand a
+// document that an earlier bad listing had already flagged — leaving it
+// wrongly marked, next to a delete button, until some unrelated document
+// happened to go missing and drag this path back into use.
+func TestReconcileClearsAStaleFlagEvenWithNoCandidates(t *testing.T) {
+	db, logger := testSetup(t)
+	seed(t, db)
+
+	// First: absent from both independent listings, so it is genuinely flagged.
+	vanished := newWritingSource()
+	vanished.listings = [][]source.Document{{}, {}}
+	if err := New(db, logger, vanished).Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile (absent): %v", err)
+	}
+	flagged, _ := db.DocumentByID(1)
+	if !flagged.MissingUpstream {
+		t.Fatal("test premise is wrong: the document should have been flagged first")
+	}
+
+	// Then: it is back, and nothing else is missing — so there are no
+	// candidates at all, which is precisely the shortcut's path.
+	restored := newWritingSource()
+	restored.listing = []source.Document{
+		{ExternalID: "77", Title: "An article", UpdatedAt: time.Now()},
+	}
+	if err := New(db, logger, restored).Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile (restored): %v", err)
+	}
+
+	cleared, _ := db.DocumentByID(1)
+	if cleared.MissingUpstream {
+		t.Error("a document that came back was left carrying a stale missing flag")
+	}
+	if restored.fetchCalls != 1 {
+		t.Errorf("provider.Fetch called %d times, want exactly 1 — clearing must not cost a second listing",
+			restored.fetchCalls)
+	}
+}
+
 // TestReconcileRescuesAHighlightSeenOnlyInSecondListing is
 // TestReconcileRescuesADocumentSeenOnlyInSecondListing one level down: an
 // annotation's external_ref is just as vulnerable to being shifted past a
