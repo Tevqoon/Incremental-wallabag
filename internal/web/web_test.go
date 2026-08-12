@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,10 +35,32 @@ import (
 // implemented the interface at all — the ordinary case for every test that
 // does not specifically exercise the ranges-recovery fallback.
 type fakeSource struct {
-	body         string
-	contentCalls int
+	body string
+
+	// contentCallsMu guards contentCalls. Only the bulk prefetch tests
+	// (web_test.go's TestLibraryBulkFetchBodies... group) ever call Content
+	// from more than one goroutine at once — every other test in this file
+	// drives fetchBody from a single request — but bodyPrefetchWorkers > 1
+	// means those calls are genuinely concurrent, and the plain int this
+	// used to be raced under -race the moment two documents were fetched in
+	// the same run.
+	contentCallsMu sync.Mutex
+	contentCalls   int
 
 	resolveRange func(rawHTML string, ranges json.RawMessage) (string, bool)
+
+	// failContentFor, when set, makes Content fail for exactly this external
+	// id — used to test that one document's fetch failing in a bulk prefetch
+	// does not stop the others. Set only before a test starts making
+	// requests, and never changed afterward, so reading it concurrently from
+	// several fetch goroutines needs no lock of its own.
+	failContentFor string
+
+	// contentBlock, when non-nil, is received from before Content returns —
+	// used to hold a fetch open long enough for a test to observe the bulk
+	// prefetch overlap guard while it is actually in effect. Same
+	// set-once-before-use rule as failContentFor.
+	contentBlock chan struct{}
 }
 
 func (f *fakeSource) Name() string { return "wallabag" }
@@ -53,8 +76,17 @@ func (f *fakeSource) ResolveRange(rawHTML string, ranges json.RawMessage) (strin
 	return f.resolveRange(rawHTML, ranges)
 }
 
-func (f *fakeSource) Content(context.Context, string) (string, error) {
+func (f *fakeSource) Content(_ context.Context, externalID string) (string, error) {
+	f.contentCallsMu.Lock()
 	f.contentCalls++
+	f.contentCallsMu.Unlock()
+
+	if f.contentBlock != nil {
+		<-f.contentBlock
+	}
+	if f.failContentFor != "" && externalID == f.failContentFor {
+		return "", fmt.Errorf("fake fetch failure for %s", externalID)
+	}
 	return f.body, nil
 }
 
@@ -3480,5 +3512,205 @@ func TestDeleteDocumentMissing(t *testing.T) {
 
 	if response := del(t, server, "/documents/999"); response.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", response.Code)
+	}
+}
+
+// waitForPrefetchIdle polls until the package-level bulk-fetch guard
+// (bodyPrefetchRunning, in prefetch.go) is free again. That release happens
+// exactly when runBodyPrefetch's own deferred Unlock runs, at the very end
+// of the background run — success, partial failure, or otherwise — which
+// makes it the one condition every test below can wait on regardless of how
+// that run turned out. This is the poll-not-sleep pattern the whole
+// prefetch feature is asynchronous enough to need: a fixed sleep would
+// either be too short under load or waste time on every ordinary run.
+func waitForPrefetchIdle(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if bodyPrefetchRunning.TryLock() {
+			bodyPrefetchRunning.Unlock()
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the background body fetch to finish")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// noticeFromLocation reads the "notice" query parameter off a redirect
+// response's Location header — the only place handleFetchBodiesBulk's
+// flash-like message (see withNotice in prefetch.go) is observable from
+// outside.
+func noticeFromLocation(t *testing.T, response *httptest.ResponseRecorder) string {
+	t.Helper()
+	location := response.Header().Get("Location")
+	parsed, err := url.Parse(location)
+	if err != nil {
+		t.Fatalf("parse Location %q: %v", location, err)
+	}
+	return parsed.Query().Get("notice")
+}
+
+// TestLibraryBulkFetchBodiesFetchesUncachedDocuments is the ordinary case
+// the whole feature exists for: after a backfill lands a pile of documents
+// with metadata only, selecting them all and pressing "Fetch bodies" should
+// fill in every one of their bodies without the reader opening each in turn.
+func TestLibraryBulkFetchBodiesFetchesUncachedDocuments(t *testing.T) {
+	server, db, provider := newTestServer(t, false)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "2", Title: "Second, also uncached", UpdatedAt: time.Now()},
+	}, 0, 0, time.Now()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	response := post(t, server, "/library/bulk", url.Values{
+		"action": {fetchBodiesBulkAction},
+		"ids":    {"1", "2"},
+	})
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303: %s", response.Code, response.Body.String())
+	}
+
+	waitForPrefetchIdle(t)
+
+	for _, id := range []int64{1, 2} {
+		document, err := db.DocumentByID(id)
+		if err != nil {
+			t.Fatalf("DocumentByID(%d): %v", id, err)
+		}
+		if !document.HasContent {
+			t.Errorf("document %d was not fetched", id)
+		}
+		if document.ContentHTML != articleBody {
+			t.Errorf("document %d content = %q, want the fetched body", id, document.ContentHTML)
+		}
+	}
+	if provider.contentCalls != 2 {
+		t.Errorf("provider.Content called %d times, want 2", provider.contentCalls)
+	}
+}
+
+// TestLibraryBulkFetchBodiesSkipsAlreadyCached covers the cheapness this
+// feature depends on for a mixed selection: a document that already has a
+// body must cost nothing, not be re-fetched just because it was checked
+// alongside others that do need it.
+func TestLibraryBulkFetchBodiesSkipsAlreadyCached(t *testing.T) {
+	server, db, provider := newTestServer(t, true) // document 1 already has content
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "2", Title: "Uncached", UpdatedAt: time.Now()},
+	}, 0, 0, time.Now()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	response := post(t, server, "/library/bulk", url.Values{
+		"action": {fetchBodiesBulkAction},
+		"ids":    {"1", "2"},
+	})
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303: %s", response.Code, response.Body.String())
+	}
+
+	waitForPrefetchIdle(t)
+
+	document, err := db.DocumentByID(2)
+	if err != nil {
+		t.Fatalf("DocumentByID(2): %v", err)
+	}
+	if !document.HasContent {
+		t.Error("the uncached document was not fetched")
+	}
+	if provider.contentCalls != 1 {
+		t.Errorf("provider.Content called %d times, want 1 — document 1 already had content", provider.contentCalls)
+	}
+}
+
+// TestLibraryBulkFetchBodiesOneFailureDoesNotBlockOthers covers the same
+// tolerance lazy fetching on first open already has: a document whose fetch
+// fails today is logged and left for another day, not treated as fatal to
+// whatever else was selected alongside it.
+func TestLibraryBulkFetchBodiesOneFailureDoesNotBlockOthers(t *testing.T) {
+	server, db, provider := newTestServer(t, false)
+	provider.failContentFor = "1"
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "2", Title: "Fetches fine", UpdatedAt: time.Now()},
+	}, 0, 0, time.Now()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	response := post(t, server, "/library/bulk", url.Values{
+		"action": {fetchBodiesBulkAction},
+		"ids":    {"1", "2"},
+	})
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303: %s", response.Code, response.Body.String())
+	}
+
+	waitForPrefetchIdle(t)
+
+	failed, err := db.DocumentByID(1)
+	if err != nil {
+		t.Fatalf("DocumentByID(1): %v", err)
+	}
+	if failed.HasContent {
+		t.Error("the document whose fetch failed ended up with content anyway")
+	}
+
+	succeeded, err := db.DocumentByID(2)
+	if err != nil {
+		t.Fatalf("DocumentByID(2): %v", err)
+	}
+	if !succeeded.HasContent {
+		t.Error("the other document's fetch was blocked by the first one's failure")
+	}
+}
+
+// TestLibraryBulkFetchBodiesGuardsAgainstOverlap covers the requirement that
+// a second click while a prefetch is running must not start a competing set
+// of workers double-fetching the same documents.
+//
+// The guard (bodyPrefetchRunning) is taken synchronously in
+// handleFetchBodiesBulk, before the background goroutine is even started —
+// so by the time the first request's own HTTP response has been written,
+// a second request is guaranteed to observe it held. No polling is needed to
+// win this race: it is not actually a race.
+func TestLibraryBulkFetchBodiesGuardsAgainstOverlap(t *testing.T) {
+	server, db, provider := newTestServer(t, false)
+	provider.contentBlock = make(chan struct{})
+
+	first := post(t, server, "/library/bulk", url.Values{
+		"action": {fetchBodiesBulkAction},
+		"ids":    {"1"},
+	})
+	if first.Code != http.StatusSeeOther {
+		t.Fatalf("first request status = %d, want 303: %s", first.Code, first.Body.String())
+	}
+
+	second := post(t, server, "/library/bulk", url.Values{
+		"action": {fetchBodiesBulkAction},
+		"ids":    {"1"},
+	})
+	if second.Code != http.StatusSeeOther {
+		t.Fatalf("second request status = %d, want 303: %s", second.Code, second.Body.String())
+	}
+	if notice := noticeFromLocation(t, second); !strings.Contains(notice, "already running") {
+		t.Errorf("second request's notice = %q, want it to say a fetch is already running", notice)
+	}
+
+	close(provider.contentBlock)
+	waitForPrefetchIdle(t)
+
+	document, err := db.DocumentByID(1)
+	if err != nil {
+		t.Fatalf("DocumentByID(1): %v", err)
+	}
+	if !document.HasContent {
+		t.Error("the document was never actually fetched once the block was released")
+	}
+	if provider.contentCalls != 1 {
+		t.Errorf("provider.Content called %d times, want exactly 1 — the second request must not have started its own run", provider.contentCalls)
 	}
 }

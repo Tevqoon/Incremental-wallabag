@@ -753,6 +753,12 @@ type libraryData struct {
 	Tags        []store.Tag
 	CurrentURL  string
 	BulkActions []libraryBulkAction
+
+	// Notice is a one-line message carried through a redirect's "notice"
+	// query parameter — see withNotice in prefetch.go, its only source
+	// today. There is no session-based flash mechanism in this app; a query
+	// parameter read back on the very next GET is the whole of it.
+	Notice string
 }
 
 // libraryBulkAction is one action the library's selection bar can apply to
@@ -800,6 +806,15 @@ var libraryBulkActions = []libraryBulkAction{
 		apply: func(s *Server, element store.Element) error {
 			return s.applyGrade(element, ir.GradeDismiss)
 		},
+	},
+	{
+		Value: fetchBodiesBulkAction, Label: "Fetch bodies",
+		// apply is deliberately left nil: fetching bodies runs in the
+		// background rather than once per element in handleLibraryBulk's own
+		// loop, since a hundred article fetches would blow any sensible
+		// request timeout. handleLibraryBulk intercepts this action's value
+		// before ever reaching findLibraryBulkAction — see
+		// handleFetchBodiesBulk in prefetch.go.
 	},
 }
 
@@ -859,6 +874,19 @@ func (s *Server) handleLibrary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// notice is shown once and then dropped from CurrentURL before it feeds
+	// into every filter link and the bulk form's own hidden redirect field
+	// (see setParams in library.html and withNotice in prefetch.go) — left
+	// in, it would keep announcing "fetching N bodies" on every navigation
+	// from this page onward instead of just the one that just landed here.
+	notice := query.Get("notice")
+	currentURL := *r.URL
+	if notice != "" {
+		withoutNotice := query
+		withoutNotice.Del("notice")
+		currentURL.RawQuery = withoutNotice.Encode()
+	}
+
 	s.render(w, "library.html", libraryData{
 		Title:       "Library",
 		Query:       filter.Query,
@@ -868,8 +896,9 @@ func (s *Server) handleLibrary(w http.ResponseWriter, r *http.Request) {
 		Entries:     entries,
 		Counts:      counts,
 		Tags:        tags,
-		CurrentURL:  r.URL.RequestURI(),
+		CurrentURL:  currentURL.RequestURI(),
 		BulkActions: libraryBulkActions,
+		Notice:      notice,
 	})
 }
 
@@ -889,6 +918,14 @@ func (s *Server) handleLibrary(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleLibraryBulk(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+
+	// "Fetch bodies" is asynchronous, unlike every other bulk action here, so
+	// it is intercepted before the synchronous apply-per-element loop below
+	// rather than made to fit that loop's shape — see handleFetchBodiesBulk.
+	if r.FormValue("action") == fetchBodiesBulkAction {
+		s.handleFetchBodiesBulk(w, r)
 		return
 	}
 

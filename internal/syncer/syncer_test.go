@@ -1,12 +1,14 @@
 package syncer
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -29,11 +31,26 @@ type writingSource struct {
 	nextHighlightID int
 
 	// listing is what Fetch returns, standing in for whatever a full or
-	// incremental listing would currently report upstream.
+	// incremental listing would currently report upstream. Used when
+	// listings is nil, which is the common case: most tests don't care
+	// whether two calls to Fetch see the same thing.
 	listing []source.Document
+
+	// listings, when set, is returned one entry per call to Fetch — the
+	// first call gets listings[0], the second listings[1], and so on; once
+	// exhausted, the last entry repeats. This is what lets a test give
+	// Reconcile's two independent listings different contents, standing in
+	// for an upstream write landing (or an entry sliding past a page
+	// boundary) between the two calls.
+	listings [][]source.Document
 
 	failWith error
 	calls    int
+
+	// fetchCalls counts calls to Fetch specifically, separate from calls
+	// (which only counts write operations) — this is what lets a test assert
+	// that Reconcile's second listing was, or was not, requested.
+	fetchCalls int
 
 	// delay, if set, is slept through on each write — used to widen the
 	// window in which two concurrent drains could otherwise both claim the
@@ -48,6 +65,14 @@ func newWritingSource() *writingSource {
 func (w *writingSource) Name() string { return "wallabag" }
 
 func (w *writingSource) Fetch(context.Context, time.Time) ([]source.Document, error) {
+	w.fetchCalls++
+	if len(w.listings) > 0 {
+		index := w.fetchCalls - 1
+		if index >= len(w.listings) {
+			index = len(w.listings) - 1
+		}
+		return w.listings[index], w.failWith
+	}
 	return w.listing, w.failWith
 }
 func (w *writingSource) Content(context.Context, string) (string, error) { return "", nil }
@@ -130,6 +155,22 @@ func testSetup(t *testing.T) (*store.Store, *slog.Logger) {
 	}
 	t.Cleanup(func() { db.Close() })
 	return db, slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// testSetupWithLogCapture is testSetup plus a buffer holding whatever the
+// logger writes, for the handful of tests that need to assert on a log
+// message rather than just on store state — specifically, the "rescued"
+// log Reconcile's second-listing safeguard emits, which is the only
+// externally observable evidence that the rescue happened at all.
+func testSetupWithLogCapture(t *testing.T) (*store.Store, *bytes.Buffer, *slog.Logger) {
+	t.Helper()
+	db, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	var buf bytes.Buffer
+	return db, &buf, slog.New(slog.NewTextHandler(&buf, nil))
 }
 
 func seed(t *testing.T, db *store.Store) {
@@ -289,6 +330,280 @@ func TestReconcileFlagsDeletedHighlights(t *testing.T) {
 		if extract.MissingUpstream != want {
 			t.Errorf("extract %s: MissingUpstream = %v, want %v", extract.ExternalRef, extract.MissingUpstream, want)
 		}
+	}
+}
+
+// TestReconcileRescuesADocumentSeenOnlyInSecondListing is the fix for the
+// flapping bug: a document merely shifted past a page boundary by
+// AllEntries' ascending-order pagination (see entries.go) must not be
+// flagged missing just because one listing happened not to include it.
+// Reconcile's safeguard is to trust only two independent listings agreeing
+// on an absence, so a second listing that does include the document must
+// rescue it — and the rescue must be visible in the log, since that count is
+// the evidence anyone would want that this fix is doing something.
+func TestReconcileRescuesADocumentSeenOnlyInSecondListing(t *testing.T) {
+	db, logBuf, logger := testSetupWithLogCapture(t)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "77", Title: "Stays", UpdatedAt: time.Now()},
+		{ExternalID: "78", Title: "Shifted past by pagination", UpdatedAt: time.Now()},
+	}, 0, 0, time.Now()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	provider := newWritingSource()
+	provider.listings = [][]source.Document{
+		// First listing: 78 was shifted past its slot mid-walk and did not
+		// appear.
+		{{ExternalID: "77", Title: "Stays", UpdatedAt: time.Now()}},
+		// Second, independent listing: 78 is right there.
+		{
+			{ExternalID: "77", Title: "Stays", UpdatedAt: time.Now()},
+			{ExternalID: "78", Title: "Shifted past by pagination", UpdatedAt: time.Now()},
+		},
+	}
+
+	if err := New(db, logger, provider).Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	if provider.fetchCalls != 2 {
+		t.Fatalf("provider.Fetch called %d times, want 2 (first listing plus the rescue check)", provider.fetchCalls)
+	}
+
+	shifted, err := db.DocumentByID(2)
+	if err != nil {
+		t.Fatalf("DocumentByID: %v", err)
+	}
+	if shifted.MissingUpstream {
+		t.Error("a document present in the second listing was flagged missing")
+	}
+
+	if !strings.Contains(logBuf.String(), "rescued") {
+		t.Error("the rescue was not logged")
+	}
+}
+
+// TestReconcileFlagsADocumentAbsentFromBothIndependentListings is the other
+// side of the rescue test above: when two independent listings both agree a
+// document is gone, it must still be flagged — the safeguard must not make
+// genuine deletions invisible.
+func TestReconcileFlagsADocumentAbsentFromBothIndependentListings(t *testing.T) {
+	db, logger := testSetup(t)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "77", Title: "Stays", UpdatedAt: time.Now()},
+		{ExternalID: "78", Title: "Genuinely deleted", UpdatedAt: time.Now()},
+	}, 0, 0, time.Now()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	provider := newWritingSource()
+	listing := []source.Document{{ExternalID: "77", Title: "Stays", UpdatedAt: time.Now()}}
+	provider.listings = [][]source.Document{listing, listing}
+
+	if err := New(db, logger, provider).Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	if provider.fetchCalls != 2 {
+		t.Fatalf("provider.Fetch called %d times, want 2 (first listing plus the confirmation check)", provider.fetchCalls)
+	}
+
+	gone, err := db.DocumentByID(2)
+	if err != nil {
+		t.Fatalf("DocumentByID: %v", err)
+	}
+	if !gone.MissingUpstream {
+		t.Error("a document absent from two independent listings was not flagged missing")
+	}
+}
+
+// TestReconcileSkipsSecondListingWhenNoDocumentsAreMissing is what keeps the
+// fix cheap: when the first listing already accounts for every locally
+// known document, MissingCandidates finds nothing and Reconcile must not pay
+// for a second full listing — that would turn the overwhelmingly common,
+// nothing-changed run into one that always costs two requests instead of
+// one.
+func TestReconcileSkipsSecondListingWhenNoDocumentsAreMissing(t *testing.T) {
+	db, logger := testSetup(t)
+	seed(t, db)
+
+	provider := newWritingSource()
+	provider.listing = []source.Document{{ExternalID: "77", Title: "An article", UpdatedAt: time.Now()}}
+
+	if err := New(db, logger, provider).Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	if provider.fetchCalls != 1 {
+		t.Errorf("provider.Fetch called %d times, want exactly 1 — the common case must stay free", provider.fetchCalls)
+	}
+}
+
+// TestReconcileClearsAStaleFlagEvenWithNoCandidates is the other half of the
+// candidate shortcut, and the reason it cannot be a plain early return.
+//
+// ReconcileMissing does two jobs: it flags what has gone, and it clears the
+// flag from anything that has come back. Only the flagging half needs a
+// candidate. Skipping the call outright when there are none would strand a
+// document that an earlier bad listing had already flagged — leaving it
+// wrongly marked, next to a delete button, until some unrelated document
+// happened to go missing and drag this path back into use.
+func TestReconcileClearsAStaleFlagEvenWithNoCandidates(t *testing.T) {
+	db, logger := testSetup(t)
+	seed(t, db)
+
+	// First: absent from both independent listings, so it is genuinely flagged.
+	vanished := newWritingSource()
+	vanished.listings = [][]source.Document{{}, {}}
+	if err := New(db, logger, vanished).Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile (absent): %v", err)
+	}
+	flagged, _ := db.DocumentByID(1)
+	if !flagged.MissingUpstream {
+		t.Fatal("test premise is wrong: the document should have been flagged first")
+	}
+
+	// Then: it is back, and nothing else is missing — so there are no
+	// candidates at all, which is precisely the shortcut's path.
+	restored := newWritingSource()
+	restored.listing = []source.Document{
+		{ExternalID: "77", Title: "An article", UpdatedAt: time.Now()},
+	}
+	if err := New(db, logger, restored).Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile (restored): %v", err)
+	}
+
+	cleared, _ := db.DocumentByID(1)
+	if cleared.MissingUpstream {
+		t.Error("a document that came back was left carrying a stale missing flag")
+	}
+	if restored.fetchCalls != 1 {
+		t.Errorf("provider.Fetch called %d times, want exactly 1 — clearing must not cost a second listing",
+			restored.fetchCalls)
+	}
+}
+
+// TestReconcileRescuesAHighlightSeenOnlyInSecondListing is
+// TestReconcileRescuesADocumentSeenOnlyInSecondListing one level down: an
+// annotation's external_ref is just as vulnerable to being shifted past a
+// page boundary as its parent document's external_id, by the very same
+// mid-walk update.
+func TestReconcileRescuesAHighlightSeenOnlyInSecondListing(t *testing.T) {
+	db, logBuf, logger := testSetupWithLogCapture(t)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "77", Title: "An article", UpdatedAt: time.Now(), Highlights: []source.Highlight{
+			{ExternalID: "h1", Quote: "Stays annotated."},
+			{ExternalID: "h2", Quote: "Shifted past by pagination."},
+		}},
+	}, 0, 0, time.Now()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	provider := newWritingSource()
+	provider.listings = [][]source.Document{
+		{{ExternalID: "77", Title: "An article", UpdatedAt: time.Now(), Highlights: []source.Highlight{
+			{ExternalID: "h1", Quote: "Stays annotated."},
+		}}},
+		{{ExternalID: "77", Title: "An article", UpdatedAt: time.Now(), Highlights: []source.Highlight{
+			{ExternalID: "h1", Quote: "Stays annotated."},
+			{ExternalID: "h2", Quote: "Shifted past by pagination."},
+		}}},
+	}
+
+	if err := New(db, logger, provider).Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	if provider.fetchCalls != 2 {
+		t.Fatalf("provider.Fetch called %d times, want 2 (first listing plus the rescue check)", provider.fetchCalls)
+	}
+
+	extracts, err := db.Extracts(store.ExtractFilter{Origin: store.OriginImport})
+	if err != nil {
+		t.Fatalf("Extracts: %v", err)
+	}
+	for _, extract := range extracts {
+		if extract.MissingUpstream {
+			t.Errorf("extract %s was flagged missing despite appearing in the second listing", extract.ExternalRef)
+		}
+	}
+
+	if !strings.Contains(logBuf.String(), "rescued") {
+		t.Error("the highlight rescue was not logged")
+	}
+}
+
+// TestReconcileFlagsAHighlightAbsentFromBothIndependentListings is the
+// highlight-level counterpart of
+// TestReconcileFlagsADocumentAbsentFromBothIndependentListings.
+func TestReconcileFlagsAHighlightAbsentFromBothIndependentListings(t *testing.T) {
+	db, logger := testSetup(t)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "77", Title: "An article", UpdatedAt: time.Now(), Highlights: []source.Highlight{
+			{ExternalID: "h1", Quote: "Stays annotated."},
+			{ExternalID: "h2", Quote: "Genuinely deleted."},
+		}},
+	}, 0, 0, time.Now()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	provider := newWritingSource()
+	listing := []source.Document{{ExternalID: "77", Title: "An article", UpdatedAt: time.Now(), Highlights: []source.Highlight{
+		{ExternalID: "h1", Quote: "Stays annotated."},
+	}}}
+	provider.listings = [][]source.Document{listing, listing}
+
+	if err := New(db, logger, provider).Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	if provider.fetchCalls != 2 {
+		t.Fatalf("provider.Fetch called %d times, want 2 (first listing plus the confirmation check)", provider.fetchCalls)
+	}
+
+	extracts, err := db.Extracts(store.ExtractFilter{Origin: store.OriginImport})
+	if err != nil {
+		t.Fatalf("Extracts: %v", err)
+	}
+	if len(extracts) != 2 {
+		t.Fatalf("got %d imported extracts, want 2", len(extracts))
+	}
+	for _, extract := range extracts {
+		want := extract.ExternalRef == "h2"
+		if extract.MissingUpstream != want {
+			t.Errorf("extract %s: MissingUpstream = %v, want %v", extract.ExternalRef, extract.MissingUpstream, want)
+		}
+	}
+}
+
+// TestReconcileSkipsSecondListingWhenNoHighlightsAreMissing is
+// TestReconcileSkipsSecondListingWhenNoDocumentsAreMissing one level down.
+func TestReconcileSkipsSecondListingWhenNoHighlightsAreMissing(t *testing.T) {
+	db, logger := testSetup(t)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "77", Title: "An article", UpdatedAt: time.Now(), Highlights: []source.Highlight{
+			{ExternalID: "h1", Quote: "Stays annotated."},
+		}},
+	}, 0, 0, time.Now()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	provider := newWritingSource()
+	provider.listing = []source.Document{{ExternalID: "77", Title: "An article", UpdatedAt: time.Now(), Highlights: []source.Highlight{
+		{ExternalID: "h1", Quote: "Stays annotated."},
+	}}}
+
+	if err := New(db, logger, provider).Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	if provider.fetchCalls != 1 {
+		t.Errorf("provider.Fetch called %d times, want exactly 1 — the common case must stay free", provider.fetchCalls)
 	}
 }
 

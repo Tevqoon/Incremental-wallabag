@@ -238,7 +238,7 @@ func (s *Syncer) Reconcile(ctx context.Context) error {
 			}
 		}
 
-		marked, cleared, err := s.store.ReconcileMissing(provider.Name(), present)
+		marked, cleared, err := s.reconcileMissingDocuments(ctx, provider, present)
 		if err != nil {
 			s.logger.Error("reconcile: marking missing documents failed", "source", provider.Name(), "error", err)
 			if firstErr == nil {
@@ -251,7 +251,7 @@ func (s *Syncer) Reconcile(ctx context.Context) error {
 				"source", provider.Name(), "newly_missing", marked, "restored", cleared)
 		}
 
-		highlightsMarked, highlightsCleared, err := s.store.ReconcileMissingHighlights(provider.Name(), presentHighlights)
+		highlightsMarked, highlightsCleared, err := s.reconcileMissingHighlights(ctx, provider, presentHighlights)
 		if err != nil {
 			s.logger.Error("reconcile: marking missing highlights failed", "source", provider.Name(), "error", err)
 			if firstErr == nil {
@@ -302,6 +302,134 @@ func (s *Syncer) Reconcile(ctx context.Context) error {
 		}
 	}
 	return firstErr
+}
+
+// reconcileMissingDocuments flags documents absent from present as missing
+// upstream, but only after a second, independent listing agrees they are
+// gone — see the comment on Reconcile for why present alone is not proof of
+// a deletion.
+//
+// MissingCandidates asks "would anything be flagged missing right now?"
+// against present alone. When the answer is no — the overwhelmingly common
+// case, since actual deletions are rare — this returns without provider.Fetch
+// ever being called a second time, which is what keeps the fix free for every
+// ordinary run. Only when there is at least one candidate does the cost of a
+// second full listing get paid, and only that once.
+//
+// Why a second listing is trustworthy where the first alone is not: present
+// alone cannot distinguish a genuine deletion from a document that was merely
+// shifted past mid-walk by AllEntries' own ascending pagination (see
+// entries.go) — ascending order protects a moved record's own slot from being
+// skipped, but not its neighbours', so when an update reappends the moved
+// record at the end, everything that was going to occupy its old slot shifts
+// down by one and is silently skipped for that walk. A burst of writes (a
+// backfill importer, or the outbox draining annotation location updates) is
+// enough to shift several records past the page boundary in a single sync.
+//
+// The second Fetch is an independent sample of the same upstream state
+// seconds later, not a retry of the first: it walks the same pages again from
+// page 1, in the same ascending order, and whatever slid past the boundary
+// during the first walk has by then either settled into a slot this walk
+// will visit, or — far less likely — is being shifted again by a second
+// burst of writes landing in the same few seconds. A document absent from two
+// independent listings taken seconds apart is genuinely gone; one absent from
+// a single listing is far more likely to have merely been shifted past.
+//
+// This is worth the extra request specifically because the cost of getting
+// it wrong is a *destructive* suggestion in the library UI: a delete button
+// sits right next to "missing upstream", and flapping that flag risks a
+// reader deleting a document that still exists at the provider.
+func (s *Syncer) reconcileMissingDocuments(ctx context.Context, provider source.Source, present []string) (marked, cleared int, err error) {
+	name := provider.Name()
+
+	candidates, err := s.store.MissingCandidates(name, present)
+	if err != nil {
+		return 0, 0, fmt.Errorf("missing candidates: %w", err)
+	}
+
+	// No candidates means nothing can newly go missing, so the second listing
+	// is skipped and this stays a single-request operation in the common case.
+	// ReconcileMissing is still called, because it does two jobs: it flags what
+	// has gone, and it clears the flag from anything that has come back. Only
+	// the first depends on a candidate existing. Returning early here instead
+	// would leave a document that was wrongly flagged once — which is exactly
+	// what the race below produces — carrying that flag until some unrelated
+	// candidate happened to trigger this path again.
+	if len(candidates) == 0 {
+		return s.store.ReconcileMissing(name, present)
+	}
+
+	second, err := provider.Fetch(ctx, time.Time{})
+	if err != nil {
+		return 0, 0, fmt.Errorf("second listing: %w", err)
+	}
+
+	candidateSet := make(map[string]bool, len(candidates))
+	for _, id := range candidates {
+		candidateSet[id] = true
+	}
+	rescued := map[string]bool{}
+	union := append([]string{}, present...)
+	for _, document := range second {
+		union = append(union, document.ExternalID)
+		if candidateSet[document.ExternalID] {
+			rescued[document.ExternalID] = true
+		}
+	}
+	if len(rescued) > 0 {
+		s.logger.Info("second listing rescued documents from a false missing flag",
+			"source", name, "candidates", len(candidates), "rescued", len(rescued))
+	}
+
+	return s.store.ReconcileMissing(name, union)
+}
+
+// reconcileMissingHighlights is reconcileMissingDocuments one level down: the
+// same false-positive risk applies to an individual highlight's external_ref
+// exactly as it does to its parent document's external_id, since both are
+// shifted past a page boundary by the very same mid-walk update. See that
+// function's comment for the full argument; nothing here differs beyond
+// operating on highlight refs gathered from a document listing rather than
+// document ids directly.
+func (s *Syncer) reconcileMissingHighlights(ctx context.Context, provider source.Source, present []string) (marked, cleared int, err error) {
+	name := provider.Name()
+
+	candidates, err := s.store.MissingHighlightCandidates(name, present)
+	if err != nil {
+		return 0, 0, fmt.Errorf("missing highlight candidates: %w", err)
+	}
+	// Still called with no candidates, for the same reason as its document
+	// counterpart above: this clears a stale flag as well as setting a new one,
+	// and only the setting half needs a candidate.
+	if len(candidates) == 0 {
+		return s.store.ReconcileMissingHighlights(name, present)
+	}
+
+	second, err := provider.Fetch(ctx, time.Time{})
+	if err != nil {
+		return 0, 0, fmt.Errorf("second listing: %w", err)
+	}
+
+	candidateSet := make(map[string]bool, len(candidates))
+	for _, id := range candidates {
+		candidateSet[id] = true
+	}
+	rescued := map[string]bool{}
+	union := append([]string{}, present...)
+	for _, document := range second {
+		for _, highlight := range document.Highlights {
+			union = append(union, highlight.ExternalID)
+			if candidateSet[highlight.ExternalID] {
+				rescued[highlight.ExternalID] = true
+			}
+		}
+	}
+	if len(rescued) > 0 {
+		s.logger.Info("second listing rescued highlights from a false missing flag",
+			"source", name, "candidates", len(candidates), "rescued", len(rescued))
+	}
+
+	return s.store.ReconcileMissingHighlights(name, union)
 }
 
 // Run syncs on a fixed interval until the context is cancelled.
