@@ -2,6 +2,10 @@
 <section class="queue">
   <h1>Library</h1>
 
+  {{if .Notice}}
+    <div class="notice">{{.Notice}}</div>
+  {{end}}
+
   <form class="search" method="get" action="/library">
     <input type="search" name="q" value="{{.Query}}"
            placeholder="Search title, subtitle, author or URL" autofocus>
