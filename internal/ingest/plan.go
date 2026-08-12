@@ -115,14 +115,28 @@ type AnnotationPlan struct {
 
 	// Quote is the annotation's own stored text, as wallabag currently has
 	// it — not necessarily what CreateHighlight will actually send if this
-	// gets re-anchored, since re-anchoring always goes through
-	// UpdateHighlightLocation with the quote a caller supplies, and this
-	// plan does not decide what that caller passes; Apply passes this same
-	// field back.
+	// gets re-anchored: Apply passes wallabag.TrimTruncationMarker(Quote)
+	// to UpdateHighlightLocation, not this field verbatim, so a re-anchored
+	// annotation is stored with a clean quote rather than one still carrying
+	// truncateQuote's own "…" (or worse, on data written before that
+	// function's UTF-8 fix, dangling debris). See apply.go's own comment on
+	// why that makes RemapExternalRef load-bearing rather than merely tidy.
 	Quote string
 
 	Verdict     Verdict
 	Occurrences int
+
+	// TrimmedMatch is true when Verdict was reached only because
+	// wallabag.TrimTruncationMarker was applied before searching for this
+	// quote — the raw, as-stored Quote does not occur in the content this
+	// was classified against at all, but the quote with truncateQuote's own
+	// trailing marker stripped off does. Always false for VerdictAnchored:
+	// that verdict comes from QuoteAnchored against the raw Quote (see
+	// planAnnotation's own comment on why), never from the trimmed search
+	// this field describes. Existing purely so the report can tell the
+	// operator a match depended on undoing wallabag's own truncation,
+	// rather than that being invisible in the numbers.
+	TrimmedMatch bool
 
 	// Truncates is true when Quote is longer than truncateLimit — a
 	// re-anchor of this annotation will come back from wallabag holding a
@@ -360,8 +374,44 @@ func planAnnotation(ann wallabag.Annotation, newContent string) AnnotationPlan {
 	// fail on a value that was itself just decoded from JSON.
 	rangesJSON, _ := json.Marshal(ann.Ranges)
 
+	// QuoteAnchored is deliberately handed the raw, as-stored ann.Quote here
+	// — not wallabag.TrimTruncationMarker(ann.Quote) — even though the rest
+	// of this function trims before searching. QuoteAnchored already has its
+	// own truncation-marker handling built in (see its own doc comment in
+	// internal/wallabag/ranges.go): when the quote it receives ends in "…",
+	// it falls back to a prefix match against the range's own recovered
+	// text instead of demanding exact equality, precisely because a
+	// truncated quote can never equal the full text a long-passage range
+	// resolves to. Pre-trimming the marker off before calling it would
+	// silently defeat that fallback rather than complement it — verified
+	// directly against this package's own data: for an annotation created
+	// from a >900-byte passage whose ranges still genuinely resolve to it,
+	// QuoteAnchored reports anchored=true against the raw stored quote and
+	// anchored=false against the same quote pre-trimmed, because the
+	// trimmed form no longer carries the "…" its own prefix fallback looks
+	// for. Trimming here would have turned every already-correctly-anchored
+	// long highlight into unnecessary re-anchor churn on every run —
+	// exactly the "pointless churn" VerdictAnchored's own comment exists to
+	// avoid — for no benefit, since the case this file's trimming fix
+	// actually targets (below) never reaches QuoteAnchored at all: every
+	// annotation behind the 2026-08-12 finding had no ranges to begin with,
+	// which is why they were misclassified VerdictMissing rather than
+	// merely not VerdictAnchored.
 	anchored := wallabag.QuoteAnchored(newContent, rangesJSON, ann.Quote)
-	occurrences := wallabag.QuoteOccurrences(newContent, ann.Quote)
+
+	// QuoteOccurrences, unlike QuoteAnchored, does a literal substring
+	// search with no truncation-awareness of its own — it is this call that
+	// wallabag.TrimTruncationMarker actually exists to fix. Diagnosed
+	// against a live dry run over real data on 2026-08-12: 13 of 16
+	// annotations a Substack backfill classified VerdictMissing were
+	// misclassified for exactly this reason — the quote's own trailing "…"
+	// (or, for one annotation, U+FFFD debris a since-fixed truncateQuote bug
+	// left behind) is never present in the article's own text, so a raw
+	// search for the stored quote fails even though the highlighted passage
+	// is still there, unedited, right up to the byte truncateQuote happened
+	// to cut at.
+	trimmedQuote := wallabag.TrimTruncationMarker(ann.Quote)
+	occurrences := wallabag.QuoteOccurrences(newContent, trimmedQuote)
 	count := len(occurrences)
 
 	var verdict Verdict
@@ -376,11 +426,28 @@ func planAnnotation(ann wallabag.Annotation, newContent string) AnnotationPlan {
 		verdict = VerdictMissing
 	}
 
+	// TrimmedMatch: true only when trimming was actually load-bearing for
+	// this verdict — the raw stored quote does not occur in newContent at
+	// all, but the trimmed one does. Checked explicitly with a second
+	// QuoteOccurrences call, rather than inferred from trimmedQuote !=
+	// ann.Quote alone, because the marker can be present without being the
+	// reason a search succeeded (a quote long enough to be flagged
+	// Truncates but whose exact stored text, "…" included, still happens
+	// to occur verbatim would trim to something different yet match either
+	// way — that is not the case this field exists to surface). Skipped
+	// entirely for VerdictAnchored, which was never decided by a trimmed
+	// search to begin with (see above).
+	var trimmedMatch bool
+	if verdict != VerdictAnchored && count > 0 && trimmedQuote != ann.Quote {
+		trimmedMatch = len(wallabag.QuoteOccurrences(newContent, ann.Quote)) == 0
+	}
+
 	return AnnotationPlan{
 		AnnotationID: ann.ID,
 		Quote:        ann.Quote,
 		Verdict:      verdict,
 		Occurrences:  count,
 		Truncates:    len(ann.Quote) > truncateLimit,
+		TrimmedMatch: trimmedMatch,
 	}
 }

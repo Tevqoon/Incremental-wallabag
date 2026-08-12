@@ -191,7 +191,30 @@ func applyExisting(ctx context.Context, client *wallabag.Client, src *wallabag.S
 		}
 
 		oldID := strconv.Itoa(ann.AnnotationID)
-		newID, err := src.UpdateHighlightLocation(ctx, oldID, entryID, ann.Quote)
+		// wallabag.TrimTruncationMarker(ann.Quote), not ann.Quote itself: the
+		// stored quote may still carry truncateQuote's own trailing "…" (or,
+		// on data written before that function's UTF-8 fix, dangling
+		// debris), and sending that upstream verbatim would hand wallabag a
+		// literal ellipsis character that is not actually part of the
+		// article — CreateHighlight's own quote-location lookup (see
+		// computeRanges in internal/wallabag/ranges.go) would then fail to
+		// find it in the entry's content for exactly the reason this whole
+		// change exists to fix. The trimmed quote is also comfortably under
+		// maxHighlightQuoteLength (900 bytes) even when the original,
+		// untrimmed local extract was not — it was already truncated to
+		// roughly that size once, upstream, before increader ever saw it
+		// stored — so this re-anchor will not trigger truncateQuote a
+		// second time.
+		//
+		// That does mean the quote wallabag ends up storing after this call
+		// differs from increader's own local, untruncated copy of the same
+		// highlight — which is exactly why RemapExternalRef (see repair.go)
+		// is load-bearing here and not merely tidy: insertHighlights'
+		// adopt-by-exact-quote path (elements.go) matches local rows against
+		// wallabag's stored text byte-for-byte, and a re-anchored annotation
+		// re-anchored through this path will never satisfy that match on its
+		// own.
+		newID, err := src.UpdateHighlightLocation(ctx, oldID, entryID, wallabag.TrimTruncationMarker(ann.Quote))
 		if err != nil {
 			logger.Error("ingest: re-anchor annotation failed",
 				"entry_id", item.EntryID, "annotation_id", ann.AnnotationID, "error", err)

@@ -87,6 +87,33 @@ func TestWriteReportDryRunOmitsApplied(t *testing.T) {
 	}
 }
 
+// TestWriteReportNotesWhenAMatchDependedOnTrimming covers report.go's own
+// half of the truncation-marker fix: an annotation whose classification only
+// succeeded because wallabag.TrimTruncationMarker was applied first
+// (AnnotationPlan.TrimmedMatch) must say so in its own line, so the operator
+// can see a match depended on undoing wallabag's own truncation rather than
+// that being invisible in the numbers.
+func TestWriteReportNotesWhenAMatchDependedOnTrimming(t *testing.T) {
+	plan := Plan{Items: []Item{{
+		Post:    source.Document{URL: "https://example.substack.com/p/a-post"},
+		EntryID: 1,
+		Action:  ActionAnnotationsOnly,
+		Annotations: []AnnotationPlan{
+			{AnnotationID: 500, Quote: "a passage worth keeping…", Verdict: VerdictUnique, Occurrences: 1, TrimmedMatch: true},
+		},
+	}}}
+
+	var buf bytes.Buffer
+	if err := WriteReport(&buf, plan, nil); err != nil {
+		t.Fatalf("WriteReport: %v", err)
+	}
+
+	report := strings.ToLower(buf.String())
+	if !strings.Contains(report, "truncation") {
+		t.Errorf("report does not mention that this match depended on undoing wallabag's truncation:\n%s", buf.String())
+	}
+}
+
 // errString is a trivial error for report tests that need one without
 // pulling in errors.New at every call site.
 type errString string

@@ -169,15 +169,82 @@ const maxHighlightQuoteLength = 900
 // since the last byte of a complete multi-byte character is never a rune
 // start either — that check alone would trim one rune too many every time.
 // RuneError specifically means the cut landed inside an incomplete sequence.
+//
+// Trimming stops only once the tail decodes cleanly, not after a single
+// byte — confirmed insufficient against real stored data on 2026-08-12: a
+// live wallabag account had an annotation whose quote broke at character
+// 880 of 881 on a U+FFFD replacement character, meaning a single-byte trim
+// had left 1-2 dangling bytes of a 3- or 4-byte rune behind. Those dangling
+// bytes are not valid UTF-8 on their own, so encoding/json (sendJSON's own
+// json.Marshal, called downstream in CreateHighlight) silently rewrote them
+// into an actual U+FFFD character on the way out — which is how a
+// replacement character ended up stored in wallabag's own database. A
+// single fixed-size trim only ever rescues the case where the cut landed
+// one byte into a 2-byte rune; anything wider needs to keep trimming.
+//
+// The loop tells genuine debris apart from a legitimate U+FFFD already
+// present in the source text by the size DecodeLastRuneInString returns,
+// not by the rune value alone: it returns (RuneError, 1) when the trailing
+// bytes are actually invalid — the case this loop exists to fix — but
+// returns (RuneError, 3) when cut legitimately ends in an already-encoded
+// U+FFFD that was real prose before truncation ever touched it (U+FFFD
+// encodes to 3 bytes in UTF-8). Only a returned size of 1 means "these are
+// debris bytes, strip them and check again"; a size greater than 1 means
+// the decode found a genuine rune whose value happens to be RuneError, and
+// the loop must leave it alone.
 func truncateQuote(quote string) string {
 	if len(quote) <= maxHighlightQuoteLength {
 		return quote
 	}
 	cut := quote[:maxHighlightQuoteLength]
-	if r, _ := utf8.DecodeLastRuneInString(cut); r == utf8.RuneError {
+	for len(cut) > 0 {
+		r, size := utf8.DecodeLastRuneInString(cut)
+		if r != utf8.RuneError || size > 1 {
+			break
+		}
 		cut = cut[:len(cut)-1]
 	}
 	return strings.TrimSpace(cut) + "…"
+}
+
+// TrimTruncationMarker undoes what truncateQuote did to a quote on its way
+// upstream, so a quote read back from wallabag can be located in article
+// text again by an exact search — QuoteAnchored and QuoteOccurrences both
+// expect a substring that actually occurs in the document, and neither the
+// "…" truncateQuote appends nor any debris its pre-fix version left behind
+// occurs in the article itself.
+//
+// Confirmed against a live dry run over real data on 2026-08-12: 13 of 16
+// annotations a Substack backfill classified as VerdictMissing — quote not
+// found in the new content at all — turned out to be nothing but this. The
+// passage each one highlights is still there, unedited, right up to the
+// byte truncateQuote happened to cut at; only the trailing marker this
+// function strips was ever missing from the article.
+//
+// Strips, in this order: a trailing U+2026 ellipsis (truncateQuote's own
+// marker), then any trailing U+FFFD replacement characters (debris the
+// pre-fix version of truncateQuote — see its own comment above — could
+// leave behind by cutting a multi-byte rune mid-sequence; that corruption
+// is already live in the operator's wallabag account and cannot be repaired
+// retroactively by anything running today, only worked around on read),
+// then surrounding whitespace. A quote with neither marker is returned
+// unchanged.
+//
+// There is no way to tell a quote truncateQuote actually shortened apart
+// from one that happened to end in "…" on its own before truncation ever
+// touched it — both look identical by the time they come back from
+// wallabag's API, and this trims either way. The false positive is
+// harmless: for a quote that genuinely ended in an ellipsis, trimming that
+// one character off the end still leaves a string that is an exact
+// substring of the original passage, so locating it in article text still
+// succeeds; only a search for the literal ellipsis itself would fail, and
+// nothing here ever wants that.
+func TrimTruncationMarker(quote string) string {
+	trimmed := strings.TrimSuffix(quote, "…")
+	for strings.HasSuffix(trimmed, "�") {
+		trimmed = strings.TrimSuffix(trimmed, "�")
+	}
+	return strings.TrimSpace(trimmed)
 }
 
 // CreateHighlight adds a new annotation to an entry, for a passage extracted

@@ -3,6 +3,7 @@ package ingest
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -340,6 +341,95 @@ func TestPlanAnnotationTruncates(t *testing.T) {
 	}
 	if got := planAnnotation(wallabag.Annotation{Quote: long}, "<p>irrelevant</p>").Truncates; !got {
 		t.Error("Truncates = false for a quote past the limit, want true")
+	}
+}
+
+// TestPlanAnnotationRecoversFromWallabagsOwnTruncationMarker pins the
+// 2026-08-12 finding directly against planAnnotation: a raw quote is a
+// stored quote as truncateQuote (internal/wallabag/write.go) actually left
+// it, trailing "…" included, and that marker is never present in real
+// article text — so a search for the raw quote fails even though the
+// passage it highlights is still there, unedited. Without
+// wallabag.TrimTruncationMarker in the loop, this would classify
+// VerdictMissing, exactly the false negative a live dry run against real
+// data found on 13 of 34 existing annotations. With it, the same content
+// and the same quote (minus the marker) is found exactly once.
+func TestPlanAnnotationRecoversFromWallabagsOwnTruncationMarker(t *testing.T) {
+	content := "<p>The quick brown fox jumps over the lazy dog.</p>"
+	// Ends in "…" the way a genuinely truncated stored quote does — the
+	// content itself ends the sentence with a period, never an ellipsis, so
+	// a raw byte-for-byte search for this exact string fails.
+	rawQuote := "The quick brown fox jumps over the lazy dog…"
+
+	got := planAnnotation(wallabag.Annotation{ID: 7, Quote: rawQuote}, content)
+
+	if got.Verdict != VerdictUnique {
+		t.Errorf("Verdict = %q, want %q — the trimmed quote occurs exactly once", got.Verdict, VerdictUnique)
+	}
+	if got.Occurrences != 1 {
+		t.Errorf("Occurrences = %d, want 1", got.Occurrences)
+	}
+	if !got.TrimmedMatch {
+		t.Error("TrimmedMatch = false, want true — the raw stored quote alone does not occur in this content")
+	}
+	// Quote itself stays the raw, as-stored text: it is what wallabag
+	// currently has, not what searching used internally.
+	if got.Quote != rawQuote {
+		t.Errorf("Quote = %q, want the raw stored text %q unchanged", got.Quote, rawQuote)
+	}
+}
+
+// TestPlanAnnotationStaysMissingWhenNeitherFormMatches is the other half:
+// trimming the marker off a quote that genuinely does not occur in the
+// content — because the passage itself was edited or removed upstream, the
+// two cases the live dry run's remaining three "missing" annotations turned
+// out to be — must not turn a real miss into a false match. VerdictMissing
+// is correct here and TrimmedMatch must stay false, since nothing actually
+// matched either way.
+func TestPlanAnnotationStaysMissingWhenNeitherFormMatches(t *testing.T) {
+	content := "<p>The quick brown fox jumps over the lazy dog.</p>"
+	rawQuote := "an entirely different sentence that was edited away…"
+
+	got := planAnnotation(wallabag.Annotation{ID: 8, Quote: rawQuote}, content)
+
+	if got.Verdict != VerdictMissing {
+		t.Errorf("Verdict = %q, want %q", got.Verdict, VerdictMissing)
+	}
+	if got.Occurrences != 0 {
+		t.Errorf("Occurrences = %d, want 0", got.Occurrences)
+	}
+	if got.TrimmedMatch {
+		t.Error("TrimmedMatch = true, want false — neither the raw nor the trimmed quote occurs in this content")
+	}
+}
+
+// TestPlanAnnotationQuoteAnchoredKeepsTheRawQuote guards the deliberate
+// asymmetry in planAnnotation: QuoteAnchored is handed ann.Quote unchanged,
+// never the trimmed form, because QuoteAnchored already has its own
+// truncation-marker handling (see its own doc comment in
+// internal/wallabag/ranges.go) that a pre-trimmed quote would silently
+// defeat rather than complement. This is a long (>900-byte) quote whose
+// ranges genuinely still resolve to it — the case that handling exists
+// for — confirming it still reports VerdictAnchored, not churn.
+func TestPlanAnnotationQuoteAnchoredKeepsTheRawQuote(t *testing.T) {
+	full := strings.TrimSpace(strings.Repeat("word ", 400)) + " final."
+	content := "<p>" + full + "</p>"
+
+	// Built the way CreateHighlight actually leaves this state: ranges
+	// computed against (and therefore resolving to) the full, untruncated
+	// quote, while the stored Quote field itself was independently
+	// shortened by wallabag's own truncateQuote to some prefix of it plus
+	// "…". The two fields disagree by construction — that disagreement is
+	// exactly what QuoteAnchored's own ellipsis-prefix handling exists to
+	// reconcile, and exactly what pre-trimming the marker before calling it
+	// would defeat (see planAnnotation's own comment).
+	stored := full[:800] + "…"
+	rangesJSON := anchoredRange(0, len(full))
+
+	got := planAnnotation(wallabag.Annotation{ID: 9, Quote: stored, Ranges: rangesJSON}, content)
+
+	if got.Verdict != VerdictAnchored {
+		t.Errorf("Verdict = %q, want %q — the range still resolves to text this quote's own body is a prefix of", got.Verdict, VerdictAnchored)
 	}
 }
 

@@ -300,6 +300,70 @@ func TestApplyContentPrecedesAnnotationsInRequestOrder(t *testing.T) {
 	}
 }
 
+// TestApplyReanchorsWithTheTrimmedQuoteNotTheRawStoredOne pins Fix 3's own
+// apply.go change directly: the quote Apply hands to UpdateHighlightLocation
+// when re-anchoring must be wallabag.TrimTruncationMarker(ann.Quote), not
+// AnnotationPlan.Quote verbatim. Sending the raw, still-marked form upstream
+// would hand wallabag a literal trailing "…" that is not actually part of
+// the article, defeating CreateHighlight's own quote-location lookup
+// (computeRanges in internal/wallabag/ranges.go) for exactly the reason
+// this whole change exists to fix — see plan.go's own comment on the
+// 2026-08-12 finding this traces back to.
+func TestApplyReanchorsWithTheTrimmedQuoteNotTheRawStoredOne(t *testing.T) {
+	var sentQuote string
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /oauth/v2/token", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"access_token": "tok", "expires_in": 3600, "token_type": "bearer"})
+	})
+	mux.HandleFunc("PATCH /api/entries/1.json", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(wallabag.Entry{ID: 1})
+	})
+	mux.HandleFunc("GET /api/entries/1.json", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(wallabag.Entry{ID: 1, Content: "<p>a passage worth keeping</p>"})
+	})
+	mux.HandleFunc("POST /api/annotations/1.json", func(w http.ResponseWriter, r *http.Request) {
+		var decoded struct {
+			Quote string `json:"quote"`
+		}
+		body, _ := io.ReadAll(r.Body)
+		json.Unmarshal(body, &decoded)
+		sentQuote = decoded.Quote
+		json.NewEncoder(w).Encode(wallabag.Annotation{ID: 999})
+	})
+	mux.HandleFunc("DELETE /api/annotations/500.json", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(wallabag.Annotation{})
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client, src := testClientAndSource(t, server.URL)
+
+	plan := Plan{Items: []Item{{
+		Post:    source.Document{URL: "https://example.substack.com/p/a-post", ContentHTML: "<p>New body.</p>", Author: "An Author"},
+		EntryID: 1,
+		Action:  ActionUpdate,
+		Annotations: []AnnotationPlan{
+			// The raw stored quote as wallabag would actually hand it back:
+			// truncateQuote's own trailing "…" still attached.
+			{AnnotationID: 500, Quote: "a passage worth keeping…", Verdict: VerdictUnique},
+		},
+	}}}
+
+	if _, err := Apply(context.Background(), client, src, plan, discardLogger()); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	want := wallabag.TrimTruncationMarker("a passage worth keeping…")
+	if sentQuote != want {
+		t.Errorf("quote sent to re-anchor = %q, want the trimmed form %q, not the raw stored one", sentQuote, want)
+	}
+	if strings.HasSuffix(sentQuote, "…") {
+		t.Error("quote sent to re-anchor still carries the truncation marker")
+	}
+}
+
 // TestApplySkipsConflictAndSkipItems covers the other half of Apply's
 // dispatch: ActionSkip and ActionConflict items must produce no requests at
 // all, matching BuildPlan's own promise that a conflict "writes nothing".

@@ -126,8 +126,12 @@ func WriteReport(w io.Writer, plan Plan, applied *Applied) error {
 				if ann.Truncates {
 					truncateNote = " [quote exceeds wallabag's ~900-byte limit and will be truncated on re-anchor, so it will not adopt onto the existing local row by exact match]"
 				}
-				printf("    annotation %d: %s, %d occurrence(s)%s\n",
-					ann.AnnotationID, ann.Verdict, ann.Occurrences, truncateNote)
+				trimNote := ""
+				if ann.TrimmedMatch {
+					trimNote = " [matched only after stripping wallabag's own truncation marker from the stored quote — the raw stored text does not occur in this content verbatim]"
+				}
+				printf("    annotation %d: %s, %d occurrence(s)%s%s\n",
+					ann.AnnotationID, ann.Verdict, ann.Occurrences, truncateNote, trimNote)
 			}
 		}
 		printf("\n")
