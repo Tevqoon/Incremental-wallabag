@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -101,6 +102,29 @@ func TestSubscriptionStateLooksFree(t *testing.T) {
 			},
 			want: false,
 		},
+		{
+			// The confirmed real response from a paid subscriber, once the
+			// operator actually subscribed on 2026-08-12 — see
+			// subscriptionState's own doc comment. is_free_subscribed is
+			// still true here, exactly as it was on the free account; what
+			// keeps this out of looksFree is Type and Expiry both being
+			// real, non-null values. This is the case looksFree's own doc
+			// comment specifically warns a future "simplify this to just
+			// IsFreeSubscribed" edit would break — pinned here so that
+			// edit fails a test instead of silently aborting every real
+			// paid run.
+			name: "confirmed live paid account — is_free_subscribed is true here too, and must NOT be treated as free",
+			state: subscriptionState{
+				MembershipState:  "subscribed",
+				IsFreeSubscribed: true,
+				IsSubscribed:     true,
+				Type:             json.RawMessage(`"ios_app"`),
+				Expiry:           json.RawMessage(`1789224995000`),
+				IsFounding:       false,
+				BundleID:         json.RawMessage("null"),
+			},
+			want: false,
+		},
 	}
 
 	for _, test := range tests {
@@ -115,7 +139,12 @@ func TestSubscriptionStateLooksFree(t *testing.T) {
 // TestSubscriptionStateExpiresWithin pins the pure decision logic behind
 // the Result.Warnings expiry notice: now is passed in explicitly (see
 // expiresWithin's own doc comment on why), so this tests the window
-// arithmetic itself without racing a real clock.
+// arithmetic itself without racing a real clock. See TestParseExpiry for
+// the separate, lower-level question of how a raw Expiry value decodes
+// into a time.Time at all — this table is about what expiresWithin does
+// with that decoded time relative to now and window, using both a string
+// and a numeric encoding to prove both actually flow through end to end,
+// not just parseExpiry in isolation.
 func TestSubscriptionStateExpiresWithin(t *testing.T) {
 	now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
 	window := 7 * 24 * time.Hour
@@ -131,12 +160,12 @@ func TestSubscriptionStateExpiresWithin(t *testing.T) {
 			want:   false,
 		},
 		{
-			name:   "expires in 3 days, within the window",
+			name:   "expires in 3 days, within the window (string date)",
 			expiry: json.RawMessage(`"2026-08-15"`),
 			want:   true,
 		},
 		{
-			name:   "expires in 30 days, outside the window",
+			name:   "expires in 30 days, outside the window (string date)",
 			expiry: json.RawMessage(`"2026-09-11"`),
 			want:   false,
 		},
@@ -146,8 +175,23 @@ func TestSubscriptionStateExpiresWithin(t *testing.T) {
 			want:   false,
 		},
 		{
-			name:   "unparseable shape — fails silently rather than guessing",
-			expiry: json.RawMessage(`12345`),
+			name:   "expires in 3 days, within the window, as a millisecond epoch number",
+			expiry: json.RawMessage(strconv.FormatInt(now.Add(3*24*time.Hour).UnixMilli(), 10)),
+			want:   true,
+		},
+		{
+			name:   "expires in 30 days, outside the window, as a seconds epoch number",
+			expiry: json.RawMessage(strconv.FormatInt(now.Add(30*24*time.Hour).Unix(), 10)),
+			want:   false,
+		},
+		{
+			name:   "malformed JSON — fails silently rather than guessing",
+			expiry: json.RawMessage(`not valid json`),
+			want:   false,
+		},
+		{
+			name:   "a JSON object — neither known shape",
+			expiry: json.RawMessage(`{"foo":"bar"}`),
 			want:   false,
 		},
 	}
@@ -158,6 +202,79 @@ func TestSubscriptionStateExpiresWithin(t *testing.T) {
 			_, got := state.expiresWithin(now, window)
 			if got != test.want {
 				t.Errorf("expiresWithin() ok = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+// TestParseExpiry pins the raw shape-decoding parseExpiry does, independent
+// of the window arithmetic expiresWithin layers on top — see that
+// function's own doc comment in session.go for the live finding this
+// exists to cover: Expiry is confirmed to arrive as a millisecond Unix
+// epoch number on a real paid subscription, not the date string this
+// package first assumed with no data to check it against.
+func TestParseExpiry(t *testing.T) {
+	tests := []struct {
+		name   string
+		raw    json.RawMessage
+		want   time.Time
+		wantOK bool
+	}{
+		{
+			// The exact value confirmed live on 2026-08-12 against a real
+			// paid subscription: 1789224995000. Read as milliseconds (not
+			// seconds — secondsToMillisecondsCutoff is what tells them
+			// apart), this is 2026-09-12T14:56:35Z, roughly a month after
+			// the subscription was taken, consistent with Substack's own
+			// monthly billing. Comparing against time.UnixMilli(...)
+			// directly, rather than a hand-written date, is deliberate: if
+			// the magnitude cutoff ever misclassified this as seconds
+			// instead, the result would land tens of thousands of years in
+			// the future, not a day or two off, so this comparison catches
+			// exactly the failure mode that matters here.
+			name:   "confirmed live millisecond epoch from a real paid subscription",
+			raw:    json.RawMessage(`1789224995000`),
+			want:   time.UnixMilli(1789224995000),
+			wantOK: true,
+		},
+		{
+			name:   "a seconds-scale epoch number, well below the cutoff",
+			raw:    json.RawMessage(`1700000000`),
+			want:   time.Unix(1700000000, 0),
+			wantOK: true,
+		},
+		{
+			name:   "an RFC3339 string still works",
+			raw:    json.RawMessage(`"2026-09-11T00:00:00Z"`),
+			want:   time.Date(2026, 9, 11, 0, 0, 0, 0, time.UTC),
+			wantOK: true,
+		},
+		{
+			name:   "a bare 2006-01-02 date string still works",
+			raw:    json.RawMessage(`"2026-09-11"`),
+			want:   time.Date(2026, 9, 11, 0, 0, 0, 0, time.UTC),
+			wantOK: true,
+		},
+		{
+			name:   "malformed JSON",
+			raw:    json.RawMessage(`not valid json at all`),
+			wantOK: false,
+		},
+		{
+			name:   "a JSON object — neither a number nor a string",
+			raw:    json.RawMessage(`{"foo":"bar"}`),
+			wantOK: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := parseExpiry(test.raw)
+			if ok != test.wantOK {
+				t.Fatalf("parseExpiry() ok = %v, want %v", ok, test.wantOK)
+			}
+			if ok && !got.Equal(test.want) {
+				t.Errorf("parseExpiry() = %v, want %v", got, test.want)
 			}
 		})
 	}

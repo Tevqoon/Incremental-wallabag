@@ -45,17 +45,21 @@ func validSessionIDPrefix(id string) bool {
 // enough notice to fit in one more run before that happens on its own.
 const soonExpiryWindow = 7 * 24 * time.Hour
 
-// subscriptionState is the response shape of GET .../api/v1/subscription —
-// confirmed live against a free subscriber's own account on 2026-08-12.
-// Type, Expiry, and BundleID are decoded as json.RawMessage rather than
-// concrete types deliberately: for a free subscriber every one of them came
-// back JSON null, but what a paid subscriber's response actually puts in
-// their place — a string? a number? an object? — was never observed (the
-// account used to check this had no active paid subscription to any
-// publication at the time), so this does not guess a Go type that might not
-// match. isFalsyJSON below only needs to tell "present and meaningful" apart
-// from "null, empty, or false", which json.RawMessage can do without ever
-// assuming a shape for the meaningful case.
+// subscriptionState is the response shape of GET .../api/v1/subscription.
+// The free-subscriber shape was confirmed live on 2026-08-12; the paid
+// shape was confirmed live the same way once the operator's own
+// subscription actually went through. A real paid response carried
+// membership_state="subscribed", type="ios_app" (a plain string), and
+// expiry=1789224995000 (a JSON number — see parseExpiry for what that
+// number actually is), but bundle_id was still null even on that
+// confirmed-paid account, so its own non-null shape remains unconfirmed.
+// Type, Expiry, and BundleID stay decoded as json.RawMessage rather than
+// concrete types for exactly that reason: committing this struct to one
+// Go type per field would either break on BundleID's still-unknown shape
+// or have broken already on Expiry's now-confirmed one being a number
+// rather than the string this package first assumed. isFalsyJSON and
+// parseExpiry each decide their own field's shape at the point that
+// actually reads it, rather than this struct guessing up front.
 type subscriptionState struct {
 	MembershipState  string          `json:"membership_state"`
 	IsFreeSubscribed bool            `json:"is_free_subscribed"`
@@ -94,6 +98,17 @@ func isFalsyJSON(raw json.RawMessage) bool {
 // be caught by the fields that were actually confirmed null on a free
 // account, rather than slipping through because this only recognised one
 // exact string.
+//
+// The compound second condition is load-bearing, not incidental, and this
+// was confirmed the hard way: a real paid account's response still carries
+// is_free_subscribed=true alongside membership_state="subscribed" and a
+// real Type/Expiry/BundleID. Testing IsFreeSubscribed alone — the
+// "obvious" simplification — would abort every genuine paid run, not just
+// free ones. Requiring Type, Expiry, and BundleID to also all read as
+// unset is what keeps a paid account, which never satisfies that, out of
+// this branch. See TestSubscriptionStateLooksFree's confirmed-paid case,
+// which pins this real payload as a non-free result specifically so this
+// does not get "simplified" back to IsFreeSubscribed alone later.
 func (s subscriptionState) looksFree() bool {
 	if s.MembershipState == "free_signup" {
 		return true
@@ -110,36 +125,74 @@ func (s subscriptionState) looksFree() bool {
 // what supplies the real time.Now() at its own outer edge, the same
 // clock-as-parameter split store and syncer already draw between their
 // imperative shell and their pure decision logic.
-//
-// Expiry's actual format is unconfirmed the same way its presence is (see
-// subscriptionState's own doc comment) — the account checked live had no
-// paid subscription, so no real expiry value was ever seen, only inferred
-// to be some date-shaped string. RFC3339 and a bare "2006-01-02" date are
-// tried as the two most likely shapes; anything else fails to parse and
-// this simply reports false, skipping the warning rather than guessing
-// wrong and reporting a nonsense date to the operator.
 func (s subscriptionState) expiresWithin(now time.Time, window time.Duration) (time.Time, bool) {
 	if isFalsyJSON(s.Expiry) {
 		return time.Time{}, false
 	}
-	var raw string
-	if err := json.Unmarshal(s.Expiry, &raw); err != nil {
-		// Expiry was present but not a JSON string (a number, an object —
-		// some shape this package has not seen). Nothing to parse a date
-		// out of, so this stays silent rather than guessing.
+	parsed, ok := parseExpiry(s.Expiry)
+	if !ok {
 		return time.Time{}, false
 	}
+	remaining := parsed.Sub(now)
+	if remaining > 0 && remaining <= window {
+		return parsed, true
+	}
+	return time.Time{}, false
+}
 
-	for _, layout := range []string{time.RFC3339, "2006-01-02"} {
-		parsed, err := time.Parse(layout, raw)
+// secondsToMillisecondsCutoff disambiguates a bare numeric Expiry as Unix
+// seconds or Unix milliseconds by magnitude: a value above this is read as
+// milliseconds, at or below it as seconds.
+//
+// 1e11 seconds is the year 5138. Nothing that is genuinely a seconds-scale
+// timestamp can exceed that in any lifetime this code will see, which is
+// what makes the cutoff safe rather than merely convenient — there is no
+// plausible real seconds value anywhere near this boundary for it to
+// misclassify.
+const secondsToMillisecondsCutoff = 1e11
+
+// parseExpiry decodes raw into a time.Time, trying every shape Expiry has
+// actually been seen to take, or is still plausible enough to keep
+// supporting:
+//
+//   - A JSON number, confirmed live against a real paid subscription on
+//     2026-08-12: raw was 1789224995000, a Unix millisecond timestamp
+//     (2026-09-12, about a month out from a subscription taken on
+//     2026-08-12 — consistent with Substack's own monthly billing cycle).
+//     Tried first, since it is the confirmed shape; disambiguated from a
+//     seconds-scale number by secondsToMillisecondsCutoff.
+//   - A JSON string, in RFC3339 or a bare "2006-01-02" date — kept as a
+//     fallback even though the confirmed shape is a number: a string is
+//     still plausible on some other account or publication tier this
+//     package has not seen, and dropping it on the strength of one
+//     confirmed sample would be a regression for a case that has not
+//     actually been ruled out.
+//
+// Anything else — a malformed number, a JSON object, anything that is
+// neither of the two above — reports false rather than guessing.
+func parseExpiry(raw json.RawMessage) (time.Time, bool) {
+	var asNumber json.Number
+	if err := json.Unmarshal(raw, &asNumber); err == nil {
+		millis, err := asNumber.Int64()
 		if err != nil {
-			continue
+			// A number, but not a clean integer (a float, something with
+			// an exponent) — not the confirmed shape, and not worth
+			// guessing at.
+			return time.Time{}, false
 		}
-		remaining := parsed.Sub(now)
-		if remaining > 0 && remaining <= window {
-			return parsed, true
+		if millis > secondsToMillisecondsCutoff {
+			return time.UnixMilli(millis), true
 		}
-		return time.Time{}, false
+		return time.Unix(millis, 0), true
+	}
+
+	var asString string
+	if err := json.Unmarshal(raw, &asString); err == nil {
+		for _, layout := range []string{time.RFC3339, "2006-01-02"} {
+			if parsed, err := time.Parse(layout, asString); err == nil {
+				return parsed, true
+			}
+		}
 	}
 	return time.Time{}, false
 }
