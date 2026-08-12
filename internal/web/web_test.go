@@ -93,7 +93,7 @@ func newTestServerWithDelay(t *testing.T, delayDays int, withContent ...bool) (*
 	if hasContent {
 		document.ContentHTML = articleBody
 	}
-	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, time.Now()); err != nil {
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, 0, time.Now()); err != nil {
 		t.Fatalf("seed document: %v", err)
 	}
 
@@ -198,7 +198,7 @@ func seedArticles(t *testing.T, db *store.Store, n int) {
 			UpdatedAt:  time.Now(),
 		})
 	}
-	if _, err := db.UpsertDocuments("wallabag", docs, 0, time.Now()); err != nil {
+	if _, err := db.UpsertDocuments("wallabag", docs, 0, 0, time.Now()); err != nil {
 		t.Fatalf("seed articles: %v", err)
 	}
 }
@@ -1160,7 +1160,7 @@ func TestNextRedirectsToMostImportant(t *testing.T) {
 		ExternalID: "2",
 		Title:      "More important",
 		UpdatedAt:  time.Now(),
-	}}, 0, time.Now()); err != nil {
+	}}, 0, 0, time.Now()); err != nil {
 		t.Fatalf("seed second document: %v", err)
 	}
 	if err := db.SetPriority(2, 0.1, time.Now()); err != nil {
@@ -1664,7 +1664,7 @@ func newEnrichedServer(t *testing.T, highlights []source.Highlight) (*Server, *s
 		ExternalID: "1",
 		Title:      "A test article",
 		UpdatedAt:  time.Now(),
-	}}, 0, time.Now()); err != nil {
+	}}, 0, 0, time.Now()); err != nil {
 		t.Fatalf("seed document: %v", err)
 	}
 
@@ -1820,7 +1820,7 @@ func TestLibraryListsAndSearches(t *testing.T) {
 		{ExternalID: "2", Title: "On the difficulty of reading", Author: "A. Writer",
 			UpdatedAt: time.Now()},
 		{ExternalID: "3", Title: "Something unrelated", UpdatedAt: time.Now()},
-	}, 0, time.Now()); err != nil {
+	}, 0, 0, time.Now()); err != nil {
 		t.Fatalf("seed documents: %v", err)
 	}
 
@@ -1996,7 +1996,7 @@ func TestArchivedArticleIsNotQueuedButIsReadable(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
 		ExternalID: "2", Title: "Read long ago", IsArchived: true, UpdatedAt: time.Now(),
-	}}, 0, time.Now()); err != nil {
+	}}, 0, 0, time.Now()); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -2031,7 +2031,7 @@ func TestSyncImportedHighlightsAreAnchoredOnOpen(t *testing.T) {
 			{ExternalID: "500", Quote: "quick brown"},
 			{ExternalID: "501", Quote: "a passage that is not in this article"},
 		},
-	}}, 0, time.Now()); err != nil {
+	}}, 0, 0, time.Now()); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
 
@@ -2083,7 +2083,7 @@ func TestImportedHighlightSpanningParagraphsIsAnchored(t *testing.T) {
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
 		ExternalID: "1", Title: "A test article", UpdatedAt: time.Now(),
 		Highlights: []source.Highlight{{ExternalID: "500", Quote: quote}},
-	}}, 0, time.Now()); err != nil {
+	}}, 0, 0, time.Now()); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
 
@@ -2128,7 +2128,7 @@ func TestUnlocatableHighlightRecoversViaProviderRanges(t *testing.T) {
 			Quote:  "this text does not appear anywhere in the article…",
 			Ranges: json.RawMessage(`["stub-range"]`),
 		}},
-	}}, 0, time.Now()); err != nil {
+	}}, 0, 0, time.Now()); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
 
@@ -2174,7 +2174,7 @@ func TestResolvedRangeMustBeLongerToReplaceAGoodAnchor(t *testing.T) {
 			Quote:      "quick brown fox",
 			Ranges:     json.RawMessage(`["stub-range"]`),
 		}},
-	}}, 0, time.Now()); err != nil {
+	}}, 0, 0, time.Now()); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
 
@@ -2205,7 +2205,7 @@ func TestAlreadyAnchoredHighlightUpgradesOnceRangesArrivesLater(t *testing.T) {
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
 		ExternalID: "1", Title: "A test article", UpdatedAt: time.Now(),
 		Highlights: []source.Highlight{{ExternalID: "500", Quote: "quick brown"}},
-	}}, 0, time.Now()); err != nil {
+	}}, 0, 0, time.Now()); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
 
@@ -2227,7 +2227,7 @@ func TestAlreadyAnchoredHighlightUpgradesOnceRangesArrivesLater(t *testing.T) {
 			ExternalID: "500", Quote: "quick brown",
 			Ranges: json.RawMessage(`["stub-range"]`),
 		}},
-	}}, 0, time.Now()); err != nil {
+	}}, 0, 0, time.Now()); err != nil {
 		t.Fatalf("re-sync: %v", err)
 	}
 
@@ -2255,7 +2255,7 @@ func TestExtractsPage(t *testing.T) {
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
 		ExternalID: "1", Title: "A test article", UpdatedAt: time.Now(),
 		Highlights: []source.Highlight{{ExternalID: "500", Quote: "An imported passage."}},
-	}}, 0, time.Now()); err != nil {
+	}}, 0, 0, time.Now()); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
 	post(t, server, "/elements/1/extract", url.Values{
@@ -2635,7 +2635,7 @@ func TestUnsuspendWithoutDoneTagQueuesNothingExtra(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
 		ExternalID: "2", Title: "Archived elsewhere, never graded here", IsArchived: true, UpdatedAt: time.Now(),
-	}}, 0, time.Now()); err != nil {
+	}}, 0, 0, time.Now()); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -2724,7 +2724,7 @@ func TestUnsuspendUnarchivesUpstream(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
 		ExternalID: "2", Title: "Read long ago", IsArchived: true, UpdatedAt: time.Now(),
-	}}, 0, time.Now()); err != nil {
+	}}, 0, 0, time.Now()); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -2819,7 +2819,7 @@ func TestLibraryFilterTabs(t *testing.T) {
 		{ExternalID: "2", Title: "Starred piece", IsStarred: true, UpdatedAt: time.Now()},
 		{ExternalID: "3", Title: "Archived piece", IsArchived: true, UpdatedAt: time.Now(),
 			Tags: []string{"philosophy"}},
-	}, 0, time.Now()); err != nil {
+	}, 0, 0, time.Now()); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -2846,7 +2846,7 @@ func TestLibrarySorts(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "2", Title: "Second article", UpdatedAt: time.Now()},
-	}, 0, time.Now()); err != nil {
+	}, 0, 0, time.Now()); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -2910,7 +2910,7 @@ func TestLibraryScheduledFilterFindsGradedArticles(t *testing.T) {
 		{ExternalID: "3", Title: "Backlogged not as far", UpdatedAt: time.Now()},
 		{ExternalID: "4", Title: "Never touched", UpdatedAt: time.Now()},
 		{ExternalID: "5", Title: "Archived on wallabag", IsArchived: true, UpdatedAt: time.Now()},
-	}, 0, time.Now()); err != nil {
+	}, 0, 0, time.Now()); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -2947,7 +2947,7 @@ func TestLibrarySuspendedAndDoneFilters(t *testing.T) {
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "2", Title: "Archived elsewhere, untouched here", IsArchived: true, UpdatedAt: time.Now()},
 		{ExternalID: "3", Title: "Never archived", UpdatedAt: time.Now()},
-	}, 0, time.Now()); err != nil {
+	}, 0, 0, time.Now()); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -2997,7 +2997,7 @@ func TestLibraryBulkQueue(t *testing.T) {
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "2", Title: "Archived one", IsArchived: true, UpdatedAt: time.Now()},
 		{ExternalID: "3", Title: "Archived two", IsArchived: true, UpdatedAt: time.Now()},
-	}, 0, time.Now()); err != nil {
+	}, 0, 0, time.Now()); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -3049,7 +3049,7 @@ func TestLibraryBulkDone(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "2", Title: "Second article", UpdatedAt: time.Now()},
-	}, 0, time.Now()); err != nil {
+	}, 0, 0, time.Now()); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -3186,7 +3186,7 @@ func TestBuryKeepsItTodayButLast(t *testing.T) {
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "2", Title: "Second", UpdatedAt: time.Now()},
 		{ExternalID: "3", Title: "Third", UpdatedAt: time.Now()},
-	}, 0, time.Now()); err != nil {
+	}, 0, 0, time.Now()); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -3315,7 +3315,7 @@ func TestDeleteImportedExtractQueuesUpstreamRemoval(t *testing.T) {
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
 		ExternalID: "1", Title: "A test article", UpdatedAt: time.Now(),
 		Highlights: []source.Highlight{{ExternalID: "500", Quote: "An imported passage."}},
-	}}, 0, time.Now()); err != nil {
+	}}, 0, 0, time.Now()); err != nil {
 		t.Fatalf("seed highlight: %v", err)
 	}
 

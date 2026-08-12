@@ -136,7 +136,7 @@ func seed(t *testing.T, db *store.Store) {
 	t.Helper()
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "77", Title: "An article", UpdatedAt: time.Now()},
-	}, 0, time.Now()); err != nil {
+	}, 0, 0, time.Now()); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 }
@@ -223,7 +223,7 @@ func TestReconcileFlagsDeletedEntries(t *testing.T) {
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "77", Title: "Stays", UpdatedAt: time.Now()},
 		{ExternalID: "78", Title: "Gets deleted at wallabag", UpdatedAt: time.Now()},
-	}, 0, time.Now()); err != nil {
+	}, 0, 0, time.Now()); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -260,7 +260,7 @@ func TestReconcileFlagsDeletedHighlights(t *testing.T) {
 			{ExternalID: "h1", Quote: "Stays annotated."},
 			{ExternalID: "h2", Quote: "Deleted at wallabag."},
 		}},
-	}, 0, time.Now()); err != nil {
+	}, 0, 0, time.Now()); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -305,7 +305,7 @@ func TestReconcileRelocatesAndDrainsLocationlessHighlights(t *testing.T) {
 		{ExternalID: "77", Title: "An article", UpdatedAt: time.Now(), Highlights: []source.Highlight{
 			{ExternalID: "h1", Quote: "Pushed before ranges existed.", HasLocation: false},
 		}},
-	}, 0, time.Now()); err != nil {
+	}, 0, 0, time.Now()); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 

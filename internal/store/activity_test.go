@@ -26,7 +26,7 @@ func TestSaveScheduleReviewedLogsActivity(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "1", Title: "Article", UpdatedAt: now},
-	}, 0, now); err != nil {
+	}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -61,7 +61,7 @@ func TestBacklogDoesNotLogActivity(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "1", Title: "Article", UpdatedAt: now},
-	}, 0, now); err != nil {
+	}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -84,7 +84,7 @@ func TestCreateExtractLogsManualNotImported(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "1", Title: "Article", UpdatedAt: now},
-	}, 0, now); err != nil {
+	}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -115,7 +115,7 @@ func TestCurrentStreak(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "1", Title: "Article", UpdatedAt: time.Now()},
-	}, 0, time.Now()); err != nil {
+	}, 0, 0, time.Now()); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -167,7 +167,7 @@ func TestActivityHeatmapBucketsByDay(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "1", Title: "Article", UpdatedAt: now},
-	}, 0, now); err != nil {
+	}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -213,7 +213,7 @@ func TestActivityOnListsTheDaysEvents(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "1", Title: "Article", UpdatedAt: now},
-	}, 0, now); err != nil {
+	}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 

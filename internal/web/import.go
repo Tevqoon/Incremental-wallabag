@@ -121,8 +121,9 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		// into the queue. The default is the safe one: a book that turns out
 		// to hold four hundred passages should not be able to swamp the
 		// queue because a radio button was left alone.
-		Triage:    r.FormValue("mode") != "queue",
-		DelayDays: s.extractDelay,
+		Triage:     r.FormValue("mode") != "queue",
+		FloorDays:  s.annotationDelayDays,
+		SpreadDays: s.annotationDelaySpreadDays,
 	}, time.Now())
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {

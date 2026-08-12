@@ -173,7 +173,7 @@ func runSync(settings config.Config, logger *slog.Logger, full bool) error {
 	defer cancel()
 
 	results, err := syncer.New(db, logger, sources...).
-		WithExtractDelay(settings.ExtractDelayDays).
+		WithAnnotationDelay(settings.AnnotationDelayDays, settings.AnnotationDelaySpreadDays).
 		SyncAll(ctx)
 	for _, result := range results {
 		fmt.Printf("%s: %d fetched, %d new, %d updated, %d archived, %d highlights\n",
@@ -214,7 +214,8 @@ func serve(settings config.Config, logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	sync := syncer.New(db, logger, sources...).WithExtractDelay(settings.ExtractDelayDays)
+	sync := syncer.New(db, logger, sources...).
+		WithAnnotationDelay(settings.AnnotationDelayDays, settings.AnnotationDelaySpreadDays)
 	go sync.Run(ctx, settings.SyncInterval.Duration)
 
 	// The reader looks documents up by their source name when it needs to fetch
@@ -225,12 +226,14 @@ func serve(settings config.Config, logger *slog.Logger) error {
 	}
 
 	reader, err := web.New(web.Options{
-		Store:          db,
-		Sources:        byName,
-		QueuePageLimit: settings.QueuePageLimit,
-		ExtractDelay:   settings.ExtractDelayDays,
-		Logger:         logger,
-		Publish:        sync.Publish,
+		Store:                     db,
+		Sources:                   byName,
+		QueuePageLimit:            settings.QueuePageLimit,
+		ExtractDelay:              settings.ExtractDelayDays,
+		AnnotationDelayDays:       settings.AnnotationDelayDays,
+		AnnotationDelaySpreadDays: settings.AnnotationDelaySpreadDays,
+		Logger:                    logger,
+		Publish:                   sync.Publish,
 		SyncNow: func(ctx context.Context) error {
 			// Reconciling here too, rather than waiting for the scheduled
 			// loop's daily check: a manual sync is exactly the moment

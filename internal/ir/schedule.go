@@ -241,8 +241,8 @@ const backlogFuzzDivisor = 8
 // FuzzedBacklogDays nudges a preset by a deterministic, element-specific
 // amount, so that everyone who picks the same preset on the same day does
 // not land on the exact same due date. Piling a self-inflicted backlog onto
-// one future day is the same failure spreading a fresh import already
-// exists to avoid — see spreadOffset — just chosen by the reader instead of
+// one future day is the same failure a fresh import's own scheduling exists
+// to avoid — see FuzzedAnnotationDelay — just chosen by the reader instead of
 // created by an import.
 //
 // The jitter is proportional to the preset rather than a fixed number of
@@ -287,6 +287,63 @@ func BacklogOptions(elementID int64) []BacklogOption {
 		options[i] = BacklogOption{Days: days, Label: FormatInterval(float64(days))}
 	}
 	return options
+}
+
+// firstDueFuzzDivisor mirrors backlogFuzzDivisor and intervalFuzzDivisor: an
+// eighth of the configured delay, each direction — the same proportional
+// jitter the rest of the scheduler already uses, applied to a freshly made
+// extract's very first due date.
+const firstDueFuzzDivisor = 8
+
+// FuzzedFirstDueDays nudges a freshly created extract's first-due delay by a
+// small, deterministic amount, so that pulling several passages from one
+// article in a sitting does not put them all back in front of the reader on
+// the exact same future date — the one-extract-at-a-time version of the pile
+// FuzzedAnnotationDelay exists to prevent for a bulk import.
+//
+// A caller-supplied seed rather than the element's own id, unlike
+// FuzzedBacklogDays: the extract does not have an id yet at the point this
+// runs, since the due date is computed before the row that would carry one is
+// inserted. See store.extractSeed for what the seed is actually built from.
+//
+// delayDays <= 1 is returned unchanged, the same exception FuzzedBacklogDays
+// makes for its shortest preset: there is no equivalent of "I clicked '1d' on
+// purpose" here, but a configured delay of zero or one day is small enough
+// that fuzzing it either does nothing (spread rounds to zero) or reads as
+// broken (an extract due "tomorrow" that is actually due today).
+func FuzzedFirstDueDays(seed int64, delayDays int) int {
+	if delayDays <= 1 {
+		return delayDays
+	}
+	spread := max(1, delayDays/firstDueFuzzDivisor)
+	width := int64(2*spread + 1)
+	offset := int(((seed % width) + width) % width)
+	return delayDays + offset - spread
+}
+
+// FuzzedAnnotationDelay returns how many days ahead a freshly imported
+// annotation should first become due: floorDays at minimum, plus a
+// deterministic, per-highlight draw across spreadDays on top.
+//
+// Wide and one-directional, unlike the proportional jitter the rest of this
+// file uses (FuzzedBacklogDays, FuzzedFirstDueDays): those nudge a single
+// chosen value by a small fraction of itself, but the point here is
+// serendipity across a whole import arriving at once — hundreds of highlights
+// from one book, dozens from one heavily annotated article — so the spread is
+// a flat, independently configured window rather than a fraction of the
+// floor. Nothing is ever due before floorDays; where inside the window any
+// one annotation lands is otherwise unpredictable on purpose.
+//
+// A caller-supplied seed, not an element id, for the same reason
+// FuzzedFirstDueDays takes one: nothing has an id yet at this point. See
+// store.highlightSeed.
+func FuzzedAnnotationDelay(seed int64, floorDays, spreadDays int) int {
+	if spreadDays <= 0 {
+		return floorDays
+	}
+	width := int64(spreadDays)
+	offset := int(((seed % width) + width) % width)
+	return floorDays + offset
 }
 
 // Backlog puts an element off by the given number of days, starting today —

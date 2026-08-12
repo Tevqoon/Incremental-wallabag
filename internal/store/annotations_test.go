@@ -106,7 +106,7 @@ func TestImportAnnotationsCreatesASuspendedWork(t *testing.T) {
 func TestImportAnnotationsCanQueueImmediately(t *testing.T) {
 	db := testStore(t)
 
-	result, err := db.ImportAnnotations(book(), ImportOptions{DelayDays: 10}, time.Now())
+	result, err := db.ImportAnnotations(book(), ImportOptions{FloorDays: 10}, time.Now())
 	if err != nil {
 		t.Fatalf("ImportAnnotations: %v", err)
 	}
@@ -426,7 +426,7 @@ func TestDisplayTitleOverridesWithoutTouchingTheSyncedTitle(t *testing.T) {
 	// exactly why the override is a separate column.
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
 		ExternalID: "1", Title: "Some article", UpdatedAt: time.Now(),
-	}}, 0, time.Now()); err != nil {
+	}}, 0, 0, time.Now()); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -437,7 +437,7 @@ func TestDisplayTitleOverridesWithoutTouchingTheSyncedTitle(t *testing.T) {
 	// A later sync, carrying the provider's own title again.
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
 		ExternalID: "1", Title: "Some article, retitled upstream", UpdatedAt: time.Now(),
-	}}, 0, time.Now()); err != nil {
+	}}, 0, 0, time.Now()); err != nil {
 		t.Fatalf("second UpsertDocuments: %v", err)
 	}
 
@@ -600,7 +600,7 @@ func TestWallabagHighlightsAreUnaffected(t *testing.T) {
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
 		ExternalID: "1", Title: "An article", UpdatedAt: now,
 		Highlights: []source.Highlight{{ExternalID: "h-1", Quote: "a passage"}},
-	}}, 10, now); err != nil {
+	}}, 10, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -632,7 +632,7 @@ func TestCountByStateCountsEverySourceWhenUnfiltered(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
 		ExternalID: "1", Title: "An article", UpdatedAt: now,
-	}}, 0, now); err != nil {
+	}}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 	if _, err := db.ImportAnnotations(book(), ImportOptions{Triage: true}, now); err != nil {

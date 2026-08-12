@@ -68,3 +68,42 @@ func TestQueuePageLimitIsRead(t *testing.T) {
 		t.Errorf("queue_page_limit = %d, want 25", config.QueuePageLimit)
 	}
 }
+
+// TestAnnotationDelayDefaults: a bulk import should not surface for a month,
+// and should be spread wide once it does — see ir.FuzzedAnnotationDelay.
+func TestAnnotationDelayDefaults(t *testing.T) {
+	config, err := Load(write(t, minimal))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if config.AnnotationDelayDays != 30 {
+		t.Errorf("annotation_delay_days = %d, want 30", config.AnnotationDelayDays)
+	}
+	if config.AnnotationDelaySpreadDays != 60 {
+		t.Errorf("annotation_delay_spread_days = %d, want 60", config.AnnotationDelaySpreadDays)
+	}
+}
+
+// TestAnnotationDelayIsRead: both settings are independently overridable.
+func TestAnnotationDelayIsRead(t *testing.T) {
+	config, err := Load(write(t, minimal+"annotation_delay_days: 14\nannotation_delay_spread_days: 7\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if config.AnnotationDelayDays != 14 {
+		t.Errorf("annotation_delay_days = %d, want 14", config.AnnotationDelayDays)
+	}
+	if config.AnnotationDelaySpreadDays != 7 {
+		t.Errorf("annotation_delay_spread_days = %d, want 7", config.AnnotationDelaySpreadDays)
+	}
+}
+
+// TestAnnotationDelayRejectsNegative applies to both settings independently.
+func TestAnnotationDelayRejectsNegative(t *testing.T) {
+	if _, err := Load(write(t, minimal+"annotation_delay_days: -1\n")); err == nil {
+		t.Error("Load accepted a negative annotation_delay_days")
+	}
+	if _, err := Load(write(t, minimal+"annotation_delay_spread_days: -1\n")); err == nil {
+		t.Error("Load accepted a negative annotation_delay_spread_days")
+	}
+}
