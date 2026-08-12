@@ -2099,6 +2099,33 @@ func TestSyncImportedHighlightsAreAnchoredOnOpen(t *testing.T) {
 	}
 }
 
+// TestReaderShowsThePublicationDate guards a template-only change, which is
+// exactly the kind that breaks in silence: a mistyped field name in an
+// html/template action renders as nothing at all rather than failing.
+//
+// The date matters most where the queue and reader hold a whole backfilled
+// archive by one writer, since it is then most of what distinguishes one piece
+// from the next. It is rendered absolutely rather than relatively — "12 Mar
+// 2024", not "two years ago" — because it is when the thing was written, not
+// when anything is due.
+func TestReaderShowsThePublicationDate(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
+		ExternalID:  "1",
+		Title:       "A test article",
+		PublishedAt: time.Date(2024, 3, 12, 13, 17, 39, 0, time.UTC),
+		UpdatedAt:   time.Now(),
+	}}, 0, 0, time.Now()); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	body := get(t, server, "/read/1").Body.String()
+	if !strings.Contains(body, "12 Mar 2024") {
+		t.Error("the reader does not show the article's publication date")
+	}
+}
+
 // TestManualExtractIsReanchoredAfterLosingItsPosition covers an extract made
 // by hand whose article body was replaced underneath it.
 //

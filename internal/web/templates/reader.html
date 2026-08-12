@@ -22,6 +22,9 @@
         <a href="{{.Document.URL}}" rel="noopener noreferrer" target="_blank">source ↗</a>
       {{end}}
       {{if .Document.Author}}<span>{{.Document.Author}}</span>{{end}}
+      {{if not .Document.PublishedAt.IsZero}}
+        <span title="published {{isoDate .Document.PublishedAt}}">{{date .Document.PublishedAt}}</span>
+      {{end}}
       {{if .Document.ReadingTime}}<span title="estimated reading time">{{.Document.ReadingTime}} min</span>{{end}}
       {{if .Element.IsRoot}}
         <button class="star {{if .Document.IsStarred}}on{{end}}"
