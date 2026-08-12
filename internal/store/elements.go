@@ -138,6 +138,16 @@ type QueueItem struct {
 	DocumentTitle string
 	DocumentURL   string
 	ReadingTime   int
+
+	// DocumentAuthor and DocumentPublishedAt are carried for the queue's own
+	// display, which the library page has always shown and this one had not.
+	// A queue of a few due articles reads fine without them; one holding a
+	// backfilled archive does not, since a hundred pieces by the same writer
+	// are told apart by when they were written more than by anything else in
+	// the row. Both may legitimately be empty — a provider need not know
+	// either — so the template guards them rather than assuming.
+	DocumentAuthor      string
+	DocumentPublishedAt time.Time
 }
 
 // QueueKind names one of the two queues.
@@ -300,7 +310,8 @@ func (s *Store) Queue(day time.Time, kind QueueKind, limit int) ([]QueueItem, er
 	}
 
 	rows, err := s.db.Query(`
-		SELECT `+elementColumns+`, COALESCE(NULLIF(d.display_title, ''), d.title), d.url, d.reading_time
+		SELECT `+elementColumns+`, COALESCE(NULLIF(d.display_title, ''), d.title), d.url, d.reading_time,
+		       COALESCE(d.author, ''), d.published_at
 		FROM elements e
 		JOIN documents d ON d.id = e.document_id
 		WHERE `+predicate+`
@@ -321,16 +332,19 @@ func (s *Store) Queue(day time.Time, kind QueueKind, limit int) ([]QueueItem, er
 	var queue []QueueItem
 	for rows.Next() {
 		var (
-			item     QueueItem
-			nullable nullableElement
+			item      QueueItem
+			nullable  nullableElement
+			published sql.NullString
 		)
 		targets := append(scanTargets(&item.Element, &nullable),
-			&item.DocumentTitle, &item.DocumentURL, &item.ReadingTime)
+			&item.DocumentTitle, &item.DocumentURL, &item.ReadingTime,
+			&item.DocumentAuthor, &published)
 
 		if err := rows.Scan(targets...); err != nil {
 			return nil, fmt.Errorf("store: scan queue row: %w", err)
 		}
 		nullable.apply(&item.Element)
+		item.DocumentPublishedAt = parseTime(published)
 		queue = append(queue, item)
 	}
 	return queue, rows.Err()

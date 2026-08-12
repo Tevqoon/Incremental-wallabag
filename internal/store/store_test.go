@@ -975,6 +975,56 @@ func TestQueueSeparatesArticlesFromExtracts(t *testing.T) {
 // TestQueueRejectsAnUnknownKind: the two kinds partition the table, so a third
 // value is a caller bug rather than a request for everything. Answering it
 // with the whole table would silently undo the split.
+// TestQueueCarriesAuthorAndPublicationDate pins the two document fields the
+// queue row displays but does not own. The library page has always shown
+// them; the queue could not, because its own query never selected them. That
+// gap only became visible once a backfilled archive put a hundred pieces by
+// one writer in the queue at once, where the publication date is most of what
+// distinguishes one row from the next.
+func TestQueueCarriesAuthorAndPublicationDate(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+	published := time.Date(2024, 3, 12, 13, 17, 39, 0, time.UTC)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "1", Title: "With metadata", Author: "Sam Kriss",
+			PublishedAt: published, UpdatedAt: now},
+		// A provider need not know either field; the row must still come back.
+		{ExternalID: "2", Title: "Without metadata", UpdatedAt: now},
+	}, 0, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	articles, err := db.Queue(now, QueueArticles, 50)
+	if err != nil {
+		t.Fatalf("Queue: %v", err)
+	}
+	byTitle := map[string]QueueItem{}
+	for _, item := range articles {
+		byTitle[item.DocumentTitle] = item
+	}
+	if len(byTitle) != 2 {
+		t.Fatalf("got %d articles, want 2", len(byTitle))
+	}
+
+	with := byTitle["With metadata"]
+	if with.DocumentAuthor != "Sam Kriss" {
+		t.Errorf("author = %q, want %q", with.DocumentAuthor, "Sam Kriss")
+	}
+	if !with.DocumentPublishedAt.Equal(published) {
+		t.Errorf("published = %v, want %v", with.DocumentPublishedAt, published)
+	}
+
+	without := byTitle["Without metadata"]
+	if without.DocumentAuthor != "" {
+		t.Errorf("author = %q, want empty", without.DocumentAuthor)
+	}
+	if !without.DocumentPublishedAt.IsZero() {
+		t.Errorf("published = %v, want the zero time so the template can skip it",
+			without.DocumentPublishedAt)
+	}
+}
+
 func TestQueueRejectsAnUnknownKind(t *testing.T) {
 	db := testStore(t)
 	now := time.Now()

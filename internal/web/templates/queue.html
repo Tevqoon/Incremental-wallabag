@@ -50,6 +50,12 @@
             <span title="current interval">{{days .Schedule.IntervalDays}}</span>
             <span title="repetitions">×{{.Schedule.Reps}}</span>
             {{if and .IsRoot .ReadingTime}}<span title="estimated reading time">{{.ReadingTime}} min</span>{{end}}
+            {{if .IsRoot}}
+              {{if .DocumentAuthor}}<span>{{.DocumentAuthor}}</span>{{end}}
+              {{if not .DocumentPublishedAt.IsZero}}
+                <span title="published {{isoDate .DocumentPublishedAt}}">{{date .DocumentPublishedAt}}</span>
+              {{end}}
+            {{end}}
             {{if not .IsRoot}}
               <span class="source">from {{.DocumentTitle}}</span>
             {{end}}
