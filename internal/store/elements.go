@@ -727,6 +727,80 @@ func (s *Store) RemapExternalRef(documentID int64, oldRef, newRef string) error 
 	return nil
 }
 
+// RequeueDocumentRoot puts a document's root topic back in the reading
+// queue after its body has been replaced with materially more text than it
+// had before — the Substack backfill's actual point, not a side effect of
+// it: a preview the operator dismissed, worked through to done, or parked
+// suspended was a decision about the preview, not about the article that
+// has since replaced it, and now that the real article exists there is
+// something worth reading that was not there before.
+//
+// due_on is set to today unconditionally, regardless of whatever state this
+// root was in beforehand — done, dismissed, suspended, anything. state
+// becomes StateReading if the reader had already gotten partway through the
+// preview (read_block > 0), so the queue treats this as "continue" rather
+// than "start over", or StateNew otherwise.
+//
+// read_block itself is deliberately left untouched, and that is what makes
+// the StateReading branch actually useful rather than cosmetic: Substack's
+// paywall truncates the article body rather than re-rendering a shorter
+// version of it (confirmed against real preview/full response pairs — the
+// preview is a literal byte-prefix of the full body_html), so whatever
+// block index the reader had reached in the preview sits at approximately
+// the same point in the full article, right around where the paywall used
+// to cut it off. Resuming there instead of at block 0 is the entire reason
+// this call does not also reset reading progress.
+//
+// interval_days, afactor, reps and priority are left untouched for the same
+// reason: this is a requeue, not a fresh import. The reader's past
+// engagement with this article, however partial, is real history — the
+// same history Suspend and Unsuspend already take care to preserve — not
+// noise to discard just because the body underneath it grew.
+//
+// today carries no fuzz or spread at all, unlike an imported annotation's
+// first due date (ir.FuzzedAnnotationDelay) or a fresh extract's
+// (ir.FuzzedFirstDueDays). Both of those exist because extracts and
+// imported highlights arrive in the hundreds per batch, and spreading them
+// out is what stops one import from burying the reader's daily extract
+// review under itself for weeks. A requeued article is not that kind of
+// arrival: this call runs once per grown document, not hundreds of times
+// per batch, and the article reading queue — unlike the bounded daily
+// extract review — is allowed to be arbitrarily long. An operator who ran
+// this backfill specifically to get an article's real text back in front of
+// them gets exactly that by seeing it due today, not on some
+// deterministically-scattered date nobody asked for. Fuzzing a value
+// nothing here actually needs spread out would just be copying a pattern
+// that solves a different problem.
+//
+// Only ever the root (parent_id IS NULL): an extract's own children keep
+// their own schedule entirely untouched by this call — they are being
+// re-anchored (see ClearExtractAnchors), not rescheduled, and requeuing the
+// article itself has no bearing on when a highlight taken from it next
+// comes up for review.
+//
+// Returns whether a root topic was actually found and updated — false for a
+// document id with no root element at all, which should never happen for
+// anything that went through UpsertDocuments, but is worth reporting to the
+// caller rather than silently doing nothing.
+func (s *Store) RequeueDocumentRoot(documentID int64, today time.Time) (bool, error) {
+	result, err := s.db.Exec(`
+		UPDATE elements SET
+		    due_on = ?,
+		    state = CASE WHEN read_block > 0 THEN ? ELSE ? END
+		WHERE document_id = ? AND parent_id IS NULL`,
+		today.Format(dateFormat), string(ir.StateReading), string(ir.StateNew),
+		documentID,
+	)
+	if err != nil {
+		return false, fmt.Errorf("store: requeue document %d: %w", documentID, err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("store: count requeued rows for document %d: %w", documentID, err)
+	}
+	return changed > 0, nil
+}
+
 // ClearExtractAnchors forgets where a document's extracts sit in its body —
 // NULLing start_block, start_offset, end_block, end_offset — so the next time
 // the document is opened, anchorHighlights (internal/web/server.go) re-locates

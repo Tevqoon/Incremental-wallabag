@@ -72,7 +72,7 @@ func TestRepairRemapsRefsClearsContentAndAnchorsButPreservesScheduling(t *testin
 	}
 
 	logger := discardLogger()
-	result, err := Repair(context.Background(), db, applied, logger)
+	result, err := Repair(context.Background(), db, applied, now, logger)
 	if err != nil {
 		t.Fatalf("Repair: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestRepairSkipsEntriesWithNoLocalDocumentYet(t *testing.T) {
 
 	applied := Applied{Remaps: map[int][]Remap{777: nil}}
 
-	result, err := Repair(context.Background(), db, applied, discardLogger())
+	result, err := Repair(context.Background(), db, applied, time.Now(), discardLogger())
 	if err != nil {
 		t.Fatalf("Repair: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestRepairIsIdempotent(t *testing.T) {
 
 	applied := Applied{Remaps: map[int][]Remap{555: {{Old: "100", New: "200"}}}}
 
-	first, err := Repair(context.Background(), db, applied, discardLogger())
+	first, err := Repair(context.Background(), db, applied, now, discardLogger())
 	if err != nil {
 		t.Fatalf("first Repair: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestRepairIsIdempotent(t *testing.T) {
 	// right after the first call would. The ref is already remapped
 	// (RemapExternalRef's zero-match tolerance), and content/anchors are
 	// already cleared (both idempotent updates) — nothing here should error.
-	second, err := Repair(context.Background(), db, applied, discardLogger())
+	second, err := Repair(context.Background(), db, applied, now, discardLogger())
 	if err != nil {
 		t.Fatalf("second Repair: %v", err)
 	}
@@ -200,5 +200,74 @@ func TestRepairIsIdempotent(t *testing.T) {
 	}
 	if extracts[0].ExternalRef != "200" {
 		t.Errorf("ExternalRef after two repairs = %q, want still 200, not duplicated or reverted", extracts[0].ExternalRef)
+	}
+}
+
+// TestRepairRequeuesOnlyTheGrownDocument is the requirement in one test: two
+// documents go through the same Repair call, one flagged as grown and one
+// not, and only the grown one comes back into the reading queue due today.
+// The other — a free post that was already complete and which the reader
+// had already marked done — must be left exactly as it was, since that is
+// the other, equally important half of the rule: growth is what earns a
+// document back into the queue, and nothing else does.
+func TestRepairRequeuesOnlyTheGrownDocument(t *testing.T) {
+	db := testRepairStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "555", Title: "Grew: a preview finally backfilled", UpdatedAt: now},
+		{ExternalID: "556", Title: "Did not grow: already complete", UpdatedAt: now},
+	}, 0, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	// Document 1 (external id 555) was read and marked done; document 2
+	// (external id 556) was dismissed unread. Neither's prior state should
+	// matter to how Repair treats it — only Applied.Grew does.
+	if err := db.SaveSchedule(1, ir.Schedule{State: ir.StateDone}, now); err != nil {
+		t.Fatalf("SaveSchedule(555): %v", err)
+	}
+	if err := db.SaveSchedule(2, ir.Schedule{State: ir.StateDismissed}, now); err != nil {
+		t.Fatalf("SaveSchedule(556): %v", err)
+	}
+
+	requeueDay := now.AddDate(0, 0, 2)
+	applied := Applied{
+		Remaps: map[int][]Remap{555: nil, 556: nil},
+		Grew:   map[int]bool{555: true, 556: false},
+	}
+
+	result, err := Repair(context.Background(), db, applied, requeueDay, discardLogger())
+	if err != nil {
+		t.Fatalf("Repair: %v", err)
+	}
+	if result.Repaired != 2 {
+		t.Errorf("Repaired = %d, want 2 (both documents' content/anchors are cleared regardless of growth)", result.Repaired)
+	}
+	if result.Requeued != 1 {
+		t.Errorf("Requeued = %d, want 1 (only the grown document)", result.Requeued)
+	}
+
+	grown, err := db.ElementByID(1)
+	if err != nil {
+		t.Fatalf("ElementByID(1): %v", err)
+	}
+	if grown.Schedule.State != ir.StateNew {
+		t.Errorf("grown document's state = %q, want %q — it must return to the queue", grown.Schedule.State, ir.StateNew)
+	}
+	if grown.Schedule.DueOn.Format("2006-01-02") != requeueDay.Format("2006-01-02") {
+		t.Errorf("grown document's due_on = %v, want today (%v)", grown.Schedule.DueOn, requeueDay)
+	}
+
+	ungrown, err := db.ElementByID(2)
+	if err != nil {
+		t.Fatalf("ElementByID(2): %v", err)
+	}
+	if ungrown.Schedule.State != ir.StateDismissed {
+		t.Errorf("ungrown document's state = %q, want untouched (%q) — an already-complete post must not be requeued",
+			ungrown.Schedule.State, ir.StateDismissed)
+	}
+	if !ungrown.Schedule.DueOn.IsZero() {
+		t.Errorf("ungrown document's due_on = %v, want still unset", ungrown.Schedule.DueOn)
 	}
 }

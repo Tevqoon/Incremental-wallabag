@@ -103,6 +103,96 @@ func TestBuildPlanClassifiesEachCombinationOfContentAndAnnotationState(t *testin
 	}
 }
 
+// TestBuildPlanContentGrew is the requeue trigger's own classification
+// table: growth clearing contentGrowthRatio sets ContentGrew, growth under
+// it does not, an unchanged free post does not, and a brand new post
+// (nothing matched, EntryID stays 0) never does — regardless of how much
+// text it brings, since there is nothing here for it to have grown from.
+func TestBuildPlanContentGrew(t *testing.T) {
+	now := time.Now()
+
+	tests := []struct {
+		name       string
+		oldContent string
+		newContent string
+		matched    bool
+		wantGrew   bool
+	}{
+		{
+			name:       "growth clears the ratio",
+			oldContent: "<p>Subscribe to keep reading.</p>",
+			newContent: "<p>" + repeatWord("word ", 20) + "The end.</p>", // well over 1.2x
+			matched:    true,
+			wantGrew:   true,
+		},
+		{
+			name:       "growth under the ratio does not count",
+			oldContent: "<p>" + repeatWord("word ", 20) + "</p>",
+			newContent: "<p>" + repeatWord("word ", 21) + "</p>", // ~5% bigger, well under 1.2x
+			matched:    true,
+			wantGrew:   false,
+		},
+		{
+			name:       "unchanged content does not count",
+			oldContent: "<p>Already the full article.</p>",
+			newContent: "<p>Already the full article.</p>",
+			matched:    true,
+			wantGrew:   false,
+		},
+		{
+			name:       "no match at all never counts, however much text arrives",
+			oldContent: "",
+			newContent: "<p>" + repeatWord("word ", 500) + "</p>",
+			matched:    false,
+			wantGrew:   false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			post := source.Document{URL: "https://example.substack.com/p/a-post", ContentHTML: test.newContent}
+
+			var snap Snapshot
+			if test.matched {
+				snap = Snapshot{
+					BySlug:  map[string][]wallabag.Entry{"a-post": {{ID: 1, URL: "https://example.substack.com/p/a-post"}}},
+					Details: map[int]wallabag.Entry{1: {ID: 1, Content: test.oldContent}},
+				}
+			}
+
+			plan := BuildPlan([]source.Document{post}, snap, now)
+			item := plan.Items[0]
+
+			if item.ContentGrew != test.wantGrew {
+				t.Errorf("ContentGrew = %v, want %v (old=%d new=%d)",
+					item.ContentGrew, test.wantGrew, item.OldBytes, item.NewBytes)
+			}
+			if test.matched {
+				if item.OldBytes != len(test.oldContent) {
+					t.Errorf("OldBytes = %d, want %d", item.OldBytes, len(test.oldContent))
+				}
+				if item.NewBytes != len(test.newContent) {
+					t.Errorf("NewBytes = %d, want %d", item.NewBytes, len(test.newContent))
+				}
+			} else {
+				if item.EntryID != 0 {
+					t.Errorf("EntryID = %d, want 0 for an unmatched post", item.EntryID)
+				}
+			}
+		})
+	}
+}
+
+// repeatWord builds a string of n copies of word, for a test that only cares
+// about relative length, not content.
+func repeatWord(word string, n int) string {
+	out := make([]byte, 0, len(word)*n)
+	for i := 0; i < n; i++ {
+		out = append(out, word...)
+	}
+	return string(out)
+}
+
 // TestBuildPlanRefusesTwoAnnotatedCandidates covers the conflict rule: two
 // or more entries under one slug both carry annotations, so BuildPlan must
 // plan nothing for the post at all rather than silently pick one and leave

@@ -31,6 +31,18 @@ type Applied struct {
 	// duplicating what content-success already implies.
 	Remaps map[int][]Remap
 
+	// Grew records, per wallabag entry id whose content write succeeded,
+	// whether BuildPlan flagged that entry's content as having grown
+	// materially (Item.ContentGrew) — the signal Repair needs to decide
+	// whether to call RequeueDocumentRoot. Carried here rather than having
+	// Repair re-derive it from the Plan for the same reason Remaps'
+	// presence stands in for content-success: Repair receives only this
+	// struct, not the Plan that produced it. An entry id absent from this
+	// map reads as false via Go's own zero value for a missing key, which
+	// is exactly right for an entry Apply never touched (create; a failed
+	// content write) or one BuildPlan never flagged as grown.
+	Grew map[int]bool
+
 	// Errors accumulates every per-item and per-annotation failure that did
 	// not abort the run — Apply itself only returns a non-nil error for
 	// something that stops the whole batch (a cancelled context), never for
@@ -77,7 +89,7 @@ type Applied struct {
 // "computeRangesAt" duplication UpdateHighlightLocation's own comment warns
 // against, for a cost that does not matter at this scale.
 func Apply(ctx context.Context, client *wallabag.Client, src *wallabag.Source, plan Plan, logger *slog.Logger) (Applied, error) {
-	applied := Applied{Remaps: make(map[int][]Remap)}
+	applied := Applied{Remaps: make(map[int][]Remap), Grew: make(map[int]bool)}
 
 	for _, item := range plan.Items {
 		if err := ctx.Err(); err != nil {
@@ -163,6 +175,14 @@ func applyExisting(ctx context.Context, client *wallabag.Client, src *wallabag.S
 	if _, exists := applied.Remaps[item.EntryID]; !exists {
 		applied.Remaps[item.EntryID] = nil
 	}
+	// Recorded regardless of whether it is true: for ActionAnnotationsOnly,
+	// content was already found full by BuildPlan, and content that has not
+	// changed cannot itself have grown (see planOne's ContentGrew
+	// computation), so this is always false on that path. Set unconditionally
+	// rather than only when true so the map's own presence for this entry
+	// stays consistent with Remaps' — both exist here the moment content is
+	// known good, never before.
+	applied.Grew[item.EntryID] = item.ContentGrew
 
 	entryID := strconv.Itoa(item.EntryID)
 	for _, ann := range item.Annotations {

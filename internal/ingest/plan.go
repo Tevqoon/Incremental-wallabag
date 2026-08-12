@@ -88,6 +88,23 @@ const (
 // and is wrong in practice.
 const truncateLimit = 900
 
+// contentGrowthRatio is how much bigger a matched entry's new content must
+// be, relative to what it already has, before BuildPlan calls it grown
+// rather than merely edited — see Item.ContentGrew and planOne's own
+// comment on why this is a length ratio rather than a prefix test.
+//
+// 1.2 rather than something closer to 1.0: wallabag's own graby extractor
+// and Substack's cleaned body_html are two different serialisations of
+// broadly the same prose, so ordinary formatting drift between them — an
+// extra wrapping element, a slightly different whitespace policy — should
+// not by itself read as "the paywall came down". A "materially grew" signal
+// needs enough headroom above that noise floor to mean something, and a
+// preview cut off by a paywall is typically a small fraction of the full
+// article's length, not a few percent short of it — 20% growth is a
+// conservative floor that a real preview-to-full transition clears by a
+// wide margin while ordinary re-serialisation noise should not.
+const contentGrowthRatio = 1.2
+
 // AnnotationPlan is what BuildPlan decided about one already-existing
 // annotation.
 type AnnotationPlan struct {
@@ -135,6 +152,27 @@ type Item struct {
 	// ActionCreate and ActionConflict, where there is no matched content to
 	// compare.
 	ContentFull bool
+
+	// OldBytes and NewBytes are len(full.Content) and len(post.ContentHTML)
+	// respectively — the matched entry's existing body size and the
+	// incoming one — kept independently of ContentGrew so the report can
+	// show the operator the actual numbers behind that decision, not just
+	// its verdict. Both are 0 for ActionCreate (nothing existed before) and
+	// ActionConflict (nothing was compared).
+	OldBytes, NewBytes int
+
+	// ContentGrew reports whether the matched entry's content grew by at
+	// least contentGrowthRatio — see planOne's own comment on why this uses
+	// a length ratio rather than testing whether the old content is a
+	// prefix of the new one. This is what Repair uses to
+	// decide whether to call RequeueDocumentRoot: growing from a paywall
+	// preview to the full article is the operator's actual reason for
+	// running this importer, and it is what puts the article back in the
+	// reading queue even over material already marked done. Always false
+	// for ActionCreate (EntryID is 0 — nothing existed to grow from) and for
+	// a post whose content did not materially change, which is deliberately
+	// the majority case: an already-complete free post must be left alone.
+	ContentGrew bool
 
 	// Annotations is every annotation the matched entry currently carries,
 	// classified independently of ContentFull — see ActionAnnotationsOnly's
@@ -214,6 +252,13 @@ func planOne(post source.Document, snap Snapshot) Item {
 	item := Item{Post: post, Slug: slug}
 	if !hasTarget {
 		item.Action = ActionCreate
+		// Nothing existed before this — 0 bytes old, whatever the post
+		// brings as new. Reported for the operator's own visibility (the
+		// report's byte counts read the same way for a create as for an
+		// update), but ContentGrew stays false: growth is a question about
+		// whether the reading queue should reopen for an entry the reader
+		// already has an opinion about, and a brand new entry is not that.
+		item.NewBytes = len(post.ContentHTML)
 		return item
 	}
 	item.EntryID = target.ID
@@ -241,6 +286,22 @@ func planOne(post source.Document, snap Snapshot) Item {
 	}
 
 	item.ContentFull = full.Content == post.ContentHTML
+	item.OldBytes = len(full.Content)
+	item.NewBytes = len(post.ContentHTML)
+
+	// A length ratio, not a prefix test — the obvious thing to reach for
+	// here, and wrong: full.Content came from wallabag's own graby
+	// extractor running over the rendered page, not from Substack's
+	// body_html, so it is a differently-serialised rendering of the same
+	// prose, not a truncated copy of the same bytes. The byte-prefix
+	// property that does hold — the preview response being a literal
+	// prefix of the full response's own body_html — is a fact about
+	// Substack's own two API responses to each other, verified directly
+	// against them, and it says nothing about wallabag's independently
+	// re-extracted copy of either one. A prefix test here would simply
+	// never fire.
+	item.ContentGrew = item.EntryID != 0 &&
+		item.NewBytes >= int(float64(item.OldBytes)*contentGrowthRatio)
 
 	var annotationsStale bool
 	for _, ann := range full.Annotations {

@@ -27,8 +27,18 @@ func WriteReport(w io.Writer, plan Plan, applied *Applied) error {
 	}
 
 	counts := map[Action]int{}
+	var (
+		grewCount      int
+		contentChanges []Item
+	)
 	for _, item := range plan.Items {
 		counts[item.Action]++
+		if item.ContentGrew {
+			grewCount++
+		}
+		if item.Action == ActionUpdate {
+			contentChanges = append(contentChanges, item)
+		}
 	}
 
 	printf("Plan: %d post(s) considered\n", len(plan.Items))
@@ -37,6 +47,28 @@ func WriteReport(w io.Writer, plan Plan, applied *Applied) error {
 	printf("  annotations only:  %d\n", counts[ActionAnnotationsOnly])
 	printf("  skip (up to date): %d\n", counts[ActionSkip])
 	printf("  conflict:          %d\n", counts[ActionConflict])
+	printf("\n")
+
+	// This is the operator's actual reason for running the importer, so it
+	// gets its own headline number rather than being folded into the plain
+	// update count above: replacing a paywall preview with the full article
+	// is only worth doing because it puts the article back in front of the
+	// reader, even over material already marked done. See
+	// Item.ContentGrew's own comment for the growth-ratio rule behind this
+	// count, and RequeueDocumentRoot for what actually happens to each one.
+	printf("Returning to the reading queue (content grew materially): %d\n", grewCount)
+	if len(contentChanges) > 0 {
+		printf("Content size, old -> new bytes (an estimate — see the note on wallabag's own\n")
+		printf("HTML normalisation below):\n")
+		for _, item := range contentChanges {
+			note := ""
+			if item.ContentGrew {
+				note = "  -> grew enough to return to the queue, due today"
+			}
+			printf("  entry %d (%s): %d -> %d%s\n",
+				item.EntryID, item.Post.URL, item.OldBytes, item.NewBytes, note)
+		}
+	}
 	printf("\n")
 
 	if plan.Conflicts > 0 {

@@ -92,3 +92,45 @@ func TestWriteReportDryRunOmitsApplied(t *testing.T) {
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+// TestWriteReportShowsContentGrowthProminently pins the coordinator's own
+// stated priority: this is the operator's main reason for running the
+// importer, so the report must headline how many posts are returning to the
+// queue and show the actual old -> new byte counts behind that decision,
+// not bury it inside the generic per-item annotation detail.
+func TestWriteReportShowsContentGrowthProminently(t *testing.T) {
+	plan := Plan{Items: []Item{
+		{
+			Post: source.Document{URL: "https://example.substack.com/p/grew"}, EntryID: 1,
+			Action: ActionUpdate, OldBytes: 200, NewBytes: 4000, ContentGrew: true,
+		},
+		{
+			Post: source.Document{URL: "https://example.substack.com/p/tweaked"}, EntryID: 2,
+			Action: ActionUpdate, OldBytes: 4000, NewBytes: 4100, ContentGrew: false,
+		},
+	}}
+
+	var buf bytes.Buffer
+	if err := WriteReport(&buf, plan, nil); err != nil {
+		t.Fatalf("WriteReport: %v", err)
+	}
+	report := buf.String()
+
+	if !strings.Contains(report, "Returning to the reading queue") {
+		t.Errorf("report does not headline the requeue count:\n%s", report)
+	}
+	if !strings.Contains(report, "200 -> 4000") {
+		t.Errorf("report is missing the grown entry's old -> new byte counts:\n%s", report)
+	}
+	if !strings.Contains(report, "4000 -> 4100") {
+		t.Errorf("report is missing the ungrown entry's old -> new byte counts:\n%s", report)
+	}
+
+	// The requeue count must appear before, not after, the same section's
+	// own byte-count detail — "prominently" means headlined, not buried.
+	headline := strings.Index(report, "Returning to the reading queue")
+	detail := strings.Index(report, "200 -> 4000")
+	if headline == -1 || detail == -1 || headline > detail {
+		t.Errorf("requeue headline (index %d) does not precede the byte-count detail (index %d)", headline, detail)
+	}
+}

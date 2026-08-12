@@ -2743,3 +2743,163 @@ func TestClearExtractAnchorsPreservesSchedulingAndPassage(t *testing.T) {
 		t.Errorf("second pass cleared = %d, want 0", clearedAgain)
 	}
 }
+
+// TestRequeueDocumentRootFromEveryPriorState covers the "regardless of prior
+// state" half of the requirement: done, dismissed and suspended must all
+// come back into the queue — the operator's dismissal or completion was a
+// decision about the preview, not about the article that replaced it.
+func TestRequeueDocumentRootFromEveryPriorState(t *testing.T) {
+	for _, prior := range []ir.State{ir.StateDone, ir.StateDismissed, ir.StateSuspended} {
+		t.Run(string(prior), func(t *testing.T) {
+			db := testStore(t)
+			now := time.Now()
+
+			if _, err := db.UpsertDocuments("wallabag", []source.Document{
+				{ExternalID: "1", Title: "A backfilled post", UpdatedAt: now},
+			}, 0, 0, now); err != nil {
+				t.Fatalf("UpsertDocuments: %v", err)
+			}
+			if err := db.SaveSchedule(1, ir.Schedule{State: prior}, now); err != nil {
+				t.Fatalf("SaveSchedule: %v", err)
+			}
+
+			today := now.AddDate(0, 0, 3)
+			changed, err := db.RequeueDocumentRoot(1, today)
+			if err != nil {
+				t.Fatalf("RequeueDocumentRoot: %v", err)
+			}
+			if !changed {
+				t.Fatal("RequeueDocumentRoot reported no change")
+			}
+
+			element, err := db.ElementByID(1)
+			if err != nil {
+				t.Fatalf("ElementByID: %v", err)
+			}
+			if element.Schedule.State != ir.StateNew {
+				t.Errorf("state = %q, want %q (read_block is 0)", element.Schedule.State, ir.StateNew)
+			}
+			if element.Schedule.DueOn.Format("2006-01-02") != today.Format("2006-01-02") {
+				t.Errorf("due_on = %v, want today (%v)", element.Schedule.DueOn, today)
+			}
+		})
+	}
+}
+
+// TestRequeueDocumentRootPicksReadingWhenPartiallyRead covers the
+// read_block-driven state choice: a reader who was partway through the
+// preview should land back in StateReading, "continue", rather than
+// StateNew, "start over" — read_block itself must survive untouched, since
+// Substack truncates rather than re-renders and the old position is still
+// approximately right in the full article.
+func TestRequeueDocumentRootPicksReadingWhenPartiallyRead(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "1", Title: "A backfilled post", UpdatedAt: now},
+	}, 0, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+	if err := db.SaveSchedule(1, ir.Schedule{State: ir.StateDone}, now); err != nil {
+		t.Fatalf("SaveSchedule: %v", err)
+	}
+	if err := db.SetReadBlock(1, 7); err != nil {
+		t.Fatalf("SetReadBlock: %v", err)
+	}
+
+	changed, err := db.RequeueDocumentRoot(1, now)
+	if err != nil {
+		t.Fatalf("RequeueDocumentRoot: %v", err)
+	}
+	if !changed {
+		t.Fatal("RequeueDocumentRoot reported no change")
+	}
+
+	element, err := db.ElementByID(1)
+	if err != nil {
+		t.Fatalf("ElementByID: %v", err)
+	}
+	if element.Schedule.State != ir.StateReading {
+		t.Errorf("state = %q, want %q (read_block > 0)", element.Schedule.State, ir.StateReading)
+	}
+	if element.ReadBlock != 7 {
+		t.Errorf("read_block = %d, want untouched (7) — resuming near the old paywall boundary depends on this", element.ReadBlock)
+	}
+}
+
+// TestRequeueDocumentRootPreservesSchedulingAndLeavesChildrenAlone covers
+// the rest of what must survive: interval_days, afactor, reps and priority
+// are history, not noise to discard on a requeue, and an extract's own
+// schedule belongs to it, not to whether its parent article was just
+// requeued.
+func TestRequeueDocumentRootPreservesSchedulingAndLeavesChildrenAlone(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "1", Title: "A backfilled post", UpdatedAt: now},
+	}, 0, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+	if err := db.SaveSchedule(1, ir.Schedule{
+		State: ir.StateDone, IntervalDays: 30, AFactor: 2.8, Reps: 5, Priority: 0.2,
+	}, now); err != nil {
+		t.Fatalf("SaveSchedule: %v", err)
+	}
+
+	extractID, err := db.CreateExtract(NewExtract{
+		ParentID: 1, DocumentID: 1, Origin: OriginManual,
+		Quote: "A passage taken before the backfill.", ContentHTML: "<p>A passage taken before the backfill.</p>",
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+	if err := db.SaveSchedule(extractID, ir.Schedule{
+		State: ir.StateReading, IntervalDays: 4, AFactor: 2.1, Reps: 1, Priority: 0.6,
+		DueOn: now.AddDate(0, 0, 4),
+	}, now); err != nil {
+		t.Fatalf("SaveSchedule on extract: %v", err)
+	}
+
+	if _, err := db.RequeueDocumentRoot(1, now); err != nil {
+		t.Fatalf("RequeueDocumentRoot: %v", err)
+	}
+
+	root, err := db.ElementByID(1)
+	if err != nil {
+		t.Fatalf("ElementByID(root): %v", err)
+	}
+	if root.Schedule.IntervalDays != 30 || root.Schedule.AFactor != 2.8 ||
+		root.Schedule.Reps != 5 || root.Schedule.Priority != 0.2 {
+		t.Errorf("RequeueDocumentRoot disturbed the root's own scheduling: %+v", root.Schedule)
+	}
+
+	extract, err := db.ElementByID(extractID)
+	if err != nil {
+		t.Fatalf("ElementByID(extract): %v", err)
+	}
+	if extract.Schedule.State != ir.StateReading || extract.Schedule.IntervalDays != 4 ||
+		extract.Schedule.Reps != 1 {
+		t.Errorf("requeuing the root disturbed a child extract's own schedule: %+v", extract.Schedule)
+	}
+	if extract.Quote != "A passage taken before the backfill." {
+		t.Errorf("quote = %q, want untouched", extract.Quote)
+	}
+}
+
+// TestRequeueDocumentRootMissingReturnsFalse covers the no-root case: a
+// document id with no root element (should never happen for anything that
+// went through UpsertDocuments, but is worth reporting rather than silently
+// doing nothing).
+func TestRequeueDocumentRootMissingReturnsFalse(t *testing.T) {
+	db := testStore(t)
+
+	changed, err := db.RequeueDocumentRoot(999, time.Now())
+	if err != nil {
+		t.Fatalf("RequeueDocumentRoot: %v", err)
+	}
+	if changed {
+		t.Error("changed = true for a document with no root element, want false")
+	}
+}

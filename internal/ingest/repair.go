@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"time"
 
 	"github.com/Tevqoon/increader/internal/store"
 )
@@ -15,6 +16,14 @@ type RepairResult struct {
 	// Repaired counts entries whose local document row was found and
 	// brought up to date (refs remapped, content cleared, anchors cleared).
 	Repaired int
+
+	// Requeued counts documents whose root topic was put back in the
+	// reading queue because BuildPlan flagged their content as having grown
+	// materially (Applied.Grew) — the operator's actual reason for running
+	// this importer, and worth its own tally rather than folding into
+	// Repaired, which fires for every touched document whether or not it
+	// grew.
+	Requeued int
 
 	// Skipped counts entries with no local row to repair — the ordinary
 	// case for a document ActionCreate just made: it will not exist locally
@@ -44,16 +53,23 @@ type RepairResult struct {
 //
 // Idempotent by construction, which is what makes it safe to re-run after a
 // partial failure: RemapExternalRef tolerates both a zero-match retry and a
-// unique-index collision as already-done (see its own comment), and
+// unique-index collision as already-done (see its own comment),
 // ClearDocumentContent / ClearExtractAnchors are themselves idempotent
-// updates with nothing left to do on a second pass. A failure partway
-// through one entry's repair — a remap that collides for a reason worth
-// logging, say — does not stop the remaining remaps for that same entry, nor
-// does it stop Repair moving on to the next entry: every local write here is
-// independent of every other, and there is no partial local state a
-// half-finished repair could leave that this same call, run again, would not
-// finish cleanly.
-func Repair(ctx context.Context, db *store.Store, applied Applied, logger *slog.Logger) (RepairResult, error) {
+// updates with nothing left to do on a second pass, and RequeueDocumentRoot
+// unconditionally sets due_on to now regardless of the row's current
+// state — so re-running this after a crash only ever repeats work, never
+// duplicates or corrupts it. A failure partway through one entry's repair —
+// a remap that collides for a reason worth logging, say — does not stop the
+// remaining remaps for that same entry, nor does it stop Repair moving on to
+// the next entry: every local write here is independent of every other, and
+// there is no partial local state a half-finished repair could leave that
+// this same call, run again, would not finish cleanly.
+//
+// now is RequeueDocumentRoot's own "today" — threaded through explicitly
+// rather than read from the clock here, matching this codebase's own
+// convention (see RequeueDocumentRoot's comment on why that value carries no
+// fuzz of its own to begin with).
+func Repair(ctx context.Context, db *store.Store, applied Applied, now time.Time, logger *slog.Logger) (RepairResult, error) {
 	var result RepairResult
 
 	for entryID, remaps := range applied.Remaps {
@@ -99,6 +115,21 @@ func Repair(ctx context.Context, db *store.Store, applied Applied, logger *slog.
 		}
 
 		result.Repaired++
+
+		// Only for a document whose content BuildPlan flagged as having
+		// grown materially — the operator's actual reason for running this
+		// importer at all. An entry that is merely being kept in sync
+		// (annotations-only, or a content edit that did not clear the
+		// growth ratio) must not have its reading state disturbed: a free
+		// post the reader already finished stays finished.
+		if applied.Grew[entryID] {
+			if _, err := db.RequeueDocumentRoot(document.ID, now); err != nil {
+				result.Errors = append(result.Errors,
+					fmt.Errorf("ingest: repair entry %d: requeue document: %w", entryID, err))
+				continue
+			}
+			result.Requeued++
+		}
 	}
 
 	return result, nil
