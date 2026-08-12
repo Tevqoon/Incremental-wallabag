@@ -12,8 +12,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"golang.org/x/net/html"
 )
 
 // postBody is the response shape of GET .../api/v1/posts/{slug} — the
@@ -42,123 +40,6 @@ type byline struct {
 	Name string `json:"name"`
 }
 
-// paywallClasses are the CSS class names hasPaywallMarker looks for on a
-// post body's own elements, rather than substring-matching the raw HTML for
-// words like "paywall" or "subscribe" — which would false-positive on an
-// ordinary free post that happens to end with its own subscribe
-// call-to-action prose, exactly the failure mode isPaywalled exists to
-// avoid.
-//
-// Sourced from publicly documented Substack post markup, not confirmed
-// against a live paywalled fetch: this package was built without network
-// access to a real Substack account with an active subscription, so nothing
-// here was actually run against a genuine `.paywall` node in a real
-// response the way most of this codebase's HTML-shape claims are pinned
-// down (compare, say, wallabag.CreateEntry's doc comment, which names the
-// exact date it was checked against the live API). Treat this list as a
-// starting point to verify against the operator's own publication on first
-// real use, not as an established fact.
-var paywallClasses = map[string]bool{
-	"paywall":             true,
-	"subscribe-widget":    true,
-	"subscription-widget": true,
-}
-
-// hasPaywallMarker reports whether bodyHTML contains one of Substack's own
-// paywall/subscribe-widget elements.
-//
-// Parses the markup and inspects class attributes rather than
-// string-searching the raw HTML — see paywallClasses' own comment for why
-// that distinction matters here.
-//
-// Uses html.Parse rather than html.ParseFragment (contrast cleanBody, which
-// must use the fragment parser because it re-serializes its result): a full
-// document parse wraps whatever it is given in an implied
-// <html><head></head><body>...</body></html>, but that wrapper is just more
-// ancestor structure sitting above the real content — it does not hide or
-// alter any node already in bodyHTML, and nothing here ever renders the
-// result back out. For a read-only walk over the tree, the wrapper is
-// harmless.
-func hasPaywallMarker(bodyHTML string) bool {
-	if strings.TrimSpace(bodyHTML) == "" {
-		return false
-	}
-	doc, err := html.Parse(strings.NewReader(bodyHTML))
-	if err != nil {
-		return false
-	}
-
-	var found bool
-	var walk func(*html.Node)
-	walk = func(n *html.Node) {
-		if found {
-			return
-		}
-		if n.Type == html.ElementNode && nodeHasClass(n, paywallClasses) {
-			found = true
-			return
-		}
-		for c := n.FirstChild; c != nil && !found; c = c.NextSibling {
-			walk(c)
-		}
-	}
-	walk(doc)
-	return found
-}
-
-// nodeHasClass reports whether n's class attribute contains any name in
-// classes. Class attributes are space-separated lists (an element commonly
-// carries several), so this splits on whitespace rather than comparing the
-// whole attribute value.
-func nodeHasClass(n *html.Node, classes map[string]bool) bool {
-	for _, attr := range n.Attr {
-		if attr.Key != "class" {
-			continue
-		}
-		for _, class := range strings.Fields(attr.Val) {
-			if classes[class] {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// paywallBodyLengthThreshold is a belt-and-braces check alongside
-// hasPaywallMarker: a paywalled response's body_html is Substack's free
-// teaser paragraphs plus the paywall block, not the full article, so it is
-// short by construction. This catches a body that is truncated but whose
-// paywall block, for whatever reason — a markup change on Substack's side
-// this package has not seen — does not carry one of paywallClasses.
-//
-// Picked generously low relative to real prose, since a short *free* post is
-// entirely unremarkable on its own (a link post, a brief announcement). This
-// only ever adds confidence alongside hasPaywallMarker inside isPaywalled;
-// it does not decide anything by itself.
-const paywallBodyLengthThreshold = 2000
-
-// isPaywalled decides whether a fetched post is a truncated preview rather
-// than the real thing.
-//
-// Deliberately gated on Audience == "only_paid" first. A free post could
-// coincidentally end with its own subscribe call-to-action (tripping
-// hasPaywallMarker) or happen to be short (tripping the length check), and
-// neither is evidence of anything when the post itself was never behind a
-// paywall to begin with. Only a post the publication itself marked
-// paid-only can actually be "still paywalled" — which is exactly why this
-// function, and not some cheaper proxy like "was the very first paid post
-// paywalled", is what both post's cache-skip rule below and Ingest's
-// consecutive-failure guard key off: a free post reaching this check always
-// returns false, vacuously, so it can never by itself signal a lapsed
-// cookie. Only a genuine paid-and-still-blocked result can, and only a run
-// of several of those in a row is treated as proof — see Ingest.
-func isPaywalled(p postBody) bool {
-	if p.Audience != "only_paid" {
-		return false
-	}
-	return hasPaywallMarker(p.BodyHTML) || len(p.BodyHTML) < paywallBodyLengthThreshold
-}
-
 // validateSlug rejects a slug that could escape CacheDir when joined into a
 // path: one containing a path separator, or a ".." segment.
 //
@@ -178,7 +59,7 @@ func validateSlug(slug string) error {
 	return nil
 }
 
-// cachePath returns where slug's raw post JSON is cached: {CacheDir}/{Host}/{slug}.json.
+// cachePath returns where slug's cache entry is written: {CacheDir}/{Host}/{slug}.json.
 //
 // post always calls validateSlug before this, so in normal operation this
 // never sees anything unsafe. filepath.Base is still applied here as a
@@ -190,30 +71,61 @@ func (i *Importer) cachePath(slug string) string {
 	return filepath.Join(i.cfg.CacheDir, i.cfg.Host, filepath.Base(slug)+".json")
 }
 
+// cacheEntry is what actually gets written to disk under CacheDir — a small
+// wrapper around Substack's own raw post JSON (Post), not that JSON stored
+// bare.
+//
+// The wrapper exists for one reason: Substack's own response carries no
+// record of whether the cookie it was fetched with actually worked. A
+// paywalled preview and the real article are, per verifySession's own doc
+// comment in session.go, structurally indistinguishable from the JSON alone — so nothing
+// in Post itself can tell a later run whether a cached only_paid post is the
+// genuine article or a preview served while the subscription had lapsed.
+// Authenticated records that fact at write time, when it is actually known:
+// post only ever writes a cache entry after verifySession has confirmed the
+// session cookie works for this run, so every entry this package itself
+// writes has Authenticated true. False — or the field simply being absent,
+// which decodes to the same zero value — only happens for a file left
+// behind by a version of this package written before this wrapper existed
+// (see loadCachedPost), or one that was hand-edited.
+//
+// FetchedAt is diagnostic only: nothing in this package's own logic reads it
+// back. It exists so an operator inspecting CacheDir by hand can tell how
+// stale a given file is without needing to correlate it against a run's own
+// logs.
+type cacheEntry struct {
+	FetchedAt     time.Time       `json:"fetched_at"`
+	Authenticated bool            `json:"authenticated"`
+	Post          json.RawMessage `json:"post"`
+}
+
 // post fetches one post by slug, from CacheDir if a trustworthy cached copy
 // exists, from the network otherwise.
 //
-// The cache is skipped, not trusted, when the cached body_html shows a
-// paywall: that copy was fetched while the subscription had lapsed, and a
-// paywall preview cached under a post's slug is worth nothing — keeping it
-// around only so a later run can mistake it for "already have this one" is
-// precisely the failure this package exists to avoid (see the package doc
-// comment). A cache hit that is not paywalled is returned as-is, with no
-// further validation: if the subscription was active when it was fetched,
-// there is nothing more recent to prefer it over.
+// A cached free post (Audience != "only_paid") is always trusted: Substack
+// serves a free post's full content to anyone, cookie or not, so there is
+// nothing a lapsed subscription could have truncated. A cached paid post is
+// trusted only if it was written under a session verifySession had already
+// confirmed worked (see cacheEntry) — otherwise it is exactly the kind of
+// file this package must not mistake for "already have this one": a preview
+// cached while lapsed, indistinguishable from the real thing by its own
+// content (see verifySession), with only the wrapper's own Authenticated
+// flag able to say so.
 func (i *Importer) post(ctx context.Context, slug string) (postBody, bool, error) {
 	if err := validateSlug(slug); err != nil {
 		return postBody{}, false, err
 	}
 	path := i.cachePath(slug)
 
-	if cached, ok, err := loadCachedPost(path); err != nil {
+	cached, authenticated, found, err := loadCachedPost(path)
+	if err != nil {
 		return postBody{}, false, err
-	} else if ok && !isPaywalled(cached) {
+	}
+	if found && (cached.Audience != "only_paid" || authenticated) {
 		return cached, true, nil
 	}
 
-	raw, err := i.fetchRaw(ctx, "/api/v1/posts/"+url.PathEscape(slug))
+	raw, err := i.fetchRaw(ctx, "/api/v1/posts/"+url.PathEscape(slug), true)
 	if err != nil {
 		return postBody{}, false, err
 	}
@@ -223,15 +135,31 @@ func (i *Importer) post(ctx context.Context, slug string) (postBody, bool, error
 		return postBody{}, false, fmt.Errorf("substack: decode post %q: %w", slug, err)
 	}
 
+	// Every network fetch post makes goes out with the cookie (fetchRaw's
+	// withCookie=true above), and Ingest never reaches this loop at all
+	// unless verifySession already confirmed that cookie works — see
+	// Ingest's own ordering. So Authenticated is unconditionally true for
+	// anything this line writes; it is only ever false for a file this
+	// package did not just write itself.
+	entry := cacheEntry{
+		FetchedAt:     time.Now(),
+		Authenticated: true,
+		// The raw bytes exactly as Substack sent them are what gets
+		// wrapped and cached, not a re-marshaled fresh — round-tripping
+		// through postBody would silently drop every field this struct
+		// does not declare, the first time some later change to postBody
+		// needs one that an already-cached file from before that change
+		// never had a chance to carry.
+		Post: json.RawMessage(raw),
+	}
+	encoded, err := json.Marshal(entry)
+	if err != nil {
+		return postBody{}, false, fmt.Errorf("substack: encode cache entry for %q: %w", slug, err)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return postBody{}, false, fmt.Errorf("substack: create cache directory for %q: %w", slug, err)
 	}
-	// The raw bytes exactly as Substack sent them are what gets cached, not
-	// a re-marshaled fresh — round-tripping through postBody would silently
-	// drop every field this struct does not declare, the first time some
-	// later change to postBody needs one that an already-cached file from
-	// before that change never had a chance to carry.
-	if err := os.WriteFile(path, raw, 0o644); err != nil {
+	if err := os.WriteFile(path, encoded, 0o644); err != nil {
 		return postBody{}, false, fmt.Errorf("substack: write cache for %q: %w", slug, err)
 	}
 
@@ -239,27 +167,37 @@ func (i *Importer) post(ctx context.Context, slug string) (postBody, bool, error
 }
 
 // loadCachedPost reads and decodes a cached post, reporting (zero, false,
-// nil) when there is no cache file yet — the ordinary, expected case on a
-// slug's first run — rather than treating a missing file as an error.
-func loadCachedPost(path string) (postBody, bool, error) {
+// false, nil) when there is no cache file yet — the ordinary, expected case
+// on a slug's first run — rather than treating a missing file as an error.
+//
+// A file that fails to decode as a cacheEntry — including, deliberately, one
+// written by the version of this package that predates the wrapper and
+// stored Substack's raw post JSON bare, with no "post" key to unwrap at all
+// — is treated the same as no cache: json.Unmarshal into cacheEntry leaves
+// Post empty, the subsequent unmarshal of Post into postBody fails, and this
+// falls through to the same "no usable cache" return. That is a deliberate
+// fallback, not a bug: a refetch is always possible, and erring toward one
+// extra request is a smaller problem than trusting a file whose provenance
+// this cannot establish.
+func loadCachedPost(path string) (postBody, bool, bool, error) {
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return postBody{}, false, nil
+		return postBody{}, false, false, nil
 	}
 	if err != nil {
-		return postBody{}, false, fmt.Errorf("substack: read cache %q: %w", path, err)
+		return postBody{}, false, false, fmt.Errorf("substack: read cache %q: %w", path, err)
+	}
+
+	var entry cacheEntry
+	if err := json.Unmarshal(raw, &entry); err != nil {
+		return postBody{}, false, false, nil
 	}
 
 	var cached postBody
-	if err := json.Unmarshal(raw, &cached); err != nil {
-		// A corrupt cache file is treated as though there were no cache at
-		// all, rather than as a hard error that fails the whole run: a
-		// refetch is always possible, and one damaged file on disk — from
-		// an interrupted write, a manual edit, anything — is a smaller
-		// problem than aborting over it.
-		return postBody{}, false, nil
+	if err := json.Unmarshal(entry.Post, &cached); err != nil {
+		return postBody{}, false, false, nil
 	}
-	return cached, true, nil
+	return cached, entry.Authenticated, true, nil
 }
 
 // maxResponseBytes bounds how much of a single response fetchRaw will read,
@@ -272,10 +210,10 @@ const maxResponseBytes = 20 << 20 // 20 MiB
 // doubled on each subsequent attempt.
 const backoffBase = 500 * time.Millisecond
 
-// getJSON performs a rate-limited, retrying GET against path on Host and
-// decodes the JSON response into out.
+// getJSON performs a rate-limited, retrying, authenticated GET against path
+// on Host and decodes the JSON response into out.
 func (i *Importer) getJSON(ctx context.Context, path string, out any) error {
-	raw, err := i.fetchRaw(ctx, path)
+	raw, err := i.fetchRaw(ctx, path, true)
 	if err != nil {
 		return err
 	}
@@ -285,20 +223,40 @@ func (i *Importer) getJSON(ctx context.Context, path string, out any) error {
 	return nil
 }
 
+// errUnauthorized reports a 401 from Substack's own API — the session
+// cookie itself was rejected outright, as distinct from every other way a
+// request can fail. Mirrors the sentinel-error pattern wallabag's own
+// client uses for the same status (see errUnauthorized in
+// internal/wallabag/client.go): a caller checks for this specific failure
+// with errors.Is rather than parsing http.StatusText out of an error
+// string, which is what lets verifySubscriptionState in session.go give the
+// operator "your cookie itself is dead" as a genuinely different diagnosis
+// from "your cookie works but has no paid access" — two problems with two
+// different fixes, easy to conflate if the only signal is "something went
+// wrong".
+var errUnauthorized = errors.New("substack: unauthorized")
+
 // fetchRaw performs one rate-limited, retrying GET and returns the response
-// body undecoded. Both getJSON (which decodes) and post's own cache-writing
-// path (which needs the exact bytes Substack sent, not a re-encoded copy —
-// see post) sit on top of this.
+// body undecoded. getJSON (which decodes), post's own cache-writing path
+// (which needs the exact bytes Substack sent, not a re-encoded copy — see
+// post), and both halves of session.go's two-stage session check all sit on
+// top of this.
+//
+// withCookie controls whether the Cookie header is sent at all — true for
+// every ordinary call in this package, false only from verifySession's own
+// deliberately-unauthenticated half of its differential comparison.
 //
 // It sleeps at least RequestGap before every request it sends, including
 // the first of a batch and every retry — throttle enforces that across
 // every caller sharing this Importer, not per-call. On a 429 or 5xx it
-// retries with exponential backoff, up to MaxAttempts total attempts; any
-// other non-200 status (a 404 for a slug that no longer exists, a 401/403
-// for a bad cookie) is not the kind of transient failure a retry could fix,
-// so it is returned immediately instead of burning through the retry budget
-// on something that will never succeed.
-func (i *Importer) fetchRaw(ctx context.Context, path string) ([]byte, error) {
+// retries with exponential backoff, up to MaxAttempts total attempts. A 401
+// is returned immediately as errUnauthorized, not retried — a rejected
+// cookie will not start working on a second attempt. Any other non-200
+// status (a 404 for a slug that no longer exists, say) is likewise not the
+// kind of transient failure a retry could fix, so it too is returned
+// immediately instead of burning through the retry budget on something that
+// will never succeed.
+func (i *Importer) fetchRaw(ctx context.Context, path string, withCookie bool) ([]byte, error) {
 	endpoint := "https://" + i.cfg.Host + path
 
 	var lastErr error
@@ -308,12 +266,14 @@ func (i *Importer) fetchRaw(ctx context.Context, path string) ([]byte, error) {
 		}
 		i.throttle(ctx)
 
-		body, status, err := i.doRequest(ctx, endpoint)
+		body, status, err := i.doRequest(ctx, endpoint, withCookie)
 		switch {
 		case err != nil:
 			lastErr = err
 		case status == http.StatusTooManyRequests || status >= 500:
 			lastErr = fmt.Errorf("substack: GET %s: %s", path, http.StatusText(status))
+		case status == http.StatusUnauthorized:
+			return nil, fmt.Errorf("substack: GET %s: %w", path, errUnauthorized)
 		case status != http.StatusOK:
 			return nil, fmt.Errorf("substack: GET %s: %s", path, http.StatusText(status))
 		default:
@@ -330,7 +290,7 @@ func (i *Importer) fetchRaw(ctx context.Context, path string) ([]byte, error) {
 // doRequest sends one GET and returns the response body alongside its
 // status code, so fetchRaw can decide whether the status is worth retrying
 // without doRequest itself needing to know anything about retry policy.
-func (i *Importer) doRequest(ctx context.Context, endpoint string) ([]byte, int, error) {
+func (i *Importer) doRequest(ctx context.Context, endpoint string, withCookie bool) ([]byte, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, 0, fmt.Errorf("substack: build request for %s: %w", endpoint, err)
@@ -338,8 +298,12 @@ func (i *Importer) doRequest(ctx context.Context, endpoint string) ([]byte, int,
 	// The session cookie is the entire credential this package holds. It
 	// must never be logged or wrapped into an error string anywhere in this
 	// file — see Config.SessionID's own comment and the tests that pin this
-	// down.
-	req.Header.Set("Cookie", "substack.sid="+i.cfg.SessionID)
+	// down. withCookie is false exactly once in this package, from
+	// verifySession's deliberately-anonymous half of its comparison; every
+	// other caller leaves it true.
+	if withCookie {
+		req.Header.Set("Cookie", "substack.sid="+i.cfg.SessionID)
+	}
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := i.cfg.HTTPClient.Do(req)

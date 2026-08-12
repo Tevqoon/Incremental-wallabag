@@ -52,37 +52,89 @@ func stripInvisibleFormatting(s string) string {
 	}, s)
 }
 
-// choreClasses are the CSS class names cleanBody removes wholesale: an
-// element carrying one of these, and everything inside it, is Substack's
-// own UI chrome rather than article content — a subscribe prompt, a
-// share/comment button row, or the paywall block itself. Overlaps
-// paywallClasses in post.go on purpose: cleanBody strips the very paywall
-// block hasPaywallMarker detects, for the (rare, since Ingest generally does
-// not import a paywalled post at all — see isPaywalled) case where a mixed
-// body slips through with genuine content alongside a trailing paywall
-// stub.
+// subscribeComponentName is the data-component-name value Substack's own
+// subscribe-widget carries — confirmed against a real, live, unauthenticated
+// fetch of a free post's body_html on 2026-08-12. Matched the same way
+// internal/web/embeds.go's rewriteEmbeds matches its own
+// data-component-name="Twitter2ToDOM" tweet embeds, and for the same
+// reason: a data attribute naming the specific widget is structural, not
+// prose, so unlike a generic class or a string search it cannot
+// false-positive on article text that merely mentions subscribing.
 //
-// Sourced from publicly available Substack post markup rather than
-// confirmed empirically — see paywallClasses' own comment in post.go, which
-// needs the paywall subset of these same names and explains the same
-// caveat once: this package was built with no network access to a live
-// Substack account, so nothing here was checked against a genuine response.
-var choreClasses = map[string]bool{
-	"paywall":             true,
-	"subscribe-widget":    true,
-	"subscription-widget": true,
-	"share-dialog":        true,
-	"post-ufi":            true, // the like / comment / share row under a post
+// This is the primary hook isSubscribeChrome uses. The earlier version of
+// this file keyed removal on CSS classes guessed from public knowledge of
+// Substack's markup rather than a real response — "paywall",
+// "subscribe-widget" — and a live check disproved the guess outright: the
+// class actually present is "subscription-widget" (see
+// subscribeWidgetClassPrefix below), and no post body, free or paywalled,
+// was found to carry any element with a class literally called "paywall" at
+// all. See verifySession's own doc comment in session.go for the fuller
+// finding this same live check produced about paywall detection in general.
+const subscribeComponentName = "SubscribeWidgetToDOM"
+
+// subscribeWidgetClassPrefix and subscribeWidgetExactClass are the fallback
+// isSubscribeChrome uses for markup that predates subscribeComponentName,
+// or for a wrapping element the attribute simply is not set on.
+//
+// Confirmed against the same live fetch as subscribeComponentName: a free,
+// complete post's own body_html carried "subscription-widget",
+// "subscription-widget-subscribe", and "subscription-widget-wrap-editor" on
+// the elements composing its trailing subscribe prompt, alongside
+// "show-subscribe". Matched by prefix on "subscription-widget" rather than
+// each exact spelling seen, since there is no reason to assume every
+// suffix variant Substack's markup uses has actually been observed — a
+// differently-suffixed sibling class turning up on some other
+// publication's post should still be recognised as part of the same widget
+// family rather than silently surviving into ContentHTML.
+const (
+	subscribeWidgetClassPrefix = "subscription-widget"
+	subscribeWidgetExactClass  = "show-subscribe"
+)
+
+// isSubscribeChrome reports whether n is (the root of) Substack's own
+// subscribe-widget, by subscribeComponentName first and the
+// subscribeWidgetClassPrefix/subscribeWidgetExactClass fallback second.
+func isSubscribeChrome(n *html.Node) bool {
+	if n.Type != html.ElementNode {
+		return false
+	}
+	for _, attr := range n.Attr {
+		switch attr.Key {
+		case "data-component-name":
+			if attr.Val == subscribeComponentName {
+				return true
+			}
+		case "class":
+			for _, class := range strings.Fields(attr.Val) {
+				if class == subscribeWidgetExactClass || strings.HasPrefix(class, subscribeWidgetClassPrefix) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
-// cleanBody strips Substack's own UI chrome out of a post body — subscribe
-// widgets, share/comment button rows, footer CTAs, and the paywall block
-// itself — and strips invisibleFormatting's characters from what remains.
-// It parses the markup with x/net/html and removes whole nodes rather than
+// cleanBody strips Substack's own subscribe-widget chrome out of a post
+// body and strips invisibleFormatting's characters from what remains. It
+// parses the markup with x/net/html and removes whole nodes rather than
 // regexing the HTML text: a regex has no notion of "this closing tag
 // belongs to that opening tag", so it either under-matches nested markup or
 // over-matches into content that merely happens to contain similar text
 // nearby.
+//
+// This deliberately does not also hunt for a "paywall block" or a
+// share/comment button row the way an earlier version of this file did.
+// Neither turned out to be real: a live check (see verifySession's doc
+// comment in post.go) found that a genuine paywalled preview carries no
+// paywall marker of any kind — nothing to strip even if this looked for
+// it — and Ingest's session-verification guard means this package now never
+// imports a preview in the first place, so there is nothing left needing a
+// paywall-block removal to protect against. No share or comment button
+// markup was found in body_html either; increader's reader chrome, not
+// Substack's API response, is apparently where those live. If a real
+// example of either ever turns up, extend isSubscribeChrome's approach
+// rather than reintroducing a guessed class name.
 //
 // Three things this deliberately does NOT do, each of which looks like an
 // omission on a first read and is not:
@@ -119,10 +171,9 @@ func cleanBody(bodyHTML string) (string, []string) {
 	// complete document. html.Parse always produces a full document,
 	// wrapping whatever it is given in an implied
 	// <html><head></head><body>...</body></html> even when the input never
-	// had one. Some other code in this repo tolerates that (see
-	// hasPaywallMarker in post.go, and rewriteEmbeds in
-	// internal/web/embeds.go) because it either never re-serializes the
-	// result or relies on a downstream bluemonday policy to strip the
+	// had one. Some other code in this repo tolerates that (rewriteEmbeds in
+	// internal/web/embeds.go, for one) because it either never re-serializes
+	// the result or relies on a downstream bluemonday policy to strip the
 	// wrapper back out. cleanBody has neither: its result is exactly what
 	// becomes source.Document.ContentHTML, with no sanitiser downstream —
 	// see point 1 above — so parsing as a fragment against a <body> context
@@ -156,17 +207,24 @@ func cleanBody(bodyHTML string) (string, []string) {
 	return out.String(), nil
 }
 
-// stripChoreNodes removes every descendant of n carrying one of
-// choreClasses, in place, along with everything inside it.
+// stripChoreNodes removes every descendant of n that isSubscribeChrome
+// matches, in place, along with everything inside it.
 //
-// A tweet embed survives this untouched even though it, too, is a widget:
-// tweetEmbedReplacement in internal/web/embeds.go identifies one by its
-// data-component-name="Twitter2ToDOM" attribute, not by any CSS class, so
-// nothing in choreClasses ever matches it — see cleanBody's point 3 above.
+// A tweet embed survives this untouched even though it, too, is identified
+// by a data-component-name attribute: tweetEmbedReplacement in
+// internal/web/embeds.go matches "Twitter2ToDOM" specifically, a different
+// value from subscribeComponentName's "SubscribeWidgetToDOM", so the two
+// never collide — see cleanBody's point 3 above. Likewise Image2ToDOM and
+// PreformattedTextBlockToDOM (Substack's own image and code-block
+// components, both confirmed present in real body_html) and the
+// captioned-image-container / image2 / image2-inset / restack-image /
+// is-viewable-img class family that goes with them are never touched: none
+// of them is "SubscribeWidgetToDOM", and none carries a class matching
+// subscribeWidgetClassPrefix or subscribeWidgetExactClass.
 func stripChoreNodes(n *html.Node) {
 	for child := n.FirstChild; child != nil; {
 		next := child.NextSibling
-		if child.Type == html.ElementNode && nodeHasClass(child, choreClasses) {
+		if isSubscribeChrome(child) {
 			n.RemoveChild(child)
 		} else {
 			stripChoreNodes(child)

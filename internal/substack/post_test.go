@@ -8,46 +8,40 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
-// TestPostHonoursCache pre-seeds CacheDir with one clean cached post and one
-// paywalled cached post, then runs Ingest over an archive naming both. The
-// clean one must be served from cache with no network request; the
-// paywalled one, despite being "cached", was fetched while the subscription
-// had lapsed and must be re-fetched — see post's own doc comment on why a
-// cached-but-paywalled file is not trusted.
+// TestPostHonoursCache pre-seeds CacheDir with one free cached post and one
+// paid cached post written under an unconfirmed (Authenticated: false)
+// session, then runs Ingest over an archive naming both plus a paid post
+// that must succeed its own session canary. The free one must be served
+// from cache with no network request; the unconfirmed paid one, despite
+// being "cached", cannot be trusted — its own doc comment on post explains
+// why — and must be re-fetched.
 func TestPostHonoursCache(t *testing.T) {
 	fake := newFakeSubstack(t)
+	// canary-target listed before unconfirmed-cached deliberately:
+	// verifySession (stage 2) targets the *first* only_paid post the
+	// archive names, and its own two probe fetches would otherwise land on
+	// unconfirmed-cached instead — which would still end up correctly
+	// re-fetched, but for the wrong reason, and this test's "exactly one
+	// network request" assertion below is specifically about post's own
+	// cache-skip rule, not about which slug verifySession happened to pick.
 	fake.archivePages[0] = []archiveFixture{
-		newArchiveFixture(1, "clean-cached", "newsletter", "everyone"),
-		newArchiveFixture(2, "paywalled-cached", "newsletter", "only_paid"),
+		newArchiveFixture(1, "free-cached", "newsletter", "everyone"),
+		newArchiveFixture(2, "canary-target", "newsletter", "only_paid"),
+		newArchiveFixture(3, "unconfirmed-cached", "newsletter", "only_paid"),
 	}
-	// The network copy of the paywalled slug, once increader actually
-	// fetches it, has real content — proving the refetch happened and was
-	// used, not just requested and discarded. Padded well past
-	// paywallBodyLengthThreshold: isPaywalled treats a short only_paid body
-	// as a preview even with no paywall marker present, so a short fixture
-	// here would trip that heuristic and make this test indistinguishable
-	// from testing the length check instead of the cache-skip rule it
-	// actually targets.
-	fake.posts["paywalled-cached"] = postFixture{
-		ID: 2, Slug: "paywalled-cached", Type: "newsletter", Audience: "only_paid",
-		Title: "Post 2", CanonicalURL: "https://example.substack.com/p/paywalled-cached",
-		PostDate: testPostDate.Format("2006-01-02T15:04:05Z07:00"),
-		BodyHTML: "<p>Now that the subscription is active again, here is the real, full body of this post. " +
-			strings.Repeat("Padding this well past the paywall body length threshold with ordinary prose. ", 40) +
-			"</p>",
-	}
+	fake.posts["canary-target"] = newWorkingPaidPostFixture(2, "canary-target")
+	fake.posts["unconfirmed-cached"] = newWorkingPaidPostFixture(3, "unconfirmed-cached")
 
 	importer := newTestImporter(t, fake.Server, nil)
 
-	seedCache(t, importer, "clean-cached", newFreePostFixture(1, "clean-cached"))
-	seedCache(t, importer, "paywalled-cached", postFixture{
-		ID: 2, Slug: "paywalled-cached", Type: "newsletter", Audience: "only_paid",
-		Title: "Post 2", CanonicalURL: "https://example.substack.com/p/paywalled-cached",
-		PostDate: testPostDate.Format("2006-01-02T15:04:05Z07:00"),
-		BodyHTML: `<p>Teaser.</p><div class="paywall"><p>Subscribe.</p></div>`,
-	})
+	seedCache(t, importer, "free-cached", newFreePostFixture(1, "free-cached"), true)
+	// Authenticated: false models a file left behind by a run made before
+	// the session was ever confirmed to work — or one written before the
+	// cacheEntry wrapper existed at all, which decodes the same way.
+	seedCache(t, importer, "unconfirmed-cached", newWorkingPaidPostFixture(2, "unconfirmed-cached"), false)
 
 	logger := testLogger(&strings.Builder{})
 	documents, result, err := importer.Ingest(context.Background(), logger)
@@ -56,76 +50,167 @@ func TestPostHonoursCache(t *testing.T) {
 	}
 
 	if result.Cached != 1 {
-		t.Errorf("Result.Cached = %d, want 1", result.Cached)
+		t.Errorf("Result.Cached = %d, want 1 (only free-cached)", result.Cached)
 	}
-	if result.Fetched != 1 {
-		t.Errorf("Result.Fetched = %d, want 1", result.Fetched)
+	// Fetched: unconfirmed-cached (re-fetched despite being on disk) and
+	// canary-target (never cached at all). verifySession's own two probe
+	// requests against canary-target do not count here — they go through
+	// fetchRaw directly, not post, and post's own single confirming fetch
+	// for canary-target is what Result.Fetched counts.
+	if result.Fetched != 2 {
+		t.Errorf("Result.Fetched = %d, want 2 (unconfirmed-cached refetched, canary-target fetched)", result.Fetched)
 	}
-	if got := fake.postRequestCount("clean-cached"); got != 0 {
-		t.Errorf("clean-cached was requested %d times over the network, want 0", got)
+	if got := fake.postRequestCount("free-cached"); got != 0 {
+		t.Errorf("free-cached was requested %d times over the network, want 0", got)
 	}
-	if got := fake.postRequestCount("paywalled-cached"); got != 1 {
-		t.Errorf("paywalled-cached was requested %d times over the network, want exactly 1", got)
+	if got := fake.postRequestCount("unconfirmed-cached"); got != 1 {
+		t.Errorf("unconfirmed-cached was requested %d times over the network, want exactly 1", got)
 	}
-	if len(documents) != 2 {
-		t.Fatalf("len(documents) = %d, want 2", len(documents))
+	if len(documents) != 3 {
+		t.Fatalf("len(documents) = %d, want 3", len(documents))
+	}
+
+	// The refetched file must now be readable back as Authenticated: true —
+	// otherwise every subsequent run would refetch it forever even though
+	// the session verified as working this time.
+	raw, err := os.ReadFile(importer.cachePath("unconfirmed-cached"))
+	if err != nil {
+		t.Fatalf("read refreshed cache file: %v", err)
+	}
+	var entry cacheEntry
+	if err := json.Unmarshal(raw, &entry); err != nil {
+		t.Fatalf("decode refreshed cache file: %v", err)
+	}
+	if !entry.Authenticated {
+		t.Error("refetched cache entry has Authenticated = false, want true")
 	}
 }
 
 // seedCache writes fixture directly to where cachePath says slug's cache
-// file belongs, bypassing the network entirely — simulating a file left
-// behind by an earlier run.
-func seedCache(t *testing.T, importer *Importer, slug string, fixture postFixture) {
+// file belongs, in the cacheEntry wrapper post itself writes, bypassing the
+// network entirely — simulating a file left behind by an earlier run.
+func seedCache(t *testing.T, importer *Importer, slug string, fixture postFixture, authenticated bool) {
 	t.Helper()
 	path := importer.cachePath(slug)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("seed cache dir: %v", err)
 	}
-	raw, err := json.Marshal(fixture)
+	postRaw, err := json.Marshal(fixture)
 	if err != nil {
 		t.Fatalf("marshal fixture: %v", err)
+	}
+	entry := cacheEntry{FetchedAt: time.Now(), Authenticated: authenticated, Post: postRaw}
+	raw, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("marshal cache entry: %v", err)
 	}
 	if err := os.WriteFile(path, raw, 0o644); err != nil {
 		t.Fatalf("seed cache file: %v", err)
 	}
 }
 
-// TestIngestAbortsAfterThreeConsecutivePaywalledFetches pins the
-// cookie-validity guard: Ingest must abort the entire run — not skip one
-// post and continue — once three fetches in a row come back paywalled, and
-// nothing after the third failing slug may be requested at all.
-func TestIngestAbortsAfterThreeConsecutivePaywalledFetches(t *testing.T) {
+// TestPostTrustsPreWrapperCacheFileAsMissing checks the migration path
+// loadCachedPost's own doc comment describes: a cache file written by a
+// version of this package that predates the cacheEntry wrapper (Substack's
+// raw post JSON stored bare, with no "post" key to unwrap) must not be
+// mistaken for a valid, confirmed-authenticated entry. It should instead be
+// treated the same as no cache at all, triggering a normal fetch.
+func TestPostTrustsPreWrapperCacheFileAsMissing(t *testing.T) {
 	fake := newFakeSubstack(t)
+	fake.posts["legacy"] = newFreePostFixture(1, "legacy")
 
-	var archive []archiveFixture
-	for id := 1; id <= 5; id++ {
-		slug := "paid-" + string(rune('a'+id-1))
-		archive = append(archive, newArchiveFixture(id, slug, "newsletter", "only_paid"))
-		fake.posts[slug] = newPaywalledPostFixture(id, slug)
+	importer := newTestImporter(t, fake.Server, nil)
+
+	path := importer.cachePath("legacy")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("seed cache dir: %v", err)
 	}
-	fake.archivePages[0] = archive
+	// The bare, pre-wrapper shape: Substack's own post JSON with no
+	// enclosing {"post": ...}.
+	bareRaw, err := json.Marshal(newFreePostFixture(1, "legacy"))
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	if err := os.WriteFile(path, bareRaw, 0o644); err != nil {
+		t.Fatalf("seed cache file: %v", err)
+	}
+
+	_, fromCache, err := importer.post(context.Background(), "legacy")
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	if fromCache {
+		t.Error("fromCache = true, want false (a pre-wrapper file must not be trusted as-is)")
+	}
+	if got := fake.postRequestCount("legacy"); got != 1 {
+		t.Errorf("requests = %d, want 1", got)
+	}
+}
+
+// TestIngestAbortsWhenSessionVerificationFails covers the canary's failure
+// path: when the authenticated and unauthenticated fetches of the probe
+// post come back indistinguishable (the lapsed-session case
+// newLapsedPaidPostFixture models), Ingest must abort the entire run before
+// fetching anything else — not just skip the probe post and continue with
+// the rest of the archive.
+func TestIngestAbortsWhenSessionVerificationFails(t *testing.T) {
+	fake := newFakeSubstack(t)
+	fake.archivePages[0] = []archiveFixture{
+		newArchiveFixture(1, "free-post", "newsletter", "everyone"),
+		newArchiveFixture(2, "lapsed-probe", "newsletter", "only_paid"),
+		newArchiveFixture(3, "another-free-post", "newsletter", "everyone"),
+	}
+	fake.posts["free-post"] = newFreePostFixture(1, "free-post")
+	fake.posts["lapsed-probe"] = newLapsedPaidPostFixture(2, "lapsed-probe")
+	fake.posts["another-free-post"] = newFreePostFixture(3, "another-free-post")
 
 	importer := newTestImporter(t, fake.Server, nil)
 	logger := testLogger(&strings.Builder{})
 
-	_, result, err := importer.Ingest(context.Background(), logger)
+	documents, _, err := importer.Ingest(context.Background(), logger)
 	if err == nil {
 		t.Fatal("expected an error aborting the run")
 	}
-	if !strings.Contains(err.Error(), "3 consecutive") {
-		t.Errorf("error = %q, want it to name the 3-consecutive-paywall guard", err.Error())
+	if !strings.Contains(err.Error(), "still returned what looks like a preview") {
+		t.Errorf("error = %q, want it to name the stage 2 canary failure", err.Error())
 	}
-	if result.StillPaywalled != 3 {
-		t.Errorf("Result.StillPaywalled = %d, want 3 (the abort must fire on the third, not run past it)", result.StillPaywalled)
+	if len(documents) != 0 {
+		t.Errorf("len(documents) = %d, want 0 (nothing imported on a failed verification)", len(documents))
 	}
 
-	// Slugs 4 and 5 (paid-d, paid-e) must never have been requested: the
-	// abort has to stop the whole run, not merely record the failure and
-	// move on to the next post.
-	for _, slug := range []string{"paid-d", "paid-e"} {
+	// The probe post is fetched exactly twice — once with the cookie, once
+	// without, both via verifySession directly — and nothing else in the
+	// archive is ever requested at all: the abort happens before the
+	// per-post loop even starts.
+	if got := fake.postRequestCount("lapsed-probe"); got != 2 {
+		t.Errorf("lapsed-probe requested %d times, want 2 (authenticated + anonymous canary)", got)
+	}
+	for _, slug := range []string{"free-post", "another-free-post"} {
 		if got := fake.postRequestCount(slug); got != 0 {
-			t.Errorf("slug %q was requested %d times after the abort should have fired, want 0", slug, got)
+			t.Errorf("%s requested %d times, want 0 (the whole run must abort before reaching it)", slug, got)
 		}
+	}
+}
+
+// TestIngestSkipsSessionVerificationWithNoPaidPost checks the other edge:
+// an archive containing no only_paid post at all has nothing to verify the
+// cookie against, and Ingest must proceed rather than erroring or hanging.
+func TestIngestSkipsSessionVerificationWithNoPaidPost(t *testing.T) {
+	fake := newFakeSubstack(t)
+	fake.archivePages[0] = []archiveFixture{
+		newArchiveFixture(1, "only-free-post", "newsletter", "everyone"),
+	}
+	fake.posts["only-free-post"] = newFreePostFixture(1, "only-free-post")
+
+	importer := newTestImporter(t, fake.Server, nil)
+	logger := testLogger(&strings.Builder{})
+
+	documents, _, err := importer.Ingest(context.Background(), logger)
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	if len(documents) != 1 {
+		t.Errorf("len(documents) = %d, want 1", len(documents))
 	}
 }
 
@@ -215,43 +300,47 @@ func TestPostRejectsPathTraversalSlug(t *testing.T) {
 	}
 }
 
-// TestHasPaywallMarker checks the true and false sides of detection: a real
-// preview fixture (a paywall div) must be caught, and a free post that
-// merely ends with its own subscribe call-to-action prose must not be —
-// the false-positive hasPaywallMarker's doc comment specifically calls out.
-func TestHasPaywallMarker(t *testing.T) {
-	tests := []struct {
-		name string
-		html string
-		want bool
-	}{
-		{
-			name: "real paywall block",
-			html: `<p>Here is a short teaser paragraph.</p><div class="paywall"><p>Subscribe to keep reading.</p></div>`,
-			want: true,
-		},
-		{
-			name: "subscribe widget class",
-			html: `<p>Body text.</p><div class="subscribe-widget"><a href="#">Subscribe now</a></div>`,
-			want: true,
-		},
-		{
-			name: "free post ending with its own subscribe CTA prose",
-			html: `<p>A full, long article body with plenty of real content in it.</p><p>Thanks for reading! Subscribe below to get future posts in your inbox.</p>`,
-			want: false,
-		},
-		{
-			name: "empty body",
-			html: "",
-			want: false,
-		},
+// TestPostDateParsesFractionalSecondsUTC pins that postBody's post_date
+// field decodes Substack's real timestamp shape correctly: RFC3339 with
+// millisecond fractional seconds and a bare "Z" for UTC, e.g.
+// "2026-08-02T16:27:14.364Z" — confirmed as the live API's actual format on
+// 2026-08-12, not RFC3339's own reference layout (which has no fractional
+// seconds field at all).
+//
+// Go note: this works without any custom UnmarshalJSON because time.Parse
+// (which encoding/json's time.Time.UnmarshalJSON calls with the RFC3339
+// layout) has a documented special case: a fractional-second component in
+// the input is accepted even when the layout string given to Parse does not
+// itself mention one. wallabag.Time, by contrast, needs a custom
+// UnmarshalJSON (see internal/wallabag/types.go) because wallabag's own
+// timestamp omits the colon in its zone offset, which has no such
+// leniency — a good reminder that this shape working "for free" is Go's
+// parser being specifically forgiving about fractional seconds, not a
+// general amnesty for any deviation from the reference layout.
+func TestPostDateParsesFractionalSecondsUTC(t *testing.T) {
+	raw := `{"post_date": "2026-08-02T16:27:14.364Z"}`
+
+	var p postBody
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
 
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if got := hasPaywallMarker(test.html); got != test.want {
-				t.Errorf("hasPaywallMarker(%q) = %v, want %v", test.html, got, test.want)
-			}
-		})
+	want := time.Date(2026, 8, 2, 16, 27, 14, 364_000_000, time.UTC)
+	if !p.PostDate.Equal(want) {
+		t.Errorf("PostDate = %v, want %v", p.PostDate, want)
+	}
+
+	// archivePost carries the same field with the same json tag and no
+	// custom decoding of its own, so the same parse behaviour applies there
+	// too — checked directly rather than assumed, since archivePost and
+	// postBody are two separate types that happen to agree, not one type
+	// used in two places.
+	var a archivePost
+	rawArchive := `{"post_date": "2026-08-02T16:27:14.364Z"}`
+	if err := json.Unmarshal([]byte(rawArchive), &a); err != nil {
+		t.Fatalf("unmarshal archivePost: %v", err)
+	}
+	if !a.PostDate.Equal(want) {
+		t.Errorf("archivePost.PostDate = %v, want %v", a.PostDate, want)
 	}
 }

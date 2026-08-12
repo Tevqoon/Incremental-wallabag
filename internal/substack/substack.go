@@ -13,10 +13,15 @@
 // publication for a month at a time, uses that window to backfill its whole
 // archive, and then lets the subscription lapse until the next time they
 // want more. A run has to be safe to repeat across that on-again-off-again
-// pattern — the cache in post.go exists for that — and it must never
-// mistake a paywall preview served while lapsed for the real article and
-// import it over content that was already fetched correctly; see
-// isPaywalled in post.go and the consecutive-paywall abort in Ingest below.
+// pattern — the cache in post.go exists for that — and it must never mistake
+// a paywall preview served while lapsed for the real article and import it
+// over content that was already fetched correctly. That guarantee comes from
+// session.go's two-stage check, run once at the start of Ingest below before
+// anything is fetched or imported: a live check found that a paywalled
+// preview is not otherwise distinguishable from a complete post by anything
+// in its own response (see verifySession's own doc comment in session.go
+// for the finding), so this package establishes trust once, up front,
+// rather than trying to detect a preview after the fact.
 package substack
 
 import (
@@ -41,14 +46,6 @@ const defaultRequestGap = 1500 * time.Millisecond
 // the first attempt, before getJSON gives up on it.
 const defaultMaxAttempts = 3
 
-// paywallAbortThreshold is how many consecutive paywalled fetches Ingest
-// tolerates before concluding the session cookie is no longer valid and
-// aborting the whole run, rather than continuing to import previews over
-// what may already be good content. See Ingest's own comment for why this
-// has to be "3 in a row" specifically, and not "the first paid post came
-// back paywalled".
-const paywallAbortThreshold = 3
-
 // Config configures one Importer.
 type Config struct {
 	// Host is the publication's own domain: "example.substack.com", or a
@@ -63,6 +60,11 @@ type Config struct {
 	// a password, and it must never be written to a log line, an error
 	// message, a Result, or a String() method — see Config.String() below
 	// and the tests in substack_test.go that pin this down.
+	//
+	// It must start with "s%3A" (or the decoded "s:") — see
+	// validSessionIDPrefix in session.go for why New rejects one that
+	// doesn't, rather than passively sending a malformed cookie and letting
+	// it surface as an unexplained 401 later.
 	SessionID string
 
 	// CacheDir is where each fetched post's raw JSON is written, one file
@@ -128,6 +130,11 @@ func New(cfg Config) (*Importer, error) {
 	if cfg.SessionID == "" {
 		return nil, errors.New("substack: SessionID is required")
 	}
+	if !validSessionIDPrefix(cfg.SessionID) {
+		return nil, errors.New(
+			"substack: SessionID does not look like a substack.sid cookie value — it should start with \"s%3A\" (or its decoded form \"s:\"); that prefix is part of the cookie itself, not URL-escaping or shell syntax to strip off before pasting it in",
+		)
+	}
 	if cfg.CacheDir == "" {
 		return nil, errors.New("substack: CacheDir is required")
 	}
@@ -163,13 +170,13 @@ type Result struct {
 	Posts int
 
 	// Cached is how many posts were served from CacheDir without a network
-	// request, because a prior run already had a non-paywalled copy on
-	// disk.
+	// request, because a prior run already had a trustworthy copy on disk —
+	// see post's own cache-honouring rule in post.go.
 	Cached int
 
 	// Fetched is how many posts required an actual network request: not yet
-	// cached, or cached but paywalled and therefore not trusted — see
-	// post's own cache-skip rule in post.go.
+	// cached, or cached under a session that was not yet confirmed to work
+	// and therefore not trusted — see post's own cache-skip rule in post.go.
 	Fetched int
 
 	// SkippedNonNewsletter is how many archive entries were not imported
@@ -178,16 +185,11 @@ type Result struct {
 	// returning anything.
 	SkippedNonNewsletter int
 
-	// StillPaywalled is how many fetched posts came back as a paywall
-	// preview rather than the full article — see isPaywalled in post.go.
-	// These are counted but not imported.
-	StillPaywalled int
-
 	// Warnings collects non-fatal problems encountered along the way: a
 	// single post's fetch failing partway through the run, cleanBody being
 	// unable to parse a body, or the archive walk being cut off by
 	// maxArchiveOffset before it found a natural end. Ingest continues past
-	// every one of these; only the consecutive-paywall guard stops the run
+	// every one of these; only a failed session verification stops the run
 	// outright, and that is reported as an error, not folded in here.
 	Warnings []string
 }
@@ -203,31 +205,40 @@ func (i *Importer) Ingest(ctx context.Context, logger *slog.Logger) ([]source.Do
 		logger = slog.Default()
 	}
 
+	// Stage 1 of the two-stage session check, run before anything else in
+	// this call — including the archive walk — because it is the cheapest
+	// possible diagnosis (one request) and the archive walk's own request
+	// budget should not be spent against a cookie already known to be dead
+	// or paywall-less. See verifySubscriptionState's own doc comment in
+	// session.go for why this is not, by itself, sufficient — stage 2 below
+	// exists for exactly that reason.
+	subscriptionWarnings, err := i.verifySubscriptionState(ctx, logger)
+	if err != nil {
+		return nil, Result{}, err
+	}
+
 	posts, pages, archiveWarnings, err := i.walkArchive(ctx, logger)
-	result := Result{Pages: pages, Posts: len(posts), Warnings: archiveWarnings}
+	result := Result{
+		Pages:    pages,
+		Posts:    len(posts),
+		Warnings: append(subscriptionWarnings, archiveWarnings...),
+	}
 	if err != nil {
 		return nil, result, fmt.Errorf("substack: walk archive: %w", err)
 	}
 
-	var documents []source.Document
+	// Stage 2: ground truth, measured directly, for what stage 1 could only
+	// fail to contradict rather than actually confirm. See verifySession's
+	// own doc comment in session.go for the full reasoning behind having
+	// both stages. A failure here aborts the whole run and imports nothing
+	// — there is no partial result worth trusting once the premise this
+	// package relies on (a working session means every subsequent paid
+	// fetch in this run is the real thing) does not hold.
+	if err := i.verifySession(ctx, logger, posts); err != nil {
+		return nil, result, err
+	}
 
-	// consecutivePaywalled counts network fetches, in a row, that came back
-	// as a paywall preview rather than the real article. It resets to zero
-	// on any post that is not a paywalled preview — cached or freshly
-	// fetched, paid or free — because what this is actually watching for is
-	// "the cookie has stopped working", and a single good result in between
-	// is direct evidence that is not (yet) true.
-	//
-	// Deliberately not keyed on "the first paid post was paywalled": a free
-	// post cannot signal a lapsed cookie at all (isPaywalled returns false
-	// for it vacuously, since it was never behind a paywall to begin with),
-	// and a lone paid post being paywalled could just as well be that one
-	// post's audience field being wrong, or a transient blip, rather than
-	// the whole subscription having lapsed. Only a run of several in a row
-	// is the pattern this guard exists to catch — importing dozens of
-	// previews over good content is the exact failure it prevents, so it
-	// aborts the entire run rather than skipping one post and continuing.
-	consecutivePaywalled := 0
+	var documents []source.Document
 
 	for _, entry := range posts {
 		// Restacks and any other non-newsletter entry have no body of their
@@ -253,28 +264,6 @@ func (i *Importer) Ingest(ctx context.Context, logger *slog.Logger) ([]source.Do
 		} else {
 			result.Fetched++
 		}
-
-		if isPaywalled(body) {
-			result.StillPaywalled++
-			// post's own cache-skip rule (see post.go) never hands back a
-			// cached result that is paywalled — a cached-and-paywalled file
-			// always triggers a fresh fetch instead. This still only counts
-			// a genuine network round trip toward the abort guard, rather
-			// than assuming that invariant holds: a stale or hand-edited
-			// cache directory should not be able to trip the abort on its
-			// own without a single real request having failed.
-			if !fromCache {
-				consecutivePaywalled++
-				if consecutivePaywalled >= paywallAbortThreshold {
-					return documents, result, fmt.Errorf(
-						"substack: aborting after %d consecutive paywalled fetches — the session cookie is likely expired or the subscription has lapsed; refresh SessionID before running again",
-						paywallAbortThreshold,
-					)
-				}
-			}
-			continue
-		}
-		consecutivePaywalled = 0
 
 		cleaned, warnings := cleanBody(body.BodyHTML)
 		result.Warnings = append(result.Warnings, warnings...)

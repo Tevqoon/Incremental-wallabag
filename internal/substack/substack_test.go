@@ -35,8 +35,11 @@ func newTestImporter(t *testing.T, server *httptest.Server, tweak func(*Config))
 
 	host := strings.TrimPrefix(server.URL, "https://")
 	cfg := Config{
-		Host:        host,
-		SessionID:   "s3cr3t-session-cookie",
+		Host: host,
+		// The "s%3A" prefix is not decorative — New rejects a SessionID
+		// missing it (see validSessionIDPrefix in session.go), so every
+		// test value needs it too, not just a real cookie.
+		SessionID:   "s%3As3cr3t-session-cookie.sig",
 		CacheDir:    t.TempDir(),
 		RequestGap:  time.Millisecond, // tests should not spend real seconds throttling
 		MaxAttempts: 3,
@@ -77,6 +80,16 @@ func newArchiveFixture(id int, slug, typ, audience string) archiveFixture {
 
 // postFixture is one entry as the fake /api/v1/posts/{slug} endpoint
 // encodes it, matching postBody's own JSON tags.
+//
+// PreviewBodyHTML is not a real Substack field — postBody has no such
+// tag, and it is never sent to json.Marshal for the wire response (see
+// fakeSubstack.handlePost). It exists purely so the fake server can behave
+// the way the real one does for a paid post: serve the full body_html when
+// the request carries a cookie, and a shorter, genuinely different
+// body_html when it does not — the exact differential verifySession's
+// canary depends on. Left empty, a fixture serves BodyHTML regardless of
+// the request's cookie, matching a real free post's own behaviour (nothing
+// to gate on audience "everyone").
 type postFixture struct {
 	ID               int      `json:"id"`
 	Slug             string   `json:"slug"`
@@ -88,7 +101,15 @@ type postFixture struct {
 	BodyHTML         string   `json:"body_html"`
 	Language         string   `json:"language"`
 	PublishedBylines []byline `json:"publishedBylines"`
+
+	PreviewBodyHTML string `json:"-"`
 }
+
+// paidBodyPadding pads a fixture's authenticated body_html well past
+// sessionCanaryMinRatio's threshold relative to a short preview, so a test
+// asserting the canary passes is not accidentally sensitive to the exact
+// ratio picked.
+const paidBodyPadding = "Real paid content that only a working session should ever see. "
 
 func newFreePostFixture(id int, slug string) postFixture {
 	return postFixture{
@@ -107,25 +128,101 @@ func newFreePostFixture(id int, slug string) postFixture {
 	}
 }
 
-func newPaywalledPostFixture(id int, slug string) postFixture {
+// newPaidPostFixture builds an only_paid post whose fake server response
+// differs by whether the request is authenticated: fullBodyHTML with a
+// cookie, previewBodyHTML without one — modelling a genuinely working
+// session, where verifySession's canary should pass.
+func newPaidPostFixture(id int, slug, fullBodyHTML, previewBodyHTML string) postFixture {
 	return postFixture{
-		ID:           id,
-		Slug:         slug,
-		Type:         "newsletter",
-		Audience:     "only_paid",
-		Title:        "Post " + strconv.Itoa(id),
-		CanonicalURL: "https://example.substack.com/p/" + slug,
-		PostDate:     testPostDate.Format(time.RFC3339),
-		BodyHTML:     `<p>A short teaser.</p><div class="paywall"><p>Subscribe to keep reading.</p></div>`,
-		Language:     "en",
+		ID:              id,
+		Slug:            slug,
+		Type:            "newsletter",
+		Audience:        "only_paid",
+		Title:           "Post " + strconv.Itoa(id),
+		CanonicalURL:    "https://example.substack.com/p/" + slug,
+		PostDate:        testPostDate.Format(time.RFC3339),
+		BodyHTML:        fullBodyHTML,
+		PreviewBodyHTML: previewBodyHTML,
+		Language:        "en",
+	}
+}
+
+// newWorkingPaidPostFixture is newPaidPostFixture with a generic,
+// comfortably-larger-than-preview full body — the common case for tests
+// that just need "a paid post whose session canary passes" without caring
+// about the exact content.
+func newWorkingPaidPostFixture(id int, slug string) postFixture {
+	return newPaidPostFixture(id, slug,
+		"<p>"+strings.Repeat(paidBodyPadding, 20)+"</p>",
+		"<p>A short teaser visible to anyone.</p>",
+	)
+}
+
+// newLapsedPaidPostFixture models a paid post fetched under a dead session:
+// Substack cannot tell an expired cookie from no cookie at all, so both the
+// "authenticated" and anonymous fetch get the same short preview — the
+// scenario verifySession's canary must catch and abort on.
+func newLapsedPaidPostFixture(id int, slug string) postFixture {
+	preview := "<p>A short teaser visible to anyone, cookie or not.</p>"
+	return newPaidPostFixture(id, slug, preview, preview)
+}
+
+// subscriptionFixture is the fake /api/v1/subscription endpoint's response
+// shape, matching subscriptionState's own JSON tags but with plain `any`
+// fields for Type/Expiry/BundleID rather than json.RawMessage — ergonomic
+// for a test to set directly (nil, a string, whatever a given test needs),
+// where subscriptionState itself deliberately does not commit to a concrete
+// type (see subscriptionState's own doc comment in session.go for why).
+type subscriptionFixture struct {
+	MembershipState  string `json:"membership_state"`
+	IsFreeSubscribed bool   `json:"is_free_subscribed"`
+	IsSubscribed     bool   `json:"is_subscribed"`
+	Type             any    `json:"type"`
+	Expiry           any    `json:"expiry"`
+	IsFounding       bool   `json:"is_founding"`
+	BundleID         any    `json:"bundle_id"`
+}
+
+// workingSubscriptionFixture is the default fixture newFakeSubstack installs
+// — a state that passes stage 1 (verifySubscriptionState) cleanly, with no
+// expiry warning — so a test that has no interest in the subscription check
+// itself never has to think about it. Its exact field values are arbitrary
+// placeholders: what a real paid response actually contains was not
+// confirmed live (see subscriptionState's own doc comment), so this only
+// needs to be "clearly not free_signup, and not IsFreeSubscribed with
+// everything else null" — the one thing looksFree actually checks.
+func workingSubscriptionFixture() subscriptionFixture {
+	return subscriptionFixture{
+		MembershipState:  "subscribed",
+		IsFreeSubscribed: false,
+		IsSubscribed:     true,
+		Type:             "paid",
+		Expiry:           nil,
+		IsFounding:       false,
+		BundleID:         nil,
+	}
+}
+
+// freeSubscriptionFixture models the one shape actually confirmed live: a
+// free subscriber's own /api/v1/subscription response.
+func freeSubscriptionFixture() subscriptionFixture {
+	return subscriptionFixture{
+		MembershipState:  "free_signup",
+		IsFreeSubscribed: true,
+		IsSubscribed:     false,
+		Type:             nil,
+		Expiry:           nil,
+		IsFounding:       false,
+		BundleID:         nil,
 	}
 }
 
 // fakeSubstack stands in for a Substack publication's API. It serves
 // /api/v1/archive from archivePages (one slice of fixtures per requested
-// page, indexed by offset/limit) and /api/v1/posts/{slug} from posts,
-// recording every request path so tests can assert on what was actually
-// requested rather than only on the final result.
+// page, indexed by offset/limit), /api/v1/posts/{slug} from posts, and
+// /api/v1/subscription from subscription, recording every request path so
+// tests can assert on what was actually requested rather than only on the
+// final result.
 type fakeSubstack struct {
 	*httptest.Server
 
@@ -151,6 +248,14 @@ type fakeSubstack struct {
 	// next status off the slice, and the last entry repeats once exhausted.
 	postStatus map[string][]int
 
+	// subscription and subscriptionStatus control the /api/v1/subscription
+	// response — see workingSubscriptionFixture for the default, which
+	// keeps stage 1 quietly out of the way of tests that are not about it.
+	// subscriptionStatus of 0 means 200; set it to force a status (401, for
+	// the "dead cookie" stage-1 test).
+	subscription       subscriptionFixture
+	subscriptionStatus int
+
 	requestedPaths []string
 	postRequests   []string
 	sessionCookies []string
@@ -167,15 +272,32 @@ func newFakeSubstack(t *testing.T) *fakeSubstack {
 		archivePages: make(map[int][]archiveFixture),
 		posts:        make(map[string]postFixture),
 		postStatus:   make(map[string][]int),
+		subscription: workingSubscriptionFixture(),
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/archive", fake.handleArchive)
 	mux.HandleFunc("/api/v1/posts/", fake.handlePost)
+	mux.HandleFunc("/api/v1/subscription", fake.handleSubscription)
 
 	fake.Server = httptest.NewTLSServer(mux)
 	t.Cleanup(fake.Close)
 	return fake
+}
+
+func (f *fakeSubstack) handleSubscription(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	f.requestedPaths = append(f.requestedPaths, r.URL.RequestURI())
+	f.sessionCookies = append(f.sessionCookies, r.Header.Get("Cookie"))
+	status := f.subscriptionStatus
+	body := f.subscription
+	f.mu.Unlock()
+
+	if status != 0 && status != http.StatusOK {
+		w.WriteHeader(status)
+		return
+	}
+	json.NewEncoder(w).Encode(body)
 }
 
 func (f *fakeSubstack) handleArchive(w http.ResponseWriter, r *http.Request) {
@@ -206,6 +328,7 @@ func (f *fakeSubstack) handleArchive(w http.ResponseWriter, r *http.Request) {
 
 func (f *fakeSubstack) handlePost(w http.ResponseWriter, r *http.Request) {
 	slug := strings.TrimPrefix(r.URL.Path, "/api/v1/posts/")
+	authenticated := r.Header.Get("Cookie") != ""
 
 	f.mu.Lock()
 	f.requestedPaths = append(f.requestedPaths, r.URL.RequestURI())
@@ -231,6 +354,15 @@ func (f *fakeSubstack) handlePost(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		http.NotFound(w, r)
 		return
+	}
+
+	// A real Substack server serves less content to an unauthenticated
+	// request for a paid post — that differential is exactly what
+	// verifySession's canary depends on. PreviewBodyHTML models that; left
+	// empty (the ordinary case for a free post fixture), BodyHTML is served
+	// either way, matching a real free post's own behaviour.
+	if !authenticated && post.PreviewBodyHTML != "" {
+		post.BodyHTML = post.PreviewBodyHTML
 	}
 	json.NewEncoder(w).Encode(post)
 }

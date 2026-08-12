@@ -11,7 +11,9 @@ import (
 // testSessionID is deliberately distinctive — unlikely to appear anywhere
 // by coincidence — so grepping for it in log output, error strings, or a
 // %v dump is a meaningful test rather than a search for a common substring.
-const testSessionID = "sEcReT-sess10n-c00k1e-do-not-leak-me"
+// Carries the "s%3A" prefix New now requires (see validSessionIDPrefix in
+// session.go), so it stays usable as a real Config.SessionID value.
+const testSessionID = "s%3AsEcReT-sess10n-c00k1e-do-not-leak-me.sig"
 
 // TestConfigStringRedactsSessionID pins Config.String(): the whole reason it
 // exists is so an accidental %v of a Config never shows the cookie.
@@ -49,28 +51,18 @@ func TestNewErrorsDoNotLeakSessionID(t *testing.T) {
 	}
 }
 
-// TestIngestNeverLeaksSessionID runs a full Ingest — including the abort
-// path, which builds its own error message, and a fetch failure, which logs
-// a warning — and checks the session cookie appears nowhere in the log
-// output, the returned error, or a %+v dump of the Result. This is the
-// single most important test in this package per the brief it was built
-// from: the cookie is the entire credential this package holds, and a leak
-// anywhere here is a real secret ending up in a log file or an error
-// surfaced to a UI.
-func TestIngestNeverLeaksSessionID(t *testing.T) {
+// TestIngestNeverLeaksSessionIDOnVerificationFailure runs a full Ingest
+// whose session canary fails — the error path that builds its own message
+// out of byte counts and a slug, the likeliest place a careless future edit
+// would accidentally interpolate more than that — and checks the session
+// cookie appears nowhere in the log output, the returned error, or a %+v
+// dump of the Result.
+func TestIngestNeverLeaksSessionIDOnVerificationFailure(t *testing.T) {
 	fake := newFakeSubstack(t)
-
-	var archive []archiveFixture
-	for id := 1; id <= 4; id++ {
-		slug := fmt.Sprintf("paid-%d", id)
-		archive = append(archive, newArchiveFixture(id, slug, "newsletter", "only_paid"))
-		fake.posts[slug] = newPaywalledPostFixture(id, slug)
+	fake.archivePages[0] = []archiveFixture{
+		newArchiveFixture(1, "lapsed-probe", "newsletter", "only_paid"),
 	}
-	// One slug that fails outright, to exercise the "skipping a post after
-	// its fetch failed" log line and its Result.Warnings entry too.
-	archive = append(archive, newArchiveFixture(5, "will-500", "newsletter", "only_paid"))
-	fake.postStatus["will-500"] = []int{http.StatusInternalServerError, http.StatusInternalServerError, http.StatusInternalServerError}
-	fake.archivePages[0] = archive
+	fake.posts["lapsed-probe"] = newLapsedPaidPostFixture(1, "lapsed-probe")
 
 	importer := newTestImporter(t, fake.Server, func(cfg *Config) {
 		cfg.SessionID = testSessionID
@@ -80,11 +72,58 @@ func TestIngestNeverLeaksSessionID(t *testing.T) {
 	logger := testLogger(&logBuf)
 
 	_, result, err := importer.Ingest(context.Background(), logger)
-	// An error is expected here (the paywall abort); what matters is that
-	// nothing anywhere along the way carried the cookie.
+	if err == nil {
+		t.Fatal("expected a session verification error")
+	}
 
-	if strings.Contains(logBuf.String(), testSessionID) {
-		t.Errorf("log output leaked SessionID:\n%s", logBuf.String())
+	assertNoSessionIDLeak(t, logBuf.String(), err, result, fake)
+}
+
+// TestIngestNeverLeaksSessionIDOnFetchFailure covers the other route a
+// cookie could leak through: a per-post fetch failure, which logs its own
+// "skipping a post" warning and records the error text in Result.Warnings.
+// Session verification succeeds first here, so the run reaches the per-post
+// loop at all.
+func TestIngestNeverLeaksSessionIDOnFetchFailure(t *testing.T) {
+	fake := newFakeSubstack(t)
+	fake.archivePages[0] = []archiveFixture{
+		newArchiveFixture(1, "canary-target", "newsletter", "only_paid"),
+		newArchiveFixture(2, "will-500", "newsletter", "everyone"),
+	}
+	fake.posts["canary-target"] = newWorkingPaidPostFixture(1, "canary-target")
+	fake.postStatus["will-500"] = []int{
+		http.StatusInternalServerError,
+		http.StatusInternalServerError,
+		http.StatusInternalServerError,
+	}
+
+	importer := newTestImporter(t, fake.Server, func(cfg *Config) {
+		cfg.SessionID = testSessionID
+	})
+
+	var logBuf strings.Builder
+	logger := testLogger(&logBuf)
+
+	_, result, err := importer.Ingest(context.Background(), logger)
+	if err != nil {
+		t.Fatalf("Ingest: %v (session verification should have succeeded here)", err)
+	}
+	if len(result.Warnings) == 0 {
+		t.Fatal("expected a warning recording will-500's fetch failure — the test setup itself is broken if there is none")
+	}
+
+	assertNoSessionIDLeak(t, logBuf.String(), err, result, fake)
+}
+
+// assertNoSessionIDLeak is the shared assertion behind both leak tests
+// above: the cookie must appear nowhere in increader's own log output,
+// error surfaces, or Result — but it must have appeared on the wire, or the
+// test setup itself proves nothing.
+func assertNoSessionIDLeak(t *testing.T, logOutput string, err error, result Result, fake *fakeSubstack) {
+	t.Helper()
+
+	if strings.Contains(logOutput, testSessionID) {
+		t.Errorf("log output leaked SessionID:\n%s", logOutput)
 	}
 	if err != nil && strings.Contains(err.Error(), testSessionID) {
 		t.Errorf("Ingest error leaked SessionID: %q", err.Error())
@@ -101,8 +140,8 @@ func TestIngestNeverLeaksSessionID(t *testing.T) {
 
 	// The fake server itself received the cookie, of course — that is the
 	// entire point of sending it. This is not a contradiction: the boundary
-	// this test cares about is increader's own logs and error surfaces, not
-	// the wire, where the cookie has to travel to be useful at all.
+	// these tests care about is increader's own logs and error surfaces,
+	// not the wire, where the cookie has to travel to be useful at all.
 	sawCookie := false
 	for _, cookie := range fake.sessionCookies {
 		if strings.Contains(cookie, testSessionID) {

@@ -9,6 +9,15 @@ import (
 // important, what it must leave completely untouched — the negative cases
 // are the ones a naive implementation gets wrong, by over-matching into
 // content that merely resembles chrome.
+//
+// The markup shapes here — subscribeComponentName,
+// subscribeWidgetClassPrefix, subscribeWidgetExactClass, and the
+// Image2ToDOM / PreformattedTextBlockToDOM / captioned-image-container /
+// image2 / image2-inset / restack-image / is-viewable-img names in the
+// negative cases — were confirmed against a live Substack API response on
+// 2026-08-12, not invented. See isSubscribeChrome's own doc comment in
+// clean.go for the fuller story of why an earlier, guessed version of these
+// fixtures ("subscribe-widget", "paywall", "post-ufi") was wrong.
 func TestCleanBody(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -17,28 +26,57 @@ func TestCleanBody(t *testing.T) {
 		wantNotIn []string // substrings that must not appear in the output
 	}{
 		{
-			name:      "strips a subscribe widget",
-			html:      `<p>Real article text.</p><div class="subscribe-widget"><a href="#">Subscribe now</a></div>`,
+			name: "strips a subscribe widget identified by data-component-name",
+			html: `<p>Real article text.</p>` +
+				`<div data-component-name="SubscribeWidgetToDOM">` +
+				`<p class="preamble">Get more from this publication</p>` +
+				`<input class="fake-input"><button class="fake-button">Subscribe</button>` +
+				`</div>`,
 			wantIn:    []string{"Real article text."},
-			wantNotIn: []string{"Subscribe now", "subscribe-widget"},
+			wantNotIn: []string{"SubscribeWidgetToDOM", "fake-button", "Get more from this publication"},
 		},
 		{
-			name:      "strips the like/comment/share row",
-			html:      `<p>Real article text.</p><div class="post-ufi"><button>Like</button><button>Comment</button><button>Share</button></div>`,
+			name: "strips subscribe chrome by the subscription-widget class family when the component attribute is absent",
+			html: `<p>Real article text.</p>` +
+				`<div class="subscription-widget-wrap-editor">` +
+				`<div class="subscription-widget">` +
+				`<p class="cta-caption">Subscribe</p>` +
+				`<input class="email-input">` +
+				`<button class="button primary">Subscribe now</button>` +
+				`</div></div>`,
 			wantIn:    []string{"Real article text."},
-			wantNotIn: []string{"post-ufi", "Comment</button>"},
+			wantNotIn: []string{"subscription-widget", "Subscribe now", "email-input"},
 		},
 		{
-			name:      "strips the paywall block",
-			html:      `<p>Teaser paragraph.</p><div class="paywall"><p>Subscribe to keep reading</p></div>`,
-			wantIn:    []string{"Teaser paragraph."},
-			wantNotIn: []string{"paywall", "Subscribe to keep reading"},
+			name:      "strips a show-subscribe element",
+			html:      `<p>Real article text.</p><div class="show-subscribe"><p>Subscribe to continue reading.</p></div>`,
+			wantIn:    []string{"Real article text."},
+			wantNotIn: []string{"show-subscribe", "Subscribe to continue reading."},
 		},
 		{
-			name: "a CDN image survives with its URL untouched",
-			html: `<p>Before.</p><img src="https://substackcdn.com/image/fetch/w_1456/example.jpeg" alt="a photo"><p>After.</p>`,
+			name: "an Image2ToDOM component and its image classes survive untouched",
+			html: `<p>Before.</p>` +
+				`<div data-component-name="Image2ToDOM" class="captioned-image-container">` +
+				`<figure class="image2 image2-inset">` +
+				`<img class="is-viewable-img restack-image" src="https://substackcdn.com/image/fetch/w_1456/example.jpeg" alt="a photo">` +
+				`<figcaption>A caption.</figcaption>` +
+				`</figure></div><p>After.</p>`,
 			wantIn: []string{
+				`data-component-name="Image2ToDOM"`,
+				`class="captioned-image-container"`,
+				`class="image2 image2-inset"`,
+				`class="is-viewable-img restack-image"`,
 				`src="https://substackcdn.com/image/fetch/w_1456/example.jpeg"`,
+				"A caption.", "Before.", "After.",
+			},
+		},
+		{
+			name: "a PreformattedTextBlockToDOM code block survives untouched",
+			html: `<p>Before.</p><pre data-component-name="PreformattedTextBlockToDOM" class="preformatted-block"><code>func main() {}</code></pre><p>After.</p>`,
+			wantIn: []string{
+				`data-component-name="PreformattedTextBlockToDOM"`,
+				`class="preformatted-block"`,
+				"func main() {}",
 				"Before.", "After.",
 			},
 		},
