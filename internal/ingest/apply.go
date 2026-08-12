@@ -18,6 +18,20 @@ type Remap struct{ Old, New string }
 type Applied struct {
 	Created, Updated, Reanchored, AnnotationFailures int
 
+	// Skipped counts annotations Apply deliberately left untouched because
+	// their Verdict was VerdictMissing — see applyExisting's own comment on
+	// why leaving them alone, ranges and all, is correct rather than merely
+	// convenient. Surfaced here, next to Reanchored, so the two numbers are
+	// visible side by side in the same summary: this field is what caught
+	// the 2026-08-12 production bug in the first place, where a run
+	// re-anchored 34 annotations against a plan that had classified only 32
+	// as VerdictUnique. A report that prints Reanchored without also
+	// printing how many were intentionally skipped gives the operator no
+	// way to notice that kind of mismatch for free; this field is that
+	// check, paid for once here rather than reconstructed by hand every time
+	// someone suspects Apply of doing more than the plan said.
+	Skipped int
+
 	// Remaps records, per wallabag entry id, every annotation re-anchor that
 	// succeeded on it. A map entry's mere presence — even with a nil or
 	// empty slice — is itself significant: it is Apply's record that this
@@ -62,13 +76,36 @@ type Applied struct {
 //     content write that failed has left the entry exactly as it was before
 //     this run; touching annotations on top of that would be building on
 //     content this run does not actually control.
-//  2. Each annotation whose Verdict is not VerdictAnchored, re-anchored via
-//     UpdateHighlightLocation. A single annotation failing logs and moves on
-//     to the next one — it never rolls the content write back, and it never
-//     aborts the rest of this entry's annotations either. The alternative,
-//     making one annotation's failure block the others, would turn "8 of 9
-//     annotations re-anchored, 1 network blip" into "0 of 9", for no benefit
-//     to anyone.
+//  2. Each annotation whose Verdict is VerdictUnique or VerdictAmbiguous,
+//     re-anchored via UpdateHighlightLocation. VerdictAnchored is skipped as
+//     pointless churn (see its own doc comment). VerdictMissing is skipped
+//     too, deliberately, and for a different reason:
+//
+//     A stale range after a content swap points into markup that no longer
+//     exists, so it is worthless either way — that is the argument for
+//     replacing it with an honestly empty one by re-anchoring anyway. But
+//     the ranges are the only durable record of a highlight's full text.
+//     wallabag truncates a stored quote past ~900 bytes (see truncateQuote
+//     in internal/wallabag/write.go), and recoverQuote / ResolveRange exist
+//     precisely to rebuild the full passage from the ranges when the quote
+//     alone is not enough. Re-anchoring a VerdictMissing annotation calls
+//     CreateHighlight with a quote that, by definition of this verdict,
+//     cannot be found in the new content — it comes back with ranges empty,
+//     silently wiping the one remaining copy of the highlight's full text
+//     for any annotation whose quote was also truncated. Confirmed live on
+//     2026-08-12: a backfill run classified 32 annotations VerdictUnique but
+//     re-anchored 34 — the extra two were VerdictMissing, and both came back
+//     with empty ranges (ids 92934 -> 99936 and 87497 -> 99959). Their quotes
+//     happened to be under the truncation limit, so nothing was actually
+//     lost that run, but the same bug against a missing-and-truncated
+//     annotation would be unrecoverable. report.go already tells the
+//     operator these must be "fixed by hand" — Apply re-anchoring them
+//     anyway would make that claim false. A single annotation failing to
+//     re-anchor logs and moves on to the next one — it never rolls the
+//     content write back, and it never aborts the rest of this entry's
+//     annotations either. The alternative, making one annotation's failure
+//     block the others, would turn "8 of 9 annotations re-anchored, 1
+//     network blip" into "0 of 9", for no benefit to anyone.
 //  3. Tags — only for an existing entry (ActionUpdate / ActionAnnotationsOnly).
 //     A brand-new entry's tags already went out with its NewEntry.Tags on
 //     create (see entryForm), but EntryUpdate carries no Tags field at all
@@ -187,6 +224,16 @@ func applyExisting(ctx context.Context, client *wallabag.Client, src *wallabag.S
 	entryID := strconv.Itoa(item.EntryID)
 	for _, ann := range item.Annotations {
 		if ann.Verdict == VerdictAnchored {
+			continue
+		}
+		if ann.Verdict == VerdictMissing {
+			// See Apply's own doc comment for why: re-anchoring a quote that
+			// is not in the new content at all can only come back with empty
+			// ranges, destroying the one durable copy of a highlight whose
+			// quote is also truncated. report.go promises these are left
+			// alone for the operator to fix by hand — this is what keeps
+			// that promise true.
+			applied.Skipped++
 			continue
 		}
 

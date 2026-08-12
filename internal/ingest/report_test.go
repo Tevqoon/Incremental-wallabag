@@ -114,6 +114,63 @@ func TestWriteReportNotesWhenAMatchDependedOnTrimming(t *testing.T) {
 	}
 }
 
+// TestWriteReportMissingSectionExplainsBothHalves pins the 2026-08-12 fix to
+// report.go: the missing-quotes section must say the annotation is left
+// completely untouched (Apply no longer re-anchors it), and must also warn
+// that its existing ranges now point into replaced content, so wallabag's
+// own reader may draw the highlight in the wrong place until it is fixed by
+// hand. Both halves matter — stating only "untouched" without the position
+// warning would hide the cost of that choice from the operator.
+func TestWriteReportMissingSectionExplainsBothHalves(t *testing.T) {
+	plan := Plan{Items: []Item{{
+		Post:    source.Document{URL: "https://example.substack.com/p/a-post"},
+		EntryID: 1,
+		Action:  ActionAnnotationsOnly,
+		Annotations: []AnnotationPlan{
+			{AnnotationID: 500, Quote: "a quote the author deleted", Verdict: VerdictMissing},
+		},
+	}}}
+
+	var buf bytes.Buffer
+	if err := WriteReport(&buf, plan, nil); err != nil {
+		t.Fatalf("WriteReport: %v", err)
+	}
+	report := strings.ToLower(buf.String())
+
+	if !strings.Contains(report, "untouched") {
+		t.Errorf("report does not say the missing annotation is left untouched:\n%s", buf.String())
+	}
+	if !strings.Contains(report, "wrong place") && !strings.Contains(report, "wrong position") {
+		t.Errorf("report does not warn that wallabag may draw the highlight in the wrong place:\n%s", buf.String())
+	}
+}
+
+// TestWriteReportShowsSkippedCount covers the Applied summary's new Skipped
+// field: the operator must be able to see, at a glance, how many
+// annotations Apply deliberately left alone versus how many it actually
+// re-anchored — the arithmetic check that caught the 2026-08-12 bug (34
+// re-anchored against a plan that only classified 32 as VerdictUnique) only
+// works if both numbers are printed.
+func TestWriteReportShowsSkippedCount(t *testing.T) {
+	plan := Plan{Items: []Item{
+		{Post: source.Document{URL: "https://example.substack.com/p/a-post"}, EntryID: 1, Action: ActionAnnotationsOnly},
+	}}
+	applied := &Applied{Reanchored: 2, Skipped: 1}
+
+	var buf bytes.Buffer
+	if err := WriteReport(&buf, plan, applied); err != nil {
+		t.Fatalf("WriteReport: %v", err)
+	}
+	report := buf.String()
+
+	if !strings.Contains(report, "skipped") {
+		t.Errorf("report does not print a skipped count:\n%s", report)
+	}
+	if !strings.Contains(report, "skipped (missing quote, left untouched): 1") {
+		t.Errorf("report does not show the skipped count of 1 on its own line:\n%s", report)
+	}
+}
+
 // errString is a trivial error for report tests that need one without
 // pulling in errors.New at every call site.
 type errString string
