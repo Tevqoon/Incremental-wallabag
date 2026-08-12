@@ -2067,6 +2067,56 @@ func TestSyncImportedHighlightsAreAnchoredOnOpen(t *testing.T) {
 	}
 }
 
+// TestManualExtractIsReanchoredAfterLosingItsPosition covers an extract made
+// by hand whose article body was replaced underneath it.
+//
+// A manual extract is normally left alone by this pass, and rightly so: it was
+// anchored from a live selection against the very text being rendered, which
+// beats anything re-derived from its quote. That reasoning stops applying the
+// moment it has no position left. internal/ingest replaces an entry's content
+// upstream and must clear these offsets, because they were measured against
+// the old body and would otherwise stay silently in bounds and mark the wrong
+// paragraph — so the cleared state is a real state, not a corrupt one.
+//
+// Skipping every non-imported child here meant such an extract was never
+// reconsidered: its text and schedule survived, but it could never render as a
+// mark again. That stranded 23 real extracts the first time a backfill ran.
+func TestManualExtractIsReanchoredAfterLosingItsPosition(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if _, err := db.CreateExtract(store.NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "quick brown",
+		ContentHTML: "<p>quick brown</p>", Origin: store.OriginManual,
+	}, time.Now()); err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+	// Exactly what a content replacement leaves behind.
+	if _, err := db.ClearExtractAnchors(1); err != nil {
+		t.Fatalf("ClearExtractAnchors: %v", err)
+	}
+
+	before, _ := db.ChildrenOf(1)
+	if len(before) != 1 || before[0].HasRange {
+		t.Fatalf("test premise is wrong: want 1 unanchored extract, got %d", len(before))
+	}
+
+	body := get(t, server, "/read/1").Body.String()
+
+	after, _ := db.ChildrenOf(1)
+	if len(after) != 1 {
+		t.Fatalf("opening the article changed the extract count: %d", len(after))
+	}
+	if !after[0].HasRange {
+		t.Error("a manual extract that lost its position was never re-anchored")
+	}
+	if after[0].Quote != before[0].Quote {
+		t.Errorf("re-anchoring rewrote the quote: %q -> %q", before[0].Quote, after[0].Quote)
+	}
+	if !strings.Contains(body, `<mark class="extract"`) {
+		t.Error("the re-anchored extract does not render as a mark")
+	}
+}
+
 // TestImportedHighlightSpanningParagraphsIsAnchored is the real bug: a
 // highlight of any real length very often covers more than one paragraph,
 // and ir.Locate used to search one block at a time — structurally unable to

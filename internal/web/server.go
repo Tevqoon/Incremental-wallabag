@@ -355,12 +355,31 @@ func (s *Server) anchorHighlights(document store.Document, element store.Element
 		return err
 	}
 
+	// A manually made extract is normally left alone: it was anchored from a
+	// live selection at the moment it was created, against the very article
+	// text being rendered, which is a better position than re-deriving one
+	// from its quote could ever be. But that reasoning only holds while it
+	// still has a position. One that has lost its anchor has nothing left to
+	// protect, and re-locating it from its quote is the only way it ever
+	// renders as a mark again.
+	//
+	// That situation is not hypothetical: an importer that replaces an
+	// article's body upstream (see internal/ingest) must clear the offsets
+	// underneath it, because they were measured against the old text and
+	// would otherwise stay silently in bounds and highlight the wrong
+	// paragraph. Clearing them is correct; leaving them unrecoverable
+	// afterwards was not, and skipping every non-imported child here is what
+	// made 23 real extracts permanently detached the first time that ran.
 	var pending []store.Element
 	for _, child := range children {
-		if child.Origin != store.OriginImport {
-			continue
-		}
-		if !child.HasRange || child.Ranges != "" {
+		switch {
+		case child.Origin == store.OriginImport:
+			// Never anchored, or anchored but with a provider range that
+			// might still recover more text than the stored quote holds.
+			if !child.HasRange || child.Ranges != "" {
+				pending = append(pending, child)
+			}
+		case !child.HasRange:
 			pending = append(pending, child)
 		}
 	}
