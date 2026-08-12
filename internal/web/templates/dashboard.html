@@ -1,75 +1,98 @@
 {{define "content"}}
-<section class="queue">
+<section class="queue dash">
   <div class="queue-head">
     <h1>Dashboard</h1>
+    <span class="meta-inline">{{date .Today}}</span>
   </div>
 
+  <!-- Four figures, all about reading articles: what is waiting, what has
+       been done today, whether the habit is intact, and how the week compares
+       to the last one. Everything else on the page is context for these. -->
   <div class="tiles">
-    <div class="tile">
+    <a class="tile is-primary" href="/queue?kind=articles">
       <span class="tile-value">{{.Due}}</span>
-      <span class="tile-label">due today</span>
-    </div>
-    <div class="tile">
-      <span class="tile-value">{{.Total}}</span>
-      <span class="tile-label">elements total</span>
-    </div>
-    <div class="tile">
+      <span class="tile-label">due to read</span>
+    </a>
+    <a class="tile" href="/calendar/day/{{.TodayParam}}">
+      <span class="tile-value">{{.ReadToday}}</span>
+      <span class="tile-label">read today</span>
+      {{if .ExtractsToday}}
+        <span class="tile-note">{{.ExtractsToday}} extract{{if ne .ExtractsToday 1}}s{{end}} taken</span>
+      {{end}}
+    </a>
+    <a class="tile" href="/calendar">
+      <span class="tile-value">{{.WeekArticles}}</span>
+      <span class="tile-label">read this week</span>
+      <span class="tile-note">{{.Trend}}</span>
+    </a>
+    <span class="tile">
       <span class="tile-value">{{.Streak}}</span>
       <span class="tile-label">day streak</span>
-    </div>
-    <div class="tile">
-      <span class="tile-value">{{.WeekReviews}}</span>
-      <span class="tile-label">reviews this week</span>
-    </div>
-    <div class="tile">
-      <span class="tile-value">{{.WeekArticles}}</span>
-      <span class="tile-label">articles this week</span>
-    </div>
-    <div class="tile">
-      <span class="tile-value">{{.WeekWords}}</span>
-      <span class="tile-label">words extracted this week</span>
-    </div>
+    </span>
   </div>
 
-  {{if .Preview}}
-    <ol class="items">
-      {{range .Preview}}
-        <li class="item {{if .IsRoot}}is-article{{else}}is-extract{{end}}">
-          <a class="item-title" href="/read/{{.ID}}">
-            {{if .IsRoot}}
-              {{.DocumentTitle}}
-            {{else}}
-              {{.Title}}
-            {{end}}
-          </a>
-          <div class="item-meta">
-            <span class="badge">{{if .IsRoot}}article{{else}}extract{{end}}</span>
-            <span title="priority: lower is more important">p{{percent .Schedule.Priority}}</span>
-            {{if not .IsRoot}}<span class="source">from {{.DocumentTitle}}</span>{{end}}
-          </div>
-        </li>
-      {{end}}
-    </ol>
-    <p class="continue">
-      <a class="button primary" href="/next?kind=articles">Start reading</a>
-      <a class="button" href="/queue?kind=articles">Full queue ({{.Due}} due)</a>
-      {{if .ExtractsDue}}
-        <a class="button" href="/queue?kind=extracts">Extracts ({{.ExtractsDue}} due)</a>
-      {{end}}
-    </p>
-  {{else}}
-    <div class="empty">
-      <p>No articles are due today.</p>
-      {{if .ExtractsDue}}
-        <p class="meta">
-          <a href="/queue?kind=extracts">{{.ExtractsDue}} extracts are due</a>.
-        </p>
-      {{end}}
+  <section class="dash-section">
+    <div class="dash-section-head">
+      <h2>Next up</h2>
+      {{if .Due}}<a href="/queue?kind=articles">Full queue ({{.Due}})→</a>{{end}}
     </div>
-  {{end}}
+
+    {{if .Preview}}
+      <ol class="items">
+        {{range .Preview}}
+          <li class="item is-article">
+            <a class="item-title" href="/read/{{.ID}}">{{.DocumentTitle}}</a>
+            <div class="item-meta">
+              <span title="priority: lower is more important">p{{percent .Schedule.Priority}}</span>
+              {{if .ReadingTime}}<span title="estimated reading time">{{.ReadingTime}} min</span>{{end}}
+              {{if .DocumentAuthor}}<span>{{.DocumentAuthor}}</span>{{end}}
+              <span title="repetitions">×{{.Schedule.Reps}}</span>
+            </div>
+          </li>
+        {{end}}
+      </ol>
+      <p class="continue">
+        <a class="button primary" href="/next?kind=articles">Start reading</a>
+      </p>
+    {{else}}
+      <div class="empty">
+        <p>No articles are due today.</p>
+        <p class="meta">
+          New articles appear here as they sync from wallabag, and everything
+          you read comes back on its own schedule.
+          {{if .ExtractsDue}}
+            <a href="/queue?kind=extracts">{{.ExtractsDue}} extract{{if ne .ExtractsDue 1}}s are{{end}} due</a>.
+          {{end}}
+        </p>
+      </div>
+    {{end}}
+  </section>
 
   <section class="dash-section">
-    <h2>Backlog</h2>
+    <div class="dash-section-head">
+      <h2>Articles read, by week</h2>
+      <a href="/calendar">Calendar →</a>
+    </div>
+    <div class="weekbars">
+      {{range .Weeks}}
+        <span class="weekbar {{if .IsCurrent}}is-current{{end}}"
+              title="{{date .From}}–{{date .To}}: {{.Articles}} article{{if ne .Articles 1}}s{{end}}{{if .IsCurrent}} so far{{end}}">
+          <span style="height: {{.Percent}}%"></span>
+        </span>
+      {{end}}
+    </div>
+    <p class="meta weekbars-axis">
+      <span>{{date (index .Weeks 0).From}}</span>
+      <span>{{.WeeksTotal}} article{{if ne .WeeksTotal 1}}s{{end}} in 12 weeks</span>
+      <span>this week</span>
+    </p>
+  </section>
+
+  <section class="dash-section">
+    <div class="dash-section-head">
+      <h2>Article backlog</h2>
+      <a href="/library">Library ({{.Total}} elements) →</a>
+    </div>
     <ul class="breakdown">
       <li>
         <a href="/library?state=unread">
@@ -109,10 +132,6 @@
         </li>
       {{end}}
     </ul>
-  </section>
-
-  <section class="dash-section">
-    <h2>Composition</h2>
     {{if .Tags}}
       <nav class="filters tag-filters">
         {{range .Tags}}
@@ -120,49 +139,93 @@
         {{end}}
       </nav>
     {{end}}
-    {{if .ExtractsTotal}}
-      <ul class="breakdown">
-        <li>
-          <a href="/extracts?origin=manual">
-            <span class="breakdown-label">Manual extracts</span>
-            <span class="breakdown-track"><span style="width: {{pct .ManualExtracts .ExtractsTotal}}%"></span></span>
-            <span class="breakdown-count">{{.ManualExtracts}}</span>
-          </a>
-        </li>
-        <li>
-          <a href="/extracts?origin=import">
-            <span class="breakdown-label">Imported extracts</span>
-            <span class="breakdown-track"><span style="width: {{pct .ImportExtracts .ExtractsTotal}}%"></span></span>
-            <span class="breakdown-count">{{.ImportExtracts}}</span>
-          </a>
-        </li>
-      </ul>
-    {{end}}
-    {{if .Missing}}
-      <p class="meta"><span class="badge badge-danger">{{.Missing}} missing highlight{{if ne .Missing 1}}s{{end}}</span></p>
-    {{end}}
   </section>
 
-  <section class="dash-section">
-    <div class="dash-section-head">
-      <h2>Activity</h2>
-      <a href="/calendar">Full calendar →</a>
-    </div>
-    <div class="heatmap" title="last 12 weeks — click a day for what happened">
-      {{range .Heatmap}}
-        <a class="heatmap-cell" href="/calendar/day/{{isoDate .Date}}"
-           style="--level: {{level .Reviews .Extracts}}"
-           title="{{date .Date}}: {{.Reviews}} reviews, {{.Extracts}} extracts, {{.Articles}} article{{if ne .Articles 1}}s{{end}}, {{.Words}} word{{if ne .Words 1}}s{{end}}"></a>
-      {{end}}
-    </div>
-    <div class="weekbars">
-      {{range .Weeks}}
-        <span class="weekbar" title="{{date .From}}–{{date .To}}: {{.Reviews}} reviews, {{.Articles}} article{{if ne .Articles 1}}s{{end}}, {{.Words}} word{{if ne .Words 1}}s{{end}}">
-          <span style="height: {{.Percent}}%"></span>
+  <!-- Extracts get their own section, folded away: they are a second queue
+       with a second rhythm, and a reader opening the dashboard is nearly
+       always about to read rather than to audit what they have harvested.
+       The summary line stays honest while closed, so a growing extract
+       backlog is still visible from here without opening it — the one thing
+       separate queues cost that the old interleaved list gave away for free,
+       by putting extracts in front of you whether you asked or not. -->
+  <details class="dash-drawer"{{if .ExtractsDue}} open{{end}}>
+    <summary>
+      <span class="drawer-title">Extracts</span>
+      <span class="drawer-summary">
+        {{if .ExtractsDue}}{{.ExtractsDue}} due{{else}}none due{{end}}
+        {{if .ExtractsTotal}} · {{.ExtractsTotal}} total{{end}}
+        {{if .Missing}} · {{.Missing}} missing{{end}}
+      </span>
+    </summary>
+
+    <div class="drawer-body">
+      <div class="tiles">
+        <a class="tile" href="/queue?kind=extracts">
+          <span class="tile-value">{{.ExtractsDue}}</span>
+          <span class="tile-label">due to review</span>
+        </a>
+        <span class="tile">
+          <span class="tile-value">{{.WeekExtracts}}</span>
+          <span class="tile-label">taken this week</span>
+          {{if .WeekWords}}<span class="tile-note">{{.WeekWords}} words</span>{{end}}
         </span>
+        <a class="tile" href="/extracts">
+          <span class="tile-value">{{.ExtractsTotal}}</span>
+          <span class="tile-label">extracts in all</span>
+        </a>
+      </div>
+
+      {{if .ExtractPreview}}
+        <ol class="items">
+          {{range .ExtractPreview}}
+            <li class="item is-extract">
+              <a class="item-title" href="/read/{{.ID}}">{{if .Title}}{{.Title}}{{else}}{{.Quote}}{{end}}</a>
+              <div class="item-meta">
+                {{if eq .Kind "item"}}<span class="badge badge-item">cloze</span>{{end}}
+                <span title="priority: lower is more important">p{{percent .Schedule.Priority}}</span>
+                <span class="source">from {{.DocumentTitle}}</span>
+              </div>
+            </li>
+          {{end}}
+        </ol>
+        <p class="continue">
+          <a class="button" href="/next?kind=extracts">Start reviewing</a>
+          <a class="button" href="/queue?kind=extracts">Extract queue ({{.ExtractsDue}})</a>
+        </p>
+      {{else}}
+        <p class="meta">
+          Nothing to review today. Passages you take while reading come back on
+          their own schedule, as do highlights imported from wallabag and from
+          uploaded books.
+        </p>
+      {{end}}
+
+      {{if .ExtractsTotal}}
+        <ul class="breakdown">
+          <li>
+            <a href="/extracts?origin=manual">
+              <span class="breakdown-label">Taken while reading</span>
+              <span class="breakdown-track"><span style="width: {{pct .ManualExtracts .ExtractsTotal}}%"></span></span>
+              <span class="breakdown-count">{{.ManualExtracts}}</span>
+            </a>
+          </li>
+          <li>
+            <a href="/extracts?origin=import">
+              <span class="breakdown-label">Imported</span>
+              <span class="breakdown-track"><span style="width: {{pct .ImportExtracts .ExtractsTotal}}%"></span></span>
+              <span class="breakdown-count">{{.ImportExtracts}}</span>
+            </a>
+          </li>
+        </ul>
+      {{end}}
+      {{if .Missing}}
+        <p class="meta">
+          <span class="badge badge-danger">{{.Missing}} missing highlight{{if ne .Missing 1}}s{{end}}</span>
+          no longer present upstream, kept here rather than removed
+        </p>
       {{end}}
     </div>
-  </section>
+  </details>
 
   {{if or .PendingWrites .AbandonedWrites}}
     <p class="meta">

@@ -96,8 +96,9 @@ func TestDashboardShowsStreakAfterGrading(t *testing.T) {
 }
 
 // TestDashboardShowsWeeklyArticlesAndWords exercises the write path for the
-// two new activity tiles: finishing an article and harvesting an extract
-// should both show up in "this week"'s article and word counts.
+// week's headline tiles: finishing an article shows up as read today and
+// read this week, and the extract taken alongside it shows up in the
+// extracts drawer's own word count.
 func TestDashboardShowsWeeklyArticlesAndWords(t *testing.T) {
 	server, _, _ := newTestServer(t, true)
 
@@ -110,13 +111,16 @@ func TestDashboardShowsWeeklyArticlesAndWords(t *testing.T) {
 	}
 
 	body := get(t, server, "/").Body.String()
-	if !strings.Contains(body, "articles this week") {
-		t.Errorf("dashboard is missing the articles-this-week tile:\n%s", body)
+	if !strings.Contains(body, "read today") {
+		t.Errorf("dashboard is missing the read-today tile:\n%s", body)
 	}
-	if !strings.Contains(body, "words extracted this week") {
-		t.Errorf("dashboard is missing the words-this-week tile:\n%s", body)
+	if !strings.Contains(body, "read this week") {
+		t.Errorf("dashboard is missing the read-this-week tile:\n%s", body)
 	}
-	if !strings.Contains(body, `class="tile-value">2<`) {
+	if !strings.Contains(body, `class="tile-value">1<`) {
+		t.Errorf("dashboard does not show 1 article read:\n%s", body)
+	}
+	if !strings.Contains(body, "2 words") {
 		t.Errorf("dashboard does not show 2 words extracted (\"quick brown\"):\n%s", body)
 	}
 }

@@ -204,6 +204,206 @@ func TestActivityHeatmapBucketsByDay(t *testing.T) {
 	}
 }
 
+// TestActivityCountsArticlesApartFromExtracts is the distinction the calendar
+// is built on: "articles read" means a document whose root topic was reviewed.
+// Reviewing an extract is real work and is counted — as an extract review, in
+// its own column. Folding it into the article count (which counting every
+// review's document_id does, since an extract carries its parent's) would
+// report an article as read on a day it was never opened.
+func TestActivityCountsArticlesApartFromExtracts(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+	today := ir.Day(now)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "1", Title: "Article", UpdatedAt: now},
+	}, 0, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+	extractID, err := db.CreateExtract(NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "a passage", ContentHTML: "<p>a passage</p>",
+		Origin: OriginImport, ExternalRef: "1", // imported: not activity of its own
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+
+	// Only the extract is reviewed today; the article itself is never opened.
+	if err := db.SaveScheduleReviewed(extractID, ir.Schedule{State: ir.StateReading}, now); err != nil {
+		t.Fatalf("SaveScheduleReviewed: %v", err)
+	}
+
+	heatmap, err := db.ActivityHeatmap(today, today)
+	if err != nil {
+		t.Fatalf("ActivityHeatmap: %v", err)
+	}
+	day := heatmap[0]
+	if day.Articles != 0 {
+		t.Errorf("articles read = %d, want 0 — only an extract was reviewed", day.Articles)
+	}
+	if day.Reviews != 0 {
+		t.Errorf("article reviews = %d, want 0", day.Reviews)
+	}
+	if day.ExtractReviews != 1 {
+		t.Errorf("extract reviews = %d, want 1", day.ExtractReviews)
+	}
+
+	// Now read the article itself, to the end.
+	if err := db.SaveScheduleReviewed(1, ir.Schedule{State: ir.StateDone}, now); err != nil {
+		t.Fatalf("SaveScheduleReviewed (article): %v", err)
+	}
+	heatmap, err = db.ActivityHeatmap(today, today)
+	if err != nil {
+		t.Fatalf("ActivityHeatmap: %v", err)
+	}
+	day = heatmap[0]
+	if day.Articles != 1 || day.Reviews != 1 {
+		t.Errorf("articles = %d, reviews = %d; want 1 and 1", day.Articles, day.Reviews)
+	}
+	if day.Finished != 1 {
+		t.Errorf("finished = %d, want 1 — the review landed on done", day.Finished)
+	}
+	if day.ExtractReviews != 1 {
+		t.Errorf("extract reviews = %d, want 1 still", day.ExtractReviews)
+	}
+}
+
+// TestActivityBetweenCountsArticlesOnceAcrossTheRange is the difference
+// between a range rollup and adding up its days: an article read on two days
+// is one article this week, and a caller summing DayCounts would say two.
+func TestActivityBetweenCountsArticlesOnceAcrossTheRange(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+	today := ir.Day(now)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "1", Title: "One", UpdatedAt: now},
+		{ExternalID: "2", Title: "Two", UpdatedAt: now},
+	}, 0, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	// Article 1 read on two different days, article 2 on one of them.
+	if err := db.SaveScheduleReviewed(1, ir.Schedule{State: ir.StateReading}, now.AddDate(0, 0, -2)); err != nil {
+		t.Fatalf("SaveScheduleReviewed: %v", err)
+	}
+	if err := db.SaveScheduleReviewed(1, ir.Schedule{State: ir.StateDone}, now); err != nil {
+		t.Fatalf("SaveScheduleReviewed: %v", err)
+	}
+	if err := db.SaveScheduleReviewed(2, ir.Schedule{State: ir.StateReading}, now); err != nil {
+		t.Fatalf("SaveScheduleReviewed: %v", err)
+	}
+
+	rollup, err := db.ActivityBetween(today.AddDate(0, 0, -6), today)
+	if err != nil {
+		t.Fatalf("ActivityBetween: %v", err)
+	}
+	if rollup.Articles != 2 {
+		t.Errorf("articles = %d, want 2 distinct across the range", rollup.Articles)
+	}
+	if rollup.Reviews != 3 {
+		t.Errorf("reviews = %d, want 3 grading passes", rollup.Reviews)
+	}
+	if rollup.Finished != 1 {
+		t.Errorf("finished = %d, want 1", rollup.Finished)
+	}
+	if rollup.ActiveDays != 2 {
+		t.Errorf("active days = %d, want 2", rollup.ActiveDays)
+	}
+
+	empty, err := db.ActivityBetween(today.AddDate(0, 0, -60), today.AddDate(0, 0, -30))
+	if err != nil {
+		t.Fatalf("ActivityBetween (quiet range): %v", err)
+	}
+	if empty != (Rollup{}) {
+		t.Errorf("quiet range = %+v, want a zero rollup", empty)
+	}
+}
+
+// TestActivityByMonthZeroFills covers the calendar's month strip: every month
+// in the range gets a column, and a month's article count is distinct within
+// that month.
+func TestActivityByMonthZeroFills(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "1", Title: "One", UpdatedAt: now},
+	}, 0, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+	// Twice in the same month, on two different days.
+	firstOfMonth := time.Date(now.Year(), now.Month(), 1, 12, 0, 0, 0, time.Local)
+	if err := db.SaveScheduleReviewed(1, ir.Schedule{State: ir.StateReading}, firstOfMonth); err != nil {
+		t.Fatalf("SaveScheduleReviewed: %v", err)
+	}
+	if err := db.SaveScheduleReviewed(1, ir.Schedule{State: ir.StateReading}, firstOfMonth.AddDate(0, 0, 1)); err != nil {
+		t.Fatalf("SaveScheduleReviewed: %v", err)
+	}
+
+	// To the last day of the current month, so both reviews are in range
+	// however early in the month the test happens to run.
+	months, err := db.ActivityByMonth(firstOfMonth.AddDate(0, -3, 0), firstOfMonth.AddDate(0, 1, -1))
+	if err != nil {
+		t.Fatalf("ActivityByMonth: %v", err)
+	}
+	if len(months) != 4 {
+		t.Fatalf("got %d months, want 4 (three back, inclusive of both ends)", len(months))
+	}
+	if months[0].Articles != 0 {
+		t.Errorf("a month with nothing logged = %+v, want zeroes", months[0])
+	}
+	current := months[len(months)-1]
+	if current.Articles != 1 {
+		t.Errorf("articles this month = %d, want 1 — the same article on two days", current.Articles)
+	}
+	if current.Reviews != 2 {
+		t.Errorf("reviews this month = %d, want 2", current.Reviews)
+	}
+	if current.ActiveDays != 2 {
+		t.Errorf("active days this month = %d, want 2", current.ActiveDays)
+	}
+}
+
+// TestArticlesReadBetweenReturnsDayArticlePairs covers the shape the
+// dashboard buckets into weeks: one row per article per day it was read,
+// however many times it was graded that day.
+func TestArticlesReadBetweenReturnsDayArticlePairs(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+	today := ir.Day(now)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "1", Title: "One", UpdatedAt: now},
+	}, 0, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+	// Two grading passes on the same article today, plus one yesterday.
+	if err := db.SaveScheduleReviewed(1, ir.Schedule{State: ir.StateReading}, now); err != nil {
+		t.Fatalf("SaveScheduleReviewed: %v", err)
+	}
+	if err := db.SaveScheduleReviewed(1, ir.Schedule{State: ir.StateReading}, now); err != nil {
+		t.Fatalf("SaveScheduleReviewed: %v", err)
+	}
+	if err := db.SaveScheduleReviewed(1, ir.Schedule{State: ir.StateReading}, now.AddDate(0, 0, -1)); err != nil {
+		t.Fatalf("SaveScheduleReviewed: %v", err)
+	}
+
+	reads, err := db.ArticlesReadBetween(today.AddDate(0, 0, -6), today)
+	if err != nil {
+		t.Fatalf("ArticlesReadBetween: %v", err)
+	}
+	if len(reads) != 2 {
+		t.Fatalf("got %d rows, want 2 (one per day the article was read)", len(reads))
+	}
+	if !reads[0].Day.Equal(today.AddDate(0, 0, -1)) || !reads[1].Day.Equal(today) {
+		t.Errorf("rows = %+v, want yesterday then today", reads)
+	}
+	if reads[0].DocumentID != 1 || reads[1].DocumentID != 1 {
+		t.Errorf("rows = %+v, want both against document 1", reads)
+	}
+}
+
 // TestActivityOnListsTheDaysEvents covers the calendar's day view: both
 // kinds of event, joined with the document they belong to, in the order
 // they actually happened.

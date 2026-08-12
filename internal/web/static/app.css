@@ -191,6 +191,7 @@ h1 { font-size: 1.5rem; line-height: 1.25; margin: 0 0 0.35rem; }
 }
 .badge-item { border-color: var(--accent); color: var(--accent); }
 .badge-danger { border-color: var(--danger); color: var(--danger); }
+.badge-done { border-color: var(--accent); color: var(--accent); }
 
 .source { font-style: italic; }
 
@@ -729,27 +730,53 @@ button.link-danger:hover { color: var(--danger); }
 
 /* ---- Dashboard --------------------------------------------------------- */
 
+/* A grid rather than a wrapping flex row: four tiles of equal width read as
+   one row of figures, where flex sizes each to its own label and turns them
+   into a ragged strip of unrelated boxes. */
 .tiles {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.75rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(7.5rem, 1fr));
+  gap: 0.6rem;
   margin: 0 0 2rem;
 }
 
 .tile {
   border: 1px solid var(--rule);
   border-radius: 3px;
-  padding: 0.75rem 1rem;
+  padding: 0.75rem 0.9rem;
   display: flex;
   flex-direction: column;
   gap: 0.2rem;
-  min-width: 6rem;
+  color: inherit;
+  text-decoration: none;
 }
-.tile-value { font: 600 1.5rem/1 system-ui, sans-serif; }
+a.tile:hover { border-color: var(--accent); }
+a.tile:hover .tile-value { color: var(--accent); }
+
+/* The one figure the page is about — the queue on the dashboard, the month's
+   articles on the calendar. */
+.tile.is-primary { border-color: var(--accent); }
+.tile.is-primary .tile-value { color: var(--accent); }
+
+.tile-value { font: 600 1.5rem/1 system-ui, sans-serif; font-variant-numeric: tabular-nums; }
 .tile-label {
   font: 0.68rem/1 system-ui, sans-serif;
   text-transform: uppercase;
   letter-spacing: 0.06em;
+  color: var(--muted);
+}
+/* A second line under the label: the comparison or breakdown that makes the
+   figure mean something ("3 more than last week"). */
+.tile-note {
+  font: 0.68rem/1.3 system-ui, sans-serif;
+  color: var(--muted);
+  opacity: 0.85;
+}
+
+/* A quiet label beside a heading, where a whole .meta paragraph would be too
+   much apparatus for three words. */
+.meta-inline {
+  font: 0.75rem/1 system-ui, sans-serif;
   color: var(--muted);
 }
 
@@ -804,33 +831,99 @@ button.link-danger:hover { color: var(--danger); }
   color: var(--muted);
 }
 
-/* Twelve weeks of daily activity, flowing row-major rather than aligned to
-   day-of-week — a calendar-accurate layout is not worth the complexity at
-   this scale, and the shape reads the same either way: darker means more. */
-.heatmap {
-  display: grid;
-  grid-template-columns: repeat(14, 1fr);
-  gap: 3px;
-  max-width: 20rem;
-  margin-bottom: 1.25rem;
+/* Articles read per week, twelve weeks, oldest at the left. The last bar is
+   the week in progress, marked so a half-height bar reads as "so far" rather
+   than as a bad week. */
+.weekbars {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.3rem;
+  height: 4rem;
 }
-.heatmap-cell {
+.weekbar { flex: 1; height: 100%; display: flex; align-items: flex-end; }
+.weekbar span {
   display: block;
-  aspect-ratio: 1;
-  border-radius: 2px;
-  border: 1px solid var(--rule);
-  /* --level (0..4) is set inline per cell by the "level" template func. */
-  background: color-mix(in srgb, var(--accent) calc(var(--level) * 20%), var(--bg));
+  width: 100%;
+  min-height: 2px;
+  background: color-mix(in srgb, var(--accent) 55%, var(--bg));
+  border-radius: 2px 2px 0 0;
 }
-.heatmap-cell:hover { border-color: var(--accent); }
+.weekbar:hover span { background: var(--accent); }
+.weekbar.is-current span { background: var(--accent); }
+
+.weekbars-axis {
+  justify-content: space-between;
+  margin-top: 0.5rem;
+}
+
+/* ---- Disclosure sections ------------------------------------------------
+   Extracts, on the dashboard and on a calendar day. Their own section rather
+   than mixed into the article list, and folded away rather than merely below
+   it: the summary line keeps a growing extract backlog visible while closed,
+   which is the whole job of the row when you are not looking at extracts. */
+
+.dash-drawer {
+  margin: 2.5rem 0;
+  border-top: 1px solid var(--rule);
+}
+.dash-drawer > summary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.9rem 0;
+  cursor: pointer;
+  /* Both spellings: the marker is a ::marker in Firefox and a
+     ::-webkit-details-marker in Safari, and the arrow below replaces it in
+     either case. */
+  list-style: none;
+}
+.dash-drawer > summary::-webkit-details-marker { display: none; }
+.dash-drawer > summary:hover .drawer-title { color: var(--accent); }
+
+.drawer-title {
+  font: 600 0.75rem/1 system-ui, sans-serif;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+.drawer-title::before { content: "▸ "; }
+.dash-drawer[open] > summary .drawer-title::before { content: "▾ "; }
+
+.drawer-summary {
+  font: 0.78rem/1 system-ui, sans-serif;
+  color: var(--muted);
+  text-align: right;
+}
+.drawer-body { padding-bottom: 1rem; }
+.drawer-heading {
+  font: 600 0.7rem/1 system-ui, sans-serif;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin: 1.75rem 0 0.7rem;
+}
 
 /* ---- Calendar ----------------------------------------------------------- */
+
+.cal-nav {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  margin: 0 0 1.25rem;
+  font-family: system-ui, sans-serif;
+  font-size: 0.85rem;
+}
+.cal-nav a { color: var(--muted); text-decoration: none; }
+.cal-nav a:hover { color: var(--accent); }
+.cal-nav strong { font-size: 1rem; }
+.cal-today { margin-left: auto; }
 
 .calendar-grid {
   display: grid;
   grid-template-columns: repeat(7, 1fr);
   gap: 3px;
-  margin: 1rem 0 2rem;
+  margin: 1rem 0 1.25rem;
 }
 .calendar-weekday {
   font: 600 0.65rem/1 system-ui, sans-serif;
@@ -840,45 +933,88 @@ button.link-danger:hover { color: var(--danger); }
   text-align: center;
   padding-bottom: 0.4rem;
 }
+
+/* One cell, one number: articles read that day. --level (0..4, see dayLevel)
+   is set inline and drives the shading, so the month reads as a pattern
+   before any individual number does. The mix tops out well short of solid so
+   the count stays legible against it in both themes. */
 .calendar-day {
+  position: relative;
   aspect-ratio: 1;
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 0.15rem;
   border: 1px solid var(--rule);
   border-radius: 3px;
   color: inherit;
   text-decoration: none;
-  font: 0.8rem/1 system-ui, sans-serif;
+  background: color-mix(in srgb, var(--accent) calc(var(--level) * 10%), var(--bg));
 }
 .calendar-day:hover { border-color: var(--accent); }
-.calendar-day.is-outside { color: var(--muted); opacity: 0.45; }
-.calendar-day.has-activity {
-  background: color-mix(in srgb, var(--accent) 12%, var(--bg));
-  border-color: var(--accent);
-}
+.calendar-day.is-outside { opacity: 0.5; }
+.calendar-day.is-future { opacity: 0.35; }
 .calendar-day.is-today { box-shadow: 0 0 0 2px var(--accent) inset; }
+
+.calendar-daynum {
+  position: absolute;
+  top: 0.2rem;
+  left: 0.3rem;
+  font: 0.6rem/1 system-ui, sans-serif;
+  color: var(--muted);
+}
 .calendar-count {
-  font: 600 0.65rem/1 system-ui, sans-serif;
-  color: var(--accent);
+  font: 600 1.05rem/1 system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+.calendar-count.is-quiet { color: var(--rule); font-weight: 400; }
+
+/* Extract work on a day that the count deliberately leaves out — a dot, not a
+   second number, so the cell keeps saying one thing. */
+.calendar-mark {
+  position: absolute;
+  bottom: 0.28rem;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--muted);
+  opacity: 0.7;
 }
 
-.weekbars {
+/* A year of months under the grid, so a month reads against the ones around
+   it. Each column navigates to that month. */
+.months {
   display: flex;
   align-items: flex-end;
-  gap: 0.3rem;
-  height: 3rem;
+  gap: 0.35rem;
 }
-.weekbar { flex: 1; height: 100%; display: flex; align-items: flex-end; }
-.weekbar span {
+.monthbar {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+  color: var(--muted);
+  text-decoration: none;
+  font: 0.62rem/1 system-ui, sans-serif;
+}
+.monthbar-track {
+  width: 100%;
+  height: 3.5rem;
+  display: flex;
+  align-items: flex-end;
+}
+.monthbar-track > span {
   display: block;
   width: 100%;
   min-height: 2px;
-  background: var(--accent);
+  background: color-mix(in srgb, var(--accent) 45%, var(--bg));
   border-radius: 2px 2px 0 0;
 }
+.monthbar-count { font-variant-numeric: tabular-nums; }
+.monthbar:hover { color: var(--fg); }
+.monthbar:hover .monthbar-track > span { background: var(--accent); }
+.monthbar.is-shown { color: var(--fg); font-weight: 600; }
+.monthbar.is-shown .monthbar-track > span { background: var(--accent); }
 
 /* ---- Import, contents and triage ---------------------------------------
    Three views that all deal with a work whose annotations arrived as a file
