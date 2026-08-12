@@ -236,6 +236,16 @@ func (i *Importer) getJSON(ctx context.Context, path string, out any) error {
 // wrong".
 var errUnauthorized = errors.New("substack: unauthorized")
 
+// errNotFound reports a 404 from Substack's own API, wrapped the same way
+// errUnauthorized is, for the same reason: a caller that needs to know
+// specifically "this was a 404" — verifySubscriptionState in session.go,
+// which cannot otherwise tell a dead session apart from a nonexistent
+// publication on the subscription endpoint (see
+// diagnoseSubscriptionFailure's own doc comment for the live finding
+// behind that) — checks for it with errors.Is instead of parsing
+// http.StatusText out of an error string.
+var errNotFound = errors.New("substack: not found")
+
 // fetchRaw performs one rate-limited, retrying GET and returns the response
 // body undecoded. getJSON (which decodes), post's own cache-writing path
 // (which needs the exact bytes Substack sent, not a re-encoded copy — see
@@ -250,12 +260,12 @@ var errUnauthorized = errors.New("substack: unauthorized")
 // the first of a batch and every retry — throttle enforces that across
 // every caller sharing this Importer, not per-call. On a 429 or 5xx it
 // retries with exponential backoff, up to MaxAttempts total attempts. A 401
-// is returned immediately as errUnauthorized, not retried — a rejected
-// cookie will not start working on a second attempt. Any other non-200
-// status (a 404 for a slug that no longer exists, say) is likewise not the
-// kind of transient failure a retry could fix, so it too is returned
-// immediately instead of burning through the retry budget on something that
-// will never succeed.
+// or 404 is returned immediately as errUnauthorized or errNotFound, not
+// retried — neither a rejected cookie nor a missing resource starts
+// working on a second attempt. Any other non-200 status is likewise not
+// the kind of transient failure a retry could fix, so it too is returned
+// immediately instead of burning through the retry budget on something
+// that will never succeed.
 func (i *Importer) fetchRaw(ctx context.Context, path string, withCookie bool) ([]byte, error) {
 	endpoint := "https://" + i.cfg.Host + path
 
@@ -274,6 +284,8 @@ func (i *Importer) fetchRaw(ctx context.Context, path string, withCookie bool) (
 			lastErr = fmt.Errorf("substack: GET %s: %s", path, http.StatusText(status))
 		case status == http.StatusUnauthorized:
 			return nil, fmt.Errorf("substack: GET %s: %w", path, errUnauthorized)
+		case status == http.StatusNotFound:
+			return nil, fmt.Errorf("substack: GET %s: %w", path, errNotFound)
 		case status != http.StatusOK:
 			return nil, fmt.Errorf("substack: GET %s: %s", path, http.StatusText(status))
 		default:
@@ -285,6 +297,36 @@ func (i *Importer) fetchRaw(ctx context.Context, path string, withCookie bool) (
 		}
 	}
 	return nil, fmt.Errorf("substack: GET %s failed after %d attempts: %w", path, i.cfg.MaxAttempts, lastErr)
+}
+
+// fetchOnce performs a single, non-retried GET against an arbitrary full
+// endpoint URL (unlike fetchRaw, which always targets Config.Host) and
+// classifies the result the same way fetchRaw does for a 401 — wrapping
+// errUnauthorized — but with no retry loop at all, even for a 429 or 5xx.
+//
+// This exists only for diagnoseSubscriptionFailure's disambiguating probe
+// in session.go, which is deliberately capped at exactly one extra request:
+// retrying it would contradict the reason it exists, "one extra request on
+// the error path, never more" — and it targets a fixed, publication-
+// independent host rather than Config.Host, which fetchRaw has no way to
+// do at all.
+func (i *Importer) fetchOnce(ctx context.Context, endpoint string, withCookie bool) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	i.throttle(ctx)
+
+	body, status, err := i.doRequest(ctx, endpoint, withCookie)
+	switch {
+	case err != nil:
+		return nil, err
+	case status == http.StatusUnauthorized:
+		return nil, fmt.Errorf("substack: GET %s: %w", endpoint, errUnauthorized)
+	case status != http.StatusOK:
+		return nil, fmt.Errorf("substack: GET %s: %s", endpoint, http.StatusText(status))
+	default:
+		return body, nil
+	}
 }
 
 // doRequest sends one GET and returns the response body alongside its

@@ -197,28 +197,75 @@ func TestIngestAbortsWhenSubscriptionIsFree(t *testing.T) {
 			t.Errorf("archive was requested (%s) despite stage 1 failing first", path)
 		}
 	}
+	if fake.settingsRequests != 0 {
+		t.Errorf("settings was requested %d times, want 0 — subscription succeeded (200), so there is nothing for diagnoseSubscriptionFailure to resolve", fake.settingsRequests)
+	}
 }
 
-// TestIngestAbortsWithDistinctErrorOn401 covers stage 1's other failure
-// mode: the cookie itself is rejected outright. This must produce a
-// different error from the "no paid access" case — the two point the
-// operator at different fixes (refresh the cookie vs. actually subscribe).
-func TestIngestAbortsWithDistinctErrorOn401(t *testing.T) {
-	fake := newFakeSubstack(t)
-	fake.subscriptionStatus = http.StatusUnauthorized
-
-	importer := newTestImporter(t, fake.Server, nil)
-	logger := testLogger(&strings.Builder{})
-
-	_, _, err := importer.Ingest(context.Background(), logger)
-	if err == nil {
-		t.Fatal("expected an error")
+// TestIngestDisambiguatesSubscription404 is the table behind the bug this
+// was built to fix: /api/v1/subscription answers 404 both when the session
+// is dead and when Host names no real publication — confirmed live,
+// unable to tell those apart on its own — so diagnoseSubscriptionFailure's
+// second probe against /api/v1/settings is what actually decides, and each
+// of its three possible outcomes must produce a distinguishably different
+// error. Asserting on the returned error's exact text, not just that an
+// error occurred, is the entire point: three cases that all just said
+// "subscription check failed" would be exactly the regression this guards
+// against.
+func TestIngestDisambiguatesSubscription404(t *testing.T) {
+	tests := []struct {
+		name           string
+		settingsStatus int
+		wantContains   []string
+		wantNotContain []string
+	}{
+		{
+			name:           "settings 401: the cookie itself is dead",
+			settingsStatus: http.StatusUnauthorized,
+			wantContains:   []string{"dead or expired", "401"},
+			wantNotContain: []string{"does not appear to be a real Substack publication", "neither of the two known cases"},
+		},
+		{
+			name:           "settings 200: the cookie works, so Host must be wrong",
+			settingsStatus: http.StatusOK,
+			wantContains:   []string{"does not appear to be a real Substack publication", "Host must be"},
+			wantNotContain: []string{"dead or expired", "neither of the two known cases"},
+		},
+		{
+			name:           "settings 500: neither known case, report both failures rather than guess",
+			settingsStatus: http.StatusInternalServerError,
+			wantContains:   []string{"neither of the two known cases", "subscription check:", "settings probe:"},
+			wantNotContain: []string{"dead or expired", "does not appear to be a real Substack publication"},
+		},
 	}
-	if !strings.Contains(err.Error(), "dead or malformed") {
-		t.Errorf("error = %q, want it to say the cookie is dead or malformed", err.Error())
-	}
-	if strings.Contains(err.Error(), "no paid access") {
-		t.Errorf("error = %q, must not be conflated with the 'no paid access' diagnosis", err.Error())
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake := newFakeSubstack(t)
+			fake.subscriptionStatus = http.StatusNotFound
+			fake.settingsStatus = test.settingsStatus
+
+			importer := newTestImporter(t, fake.Server, nil)
+			logger := testLogger(&strings.Builder{})
+
+			_, _, err := importer.Ingest(context.Background(), logger)
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			for _, want := range test.wantContains {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %q, want it to contain %q", err.Error(), want)
+				}
+			}
+			for _, notWant := range test.wantNotContain {
+				if strings.Contains(err.Error(), notWant) {
+					t.Errorf("error = %q, must not contain %q (that belongs to a different one of the three cases)", err.Error(), notWant)
+				}
+			}
+			if fake.settingsRequests != 1 {
+				t.Errorf("settings was requested %d times, want exactly 1", fake.settingsRequests)
+			}
+		})
 	}
 }
 
@@ -250,6 +297,9 @@ func TestIngestProceedsOnUnrecognisedMembershipState(t *testing.T) {
 	}
 	if len(documents) != 1 {
 		t.Errorf("len(documents) = %d, want 1", len(documents))
+	}
+	if fake.settingsRequests != 0 {
+		t.Errorf("settings was requested %d times on a successful run, want 0 — the disambiguating probe must cost nothing when there is nothing to disambiguate", fake.settingsRequests)
 	}
 }
 

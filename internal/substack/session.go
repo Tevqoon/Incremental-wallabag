@@ -144,6 +144,84 @@ func (s subscriptionState) expiresWithin(now time.Time, window time.Duration) (t
 	return time.Time{}, false
 }
 
+// diagnosisHost is a fixed, publication-independent host used only by
+// diagnoseSubscriptionFailure's disambiguating probe. See that function's
+// own doc comment for why a fixed host, rather than Config.Host, is the
+// entire point.
+//
+// Read through Importer.settingsHost rather than referenced directly by
+// diagnoseSubscriptionFailure below: New sets settingsHost to this value
+// for every real caller, and that extra layer of indirection exists
+// purely so a test in this package can redirect the probe at a fake
+// server — the real substack.com obviously cannot itself be that fake
+// server.
+const diagnosisHost = "substack.com"
+
+// diagnoseSubscriptionFailure runs when GET .../api/v1/subscription came
+// back 401 or 404, resolving what that status alone cannot say.
+//
+// Confirmed live on 2026-08-12, directly against the API, not assumed:
+//
+//	request                                                        bogus session   valid session
+//	GET https://substack.com/api/v1/settings                       401             200
+//	GET https://{host}/api/v1/subscription                         404             200
+//	GET https://nosuchpub-xyz99.substack.com/api/v1/subscription   404             —
+//
+// /api/v1/subscription is scoped to one publication (it lives under Host),
+// so a 404 from it is genuinely ambiguous: it is the same status Substack
+// returns both when the session cookie is dead and when Host simply does
+// not name a real publication. There is no way to tell those two apart
+// from that response alone — the whole reason this function exists.
+//
+// /api/v1/settings, by contrast, names no publication in its path at all —
+// it is fixed at diagnosisHost regardless of what Config.Host is. A
+// working cookie gets 200 from it no matter which publication (if any)
+// Host names; a dead one gets 401 no matter what. That host-independence
+// is what makes it authoritative about the cookie alone, where
+// /api/v1/subscription cannot be.
+//
+// This second request is made only here, on the error path — never from a
+// successful call to verifySubscriptionState — so a normal run still costs
+// exactly one stage-1 request; see fetchOnce in post.go, which this uses
+// specifically because it does not retry, keeping this to exactly one
+// extra request even on a 5xx.
+//
+// Do not simplify this back to trusting /api/v1/subscription's status
+// alone: that is precisely the shape that produced the bug this exists to
+// fix — an operator with a perfectly good cookie and a mistyped Host
+// seeing the exact same opaque 404 as one with a dead cookie, with no way
+// to tell which problem they actually have.
+func (i *Importer) diagnoseSubscriptionFailure(ctx context.Context, subscriptionErr error) error {
+	endpoint := "https://" + i.settingsHost + "/api/v1/settings"
+	_, err := i.fetchOnce(ctx, endpoint, true)
+
+	switch {
+	case err == nil:
+		// settings succeeded — the cookie is fine — so subscription's own
+		// failure must be about Host, not the session.
+		return fmt.Errorf(
+			"substack: %q does not appear to be a real Substack publication — the session cookie itself is valid (confirmed against %s), but the subscription check for %q found nothing there; Host must be the publication's own domain, e.g. \"example.substack.com\", or its mapped custom domain, not a guess",
+			i.cfg.Host, i.settingsHost, i.cfg.Host,
+		)
+	case errors.Is(err, errUnauthorized):
+		return fmt.Errorf(
+			"substack: the session cookie was rejected (401 from %s) — it is dead or expired; re-export the substack.sid cookie value from a browser signed in to a paid Substack account and try again",
+			i.settingsHost,
+		)
+	default:
+		// Neither of the two known cases: settings itself returned
+		// something other than 200 or 401 (a 5xx, say), or the probe
+		// failed outright (a network error). Reporting both failures
+		// verbatim, rather than guessing which of the two known causes
+		// this resembles more, is deliberate — a wrong guess here would
+		// send the operator chasing the wrong fix.
+		return fmt.Errorf(
+			"substack: could not determine why checking subscription state for %s failed — subscription check: %v; disambiguating settings probe: %v — this is neither of the two known cases (dead cookie, unknown publication), so nothing more specific can be said; try again",
+			i.cfg.Host, subscriptionErr, err,
+		)
+	}
+}
+
 // verifySubscriptionState is stage 1 of Ingest's two-stage session check: a
 // single, cheap GET of the publication's own report of this account's
 // access level, checked before anything else in a run — before even the
@@ -153,12 +231,13 @@ func (s subscriptionState) expiresWithin(now time.Time, window time.Duration) (t
 //
 // It exists alongside verifySession (stage 2, in post.go) rather than
 // instead of it, and that is deliberate, not redundant: stage 1's failure
-// conditions are well understood (a 401 is unambiguous; "free_signup" was
-// directly observed on a real free account), but its *success* case is not
-// — what a real paid subscriber's membership_state, type, and expiry
-// actually look like was never confirmed, because the account available to
-// check this against had no paid subscription to test with (see
-// subscriptionState's own doc comment). So stage 1 can say "this account
+// conditions are well understood — "free_signup" was directly observed on a
+// real free account, and a 401 or 404 is resolved unambiguously by
+// diagnoseSubscriptionFailure below — but its *success* case is not: what a
+// real paid subscriber's membership_state, type, and expiry actually look
+// like was never confirmed, because the account available to check this
+// against had no paid subscription to test with (see subscriptionState's
+// own doc comment). So stage 1 can say "this account
 // definitely has no paid access" or "this cookie is definitely dead" with
 // confidence, but it cannot say "this account definitely does have paid
 // access" — it can only fail to find a reason to say otherwise. Stage 2
@@ -172,11 +251,15 @@ func (s subscriptionState) expiresWithin(now time.Time, window time.Duration) (t
 func (i *Importer) verifySubscriptionState(ctx context.Context, logger *slog.Logger) ([]string, error) {
 	raw, err := i.fetchRaw(ctx, "/api/v1/subscription", true)
 	if err != nil {
-		if errors.Is(err, errUnauthorized) {
-			return nil, fmt.Errorf(
-				"substack: the session cookie was rejected (401) checking subscription state for %s — it is dead or malformed; refresh SessionID (the substack.sid cookie value)",
-				i.cfg.Host,
-			)
+		// A 401 or 404 here is exactly the ambiguous case
+		// diagnoseSubscriptionFailure exists to resolve — see its own doc
+		// comment for the live finding that this endpoint cannot itself
+		// tell a dead session apart from a nonexistent publication.
+		// Anything else (a persistent 5xx after fetchRaw's own retries, a
+		// network failure) is reported as-is: there is no ambiguity to
+		// resolve, only a plain failure to report.
+		if errors.Is(err, errUnauthorized) || errors.Is(err, errNotFound) {
+			return nil, i.diagnoseSubscriptionFailure(ctx, err)
 		}
 		return nil, fmt.Errorf("substack: check subscription state for %s: %w", i.cfg.Host, err)
 	}

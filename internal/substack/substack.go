@@ -118,6 +118,17 @@ type Importer struct {
 	// same rate limit on Substack's side.
 	rateMu    sync.Mutex
 	notBefore time.Time
+
+	// settingsHost is where diagnoseSubscriptionFailure's disambiguating
+	// probe (session.go) is sent — diagnosisHost ("substack.com") by
+	// default, set here in New. Unexported and not part of Config on
+	// purpose: the whole point of that probe is a fixed,
+	// publication-independent host, not something a real caller should
+	// ever need to configure. It exists as its own field, rather than the
+	// package constant being used directly, only so a test in this package
+	// can redirect it at a fake server — substack.com itself obviously
+	// cannot be that fake server.
+	settingsHost string
 }
 
 // New validates cfg and returns a ready Importer. It performs no I/O of its
@@ -147,7 +158,7 @@ func New(cfg Config) (*Importer, error) {
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{Timeout: 60 * time.Second}
 	}
-	return &Importer{cfg: cfg}, nil
+	return &Importer{cfg: cfg, settingsHost: diagnosisHost}, nil
 }
 
 // Name identifies this provider, matching the convention every

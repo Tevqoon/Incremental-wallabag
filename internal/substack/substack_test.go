@@ -53,6 +53,15 @@ func newTestImporter(t *testing.T, server *httptest.Server, tweak func(*Config))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+
+	// Redirect diagnoseSubscriptionFailure's disambiguating probe at the
+	// same fake server, rather than the real substack.com New points it at
+	// by default — see Importer.settingsHost's own doc comment for why
+	// that field exists at all. fakeSubstack serves /api/v1/settings
+	// itself (see handleSettings), so this makes the probe testable the
+	// same way every other endpoint here is.
+	importer.settingsHost = host
+
 	return importer
 }
 
@@ -256,6 +265,15 @@ type fakeSubstack struct {
 	subscription       subscriptionFixture
 	subscriptionStatus int
 
+	// settingsStatus controls what /api/v1/settings answers —
+	// diagnoseSubscriptionFailure's disambiguating probe, exercised only by
+	// the tests specifically about that probe. 0 means 200 (a working
+	// cookie); this defaults to 0 rather than needing every other test to
+	// set it, since most tests never trigger the probe at all (their
+	// subscription fixture succeeds outright).
+	settingsStatus   int
+	settingsRequests int
+
 	requestedPaths []string
 	postRequests   []string
 	sessionCookies []string
@@ -279,6 +297,7 @@ func newFakeSubstack(t *testing.T) *fakeSubstack {
 	mux.HandleFunc("/api/v1/archive", fake.handleArchive)
 	mux.HandleFunc("/api/v1/posts/", fake.handlePost)
 	mux.HandleFunc("/api/v1/subscription", fake.handleSubscription)
+	mux.HandleFunc("/api/v1/settings", fake.handleSettings)
 
 	fake.Server = httptest.NewTLSServer(mux)
 	t.Cleanup(fake.Close)
@@ -298,6 +317,27 @@ func (f *fakeSubstack) handleSubscription(w http.ResponseWriter, r *http.Request
 		return
 	}
 	json.NewEncoder(w).Encode(body)
+}
+
+// handleSettings serves diagnoseSubscriptionFailure's disambiguating probe
+// — see Importer.settingsHost's own doc comment and newTestImporter for how
+// the probe ends up pointed here instead of the real substack.com in tests.
+// The 401-vs-200 status is all this needs to model; the real endpoint's
+// response body, whatever it is, is never read by fetchOnce beyond
+// discarding it, so this returns an empty body regardless of status.
+func (f *fakeSubstack) handleSettings(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	f.requestedPaths = append(f.requestedPaths, r.URL.RequestURI())
+	f.sessionCookies = append(f.sessionCookies, r.Header.Get("Cookie"))
+	f.settingsRequests++
+	status := f.settingsStatus
+	f.mu.Unlock()
+
+	if status != 0 && status != http.StatusOK {
+		w.WriteHeader(status)
+		return
+	}
+	w.Write([]byte(`{}`))
 }
 
 func (f *fakeSubstack) handleArchive(w http.ResponseWriter, r *http.Request) {
