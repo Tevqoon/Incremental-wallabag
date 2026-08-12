@@ -169,6 +169,22 @@ func TestRenderMarksExtracts(t *testing.T) {
 			want: `<h2 data-b="0">Title</h2><p class="list-item" data-b="1">Item</p><p data-b="2">Body</p>`,
 		},
 		{
+			// The shape Substack's own editor writes for a multi-paragraph
+			// pull quote: collectBlocks' leaf rule means the <blockquote>
+			// never emits a block of its own, so both inner <p>s must still
+			// come out tagged as quotes rather than as indistinguishable
+			// plain paragraphs.
+			name: "each paragraph of a multi-paragraph blockquote keeps quote styling",
+			html: `<blockquote><p>First quoted line.</p><p>Second quoted line.</p></blockquote>`,
+			want: `<blockquote data-b="0">First quoted line.</blockquote>` +
+				`<blockquote data-b="1">Second quoted line.</blockquote>`,
+		},
+		{
+			name: "a quote paragraph nested one level deeper than the blockquote still keeps quote styling",
+			html: `<blockquote><div><p>Quoted line.</p></div></blockquote>`,
+			want: `<blockquote data-b="0">Quoted line.</blockquote>`,
+		},
+		{
 			name: "a stale mark is skipped rather than breaking the page",
 			html: `<p>Short.</p>`,
 			marks: []Mark{{

@@ -332,8 +332,35 @@ func renderTag(node *html.Node) (tag, class string) {
 		if attr(node, "class") == "annotation-note" {
 			return "p", "annotation-note"
 		}
+		if insideBlockquote(node) {
+			return "blockquote", ""
+		}
 		return "p", ""
 	}
+}
+
+// insideBlockquote reports whether node sits inside a <blockquote> that is
+// not itself the block being rendered.
+//
+// A multi-paragraph pull quote — <blockquote><p>...</p><p>...</p></blockquote>,
+// the shape Substack's own editor writes for any quote of more than one
+// paragraph — hits collectBlocks' leaf rule: the <blockquote> contains block
+// tags of its own, so it never emits a block itself, and each inner <p>
+// becomes its own block instead, with that <p> as Block.node. Without this
+// check, renderTag never sees the <blockquote> at all for such a block: it
+// sees a plain <p> and falls through to the bare default, so the passage
+// reaches the page as an ordinary paragraph, visually identical to the
+// article's own prose, with the source's own left-border quote styling
+// silently dropped. Walking every ancestor rather than just node.Parent
+// handles a quote nested one level deeper too, e.g. a <div> wrapper some
+// other publisher's markup puts between <blockquote> and <p>.
+func insideBlockquote(node *html.Node) bool {
+	for parent := node.Parent; parent != nil; parent = parent.Parent {
+		if parent.DataAtom == atom.Blockquote {
+			return true
+		}
+	}
+	return false
 }
 
 // renderNode writes one node of a block, applying highlight windows to text.
