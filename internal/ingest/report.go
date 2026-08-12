@@ -139,7 +139,14 @@ func WriteReport(w io.Writer, plan Plan, applied *Applied) error {
 
 	if len(missing) > 0 {
 		printf("Quotes absent from the new content entirely — these cannot be re-anchored\n")
-		printf("automatically; fix them by hand:\n")
+		printf("automatically, and Apply leaves them completely untouched: fix them by hand.\n")
+		printf("Their existing ranges still point into content that has since been replaced,\n")
+		printf("so wallabag's own reader may draw the highlight in the wrong place (or not at\n")
+		printf("all) until then. That wrong position is deliberate, not an oversight: wiping\n")
+		printf("the ranges would also erase the only durable copy of a highlight's full text\n")
+		printf("for any quote wallabag itself has already truncated (see the ~900-byte limit\n")
+		printf("noted above), so this trades a temporarily wrong position for not destroying\n")
+		printf("data that cannot be recovered afterward.\n")
 		for _, ann := range missing {
 			printf("  annotation %d: %q\n", ann.AnnotationID, ann.Quote)
 		}
@@ -151,6 +158,7 @@ func WriteReport(w io.Writer, plan Plan, applied *Applied) error {
 		printf("  entries created:          %d\n", applied.Created)
 		printf("  entries content-updated:  %d\n", applied.Updated)
 		printf("  annotations re-anchored:  %d\n", applied.Reanchored)
+		printf("  annotations skipped (missing quote, left untouched): %d\n", applied.Skipped)
 		printf("  annotation failures:      %d\n", applied.AnnotationFailures)
 		if len(applied.Errors) > 0 {
 			printf("  errors:\n")

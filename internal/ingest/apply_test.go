@@ -364,6 +364,60 @@ func TestApplyReanchorsWithTheTrimmedQuoteNotTheRawStoredOne(t *testing.T) {
 	}
 }
 
+// TestApplySkipsVerdictMissingAnnotations pins the 2026-08-12 production fix
+// directly: an annotation classified VerdictMissing must never be
+// re-anchored, even though VerdictUnique and VerdictAmbiguous annotations on
+// the very same entry are. A live backfill run re-anchored 34 annotations
+// against a plan that had classified only 32 as VerdictUnique — the extra
+// two were VerdictMissing, and Apply re-anchored them anyway, wiping their
+// ranges in the process. See apply.go's own doc comment on why that is data
+// loss waiting to happen, not merely cosmetic.
+func TestApplySkipsVerdictMissingAnnotations(t *testing.T) {
+	server, recorder := newFakeWallabag(t, fakeWallabagOptions{})
+	client, src := testClientAndSource(t, server.URL)
+
+	plan := Plan{Items: []Item{{
+		Post:    source.Document{URL: "https://example.substack.com/p/a-post", ContentHTML: "<p>New body.</p>", Author: "An Author"},
+		EntryID: 1,
+		Action:  ActionAnnotationsOnly,
+		Annotations: []AnnotationPlan{
+			{AnnotationID: 500, Quote: "the unique one", Verdict: VerdictUnique},
+			{AnnotationID: 501, Quote: "the ambiguous one", Verdict: VerdictAmbiguous},
+			{AnnotationID: 502, Quote: "the missing one", Verdict: VerdictMissing},
+		},
+	}}}
+
+	applied, err := Apply(context.Background(), client, src, plan, discardLogger())
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	if got := recorder.count("POST /api/annotations/"); got != 2 {
+		t.Errorf("annotation create requests = %d, want exactly 2 (unique + ambiguous, not missing)", got)
+	}
+	if applied.Reanchored != 2 {
+		t.Errorf("Reanchored = %d, want 2 — only what was actually re-anchored", applied.Reanchored)
+	}
+	if applied.Skipped != 1 {
+		t.Errorf("Skipped = %d, want 1 (the VerdictMissing annotation)", applied.Skipped)
+	}
+	if applied.AnnotationFailures != 0 {
+		t.Errorf("AnnotationFailures = %d, want 0 — skipping is not a failure", applied.AnnotationFailures)
+	}
+
+	// The missing annotation's id must appear in no outbound request at all
+	// — not a create, not a delete (UpdateHighlightLocation's own
+	// create-then-delete never even starts for a skipped annotation).
+	for _, req := range recorder.all() {
+		if strings.Contains(req, "/502") {
+			t.Errorf("request %q references annotation 502 (VerdictMissing), want it untouched", req)
+		}
+	}
+	if got := len(applied.Remaps[1]); got != 2 {
+		t.Errorf("Remaps[1] has %d entries, want 2 (the two actually re-anchored, not the skipped one)", got)
+	}
+}
+
 // TestApplySkipsConflictAndSkipItems covers the other half of Apply's
 // dispatch: ActionSkip and ActionConflict items must produce no requests at
 // all, matching BuildPlan's own promise that a conflict "writes nothing".
