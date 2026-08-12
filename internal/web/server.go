@@ -177,6 +177,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /elements/{id}/annotation", s.handleEditAnnotation)
 	mux.HandleFunc("DELETE /elements/{id}", s.handleDeleteExtract)
 
+	// The JSON API for external consumers — see api.go for what it is for and
+	// what it deliberately does not offer.
+	s.registerAPI(mux)
+
 	return mux
 }
 
@@ -261,6 +265,21 @@ func (s *Server) articleHTML(ctx context.Context, element store.Element) (string
 	}
 
 	if !element.IsRoot() {
+		// A passage the reader has corrected is read as corrected. The point
+		// of the override is text that arrived mangled — PDF maths that
+		// extracted as noise, an OCR'd ligature — and a correction you cannot
+		// read has not fixed anything.
+		//
+		// Rendered from the text rather than by patching content_html,
+		// because content_html is the faithful record of what arrived and
+		// stays that way; this builds the same escaped paragraph an
+		// unanchored annotation's markup is in the first place. Cloze
+		// deletions are deliberately unaffected: they are offsets into the
+		// original quote (see handleRead), so they keep being marked against
+		// the text they were measured against.
+		if element.Edited() {
+			return s.sanitize(paragraphHTML(element.DisplayQuote(), element.Note), document.URL), nil
+		}
 		return s.sanitize(element.ContentHTML, document.URL), nil
 	}
 
@@ -296,6 +315,24 @@ func (s *Server) articleHTML(ctx context.Context, element store.Element) (string
 	}
 
 	return sanitized, nil
+}
+
+// paragraphHTML renders a corrected passage and its note as an element body.
+//
+// Deliberately the same shape store.annotationHTML builds for an imported
+// annotation — the passage as one escaped paragraph, the reader's note as a
+// second one carrying the class the sanitiser allows for exactly this — so a
+// corrected passage renders identically to an uncorrected one and nothing
+// downstream has to know which it is looking at.
+func paragraphHTML(quote, note string) string {
+	var body strings.Builder
+	if quote != "" {
+		body.WriteString("<p>" + template.HTMLEscapeString(quote) + "</p>")
+	}
+	if note != "" {
+		body.WriteString(`<p class="annotation-note">` + template.HTMLEscapeString(note) + "</p>")
+	}
+	return body.String()
 }
 
 // fetchBody retrieves an article body, and its highlights when the provider

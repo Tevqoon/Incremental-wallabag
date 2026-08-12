@@ -1,0 +1,31 @@
+-- edited_quote is the reader's own corrected wording of a passage, kept
+-- alongside the original rather than replacing it.
+--
+-- quote is doing two jobs at once, and they pull apart the moment anything
+-- outside the reader edits a passage. It is the text a highlight is *located*
+-- by — ir.Article.Locate re-derives an extract's position from it every time
+-- an article is opened (see web.anchorHighlights), and it is what gets pushed
+-- upstream as a wallabag annotation's body — and it is also simply the text
+-- shown to the reader. Editing it in place is harmless for a book or PDF
+-- annotation, which is never anchored into an article body and has nothing
+-- upstream to contradict; that is the case Store.UpdateAnnotation was written
+-- for, and it stays as it is. It is not harmless for a wallabag highlight:
+-- rewriting the quote there silently detaches the mark on the next open and
+-- changes what the outbox pushes back.
+--
+-- The reason to separate them now is the JSON API. Correcting mangled text —
+-- PDF maths that extracted as noise, an OCR'd ligature — is exactly what an
+-- external editor is for, and an API that cannot offer it is missing the
+-- point. But an API caller cannot be expected to know which extracts are
+-- safe to rewrite and which are load-bearing, and a rule that quietly does
+-- something different depending on the row is worse than no rule. So the API
+-- writes only here, and never to quote: this column is display text and
+-- nothing else, exactly like note, and no anchoring or write-back path reads
+-- it. That makes "edit the text from Emacs" safe by construction rather than
+-- by the caller being careful.
+--
+-- Empty means "no override" — read it through Element.DisplayQuote, which
+-- falls back to quote — so every existing row is already correct at its
+-- default, and clearing an override is setting it back to empty rather than
+-- a separate operation.
+ALTER TABLE elements ADD COLUMN edited_quote TEXT NOT NULL DEFAULT '';

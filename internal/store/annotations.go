@@ -276,6 +276,112 @@ func (s *Store) DocumentAnnotations(documentID int64) ([]ExtractRow, error) {
 	return annotations, rows.Err()
 }
 
+// AnnotatedFilter selects which documents AnnotatedDocuments lists.
+type AnnotatedFilter struct {
+	// Source restricts to one provider by name; empty means all of them.
+	Source string
+
+	// Since lists only documents with at least one annotation changed
+	// strictly after this instant. Zero lists everything.
+	//
+	// Strictly after, not at or after, so that feeding the previous
+	// response's newest AnnotationsUpdatedAt straight back in returns what
+	// has changed since rather than re-returning the row that produced it.
+	Since time.Time
+
+	// Limit caps the rows returned; zero or less means no cap.
+	Limit int
+}
+
+// AnnotatedDocument is a document together with how much has been harvested
+// from it — one entry of the annotation feed.
+type AnnotatedDocument struct {
+	Document
+
+	// Annotations counts the passages hanging off this document.
+	Annotations int
+
+	// AnnotationsUpdatedAt is the newest updated_at among them. This is the
+	// value that tells an external consumer whether its own copy is stale,
+	// and the one to feed back as AnnotatedFilter.Since.
+	//
+	// Deliberately not the document's own SourceUpdatedAt: that moves when
+	// the provider touches the article, which says nothing about whether any
+	// passage taken from it changed, and stands still when the reader edits
+	// an annotation, which is exactly when a consumer needs to know.
+	AnnotationsUpdatedAt time.Time
+}
+
+// AnnotatedDocuments lists documents that have annotations, newest change
+// first.
+//
+// This exists for consumers that mirror annotations somewhere else — the JSON
+// API's document feed, and through it an org-roam export — where the unit of
+// work is a whole document's worth of passages, because that is what becomes
+// one file on the other side. Documents with nothing harvested from them are
+// omitted: there is nothing to mirror, and including them would make every
+// consumer filter them back out.
+func (s *Store) AnnotatedDocuments(filter AnnotatedFilter) ([]AnnotatedDocument, error) {
+	limit := filter.Limit
+	if limit <= 0 {
+		// SQLite reads a negative LIMIT as no limit, the same convention
+		// Queue uses.
+		limit = -1
+	}
+
+	var since any
+	if !filter.Since.IsZero() {
+		since = filter.Since.UTC().Format(timeFormat)
+	}
+
+	rows, err := s.db.Query(`
+		SELECT d.id, d.source, d.external_id, d.url, d.title, d.author,
+		       d.language, d.has_content, d.is_archived, d.is_starred,
+		       d.reading_time, d.published_at, d.source_updated_at,
+		       d.imported_at, d.missing_upstream, d.display_title, d.subtitle,
+		       COUNT(e.id), MAX(e.updated_at)
+		FROM documents d
+		JOIN elements e ON e.document_id = d.id AND e.parent_id IS NOT NULL
+		WHERE (? = '' OR d.source = ?)
+		GROUP BY d.id
+		HAVING (? IS NULL OR MAX(e.updated_at) > ?)
+		ORDER BY MAX(e.updated_at) DESC, d.id DESC
+		LIMIT ?`,
+		filter.Source, filter.Source, since, since, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: list annotated documents: %w", err)
+	}
+	defer rows.Close()
+
+	var documents []AnnotatedDocument
+	for rows.Next() {
+		var (
+			row                AnnotatedDocument
+			published          sql.NullString
+			updated            sql.NullString
+			imported           sql.NullString
+			annotationsUpdated sql.NullString
+		)
+		err := rows.Scan(
+			&row.ID, &row.Source, &row.ExternalID, &row.URL, &row.Title,
+			&row.Author, &row.Language, &row.HasContent, &row.IsArchived,
+			&row.IsStarred, &row.ReadingTime, &published, &updated, &imported,
+			&row.MissingUpstream, &row.DisplayTitle, &row.Subtitle,
+			&row.Annotations, &annotationsUpdated,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("store: scan annotated document: %w", err)
+		}
+		row.PublishedAt = parseTime(published)
+		row.SourceUpdatedAt = parseTime(updated)
+		row.ImportedAt = parseTime(imported)
+		row.AnnotationsUpdatedAt = parseTime(annotationsUpdated)
+		documents = append(documents, row)
+	}
+	return documents, rows.Err()
+}
+
 // RootElement returns a document's root topic — the queue entry standing for
 // the document itself.
 func (s *Store) RootElement(documentID int64) (Element, error) {

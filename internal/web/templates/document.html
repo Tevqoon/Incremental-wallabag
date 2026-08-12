@@ -103,9 +103,9 @@
                    class="item-select" aria-label="Select this annotation">
             <div class="item-body">
             <a class="item-title" href="/read/{{.ID}}">
-              {{if .Quote}}{{.Quote}}{{else}}{{.Note}}{{end}}
+              {{if .DisplayQuote}}{{.DisplayQuote}}{{else}}{{.Note}}{{end}}
             </a>
-            {{if and .Quote .Note}}
+            {{if and .DisplayQuote .Note}}
               <p class="item-note">{{.Note}}</p>
             {{end}}
             <div class="item-meta">
