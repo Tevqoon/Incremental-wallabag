@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"html"
 	"strings"
 	"time"
@@ -402,16 +403,20 @@ type NewExtract struct {
 	Ranges string
 
 	// DelayDays is how long before the extract first becomes due. Zero means
-	// today, which is what a caller with no opinion gets.
+	// today, which is what a caller with no opinion gets. Lightly fuzzed by a
+	// few days either way (see ir.FuzzedFirstDueDays) so that pulling several
+	// passages from one article in a sitting does not put them all back in
+	// front of the reader on the same future date.
 	DelayDays int
 }
 
 // CreateExtract inserts a child element and returns its id.
 //
-// A new extract comes back after DelayDays rather than immediately. Putting it
-// straight back in front of the reader is the opposite of the point: the value
-// of an extract is re-reading it once the article has faded, not twice in the
-// same sitting.
+// A new extract comes back after DelayDays (fuzzed a little, see
+// ir.FuzzedFirstDueDays) rather than immediately or on a suspiciously round
+// date. Putting it straight back in front of the reader is the opposite of
+// the point: the value of an extract is re-reading it once the article has
+// faded, not twice in the same sitting.
 //
 // A manually made passage extract also queues itself for push upstream, in
 // the same transaction as the local insert — the counterpart to how an
@@ -445,6 +450,12 @@ func (s *Store) CreateExtract(extract NewExtract, now time.Time) (int64, error) 
 		ranges = extract.Ranges
 	}
 
+	// Seeded on (parentID, quote) rather than the extract's own id, which does
+	// not exist yet — this runs before the INSERT that would assign one. Using
+	// the parent and quote also means the fuzz is stable if this extract is
+	// ever recreated from the same passage, rather than drifting on every call.
+	fuzzedDelay := ir.FuzzedFirstDueDays(extractSeed(extract.ParentID, extract.Quote), extract.DelayDays)
+
 	var id int64
 	err := s.inTransaction(func(tx *sql.Tx) error {
 		outcome, err := tx.Exec(`
@@ -457,7 +468,7 @@ func (s *Store) CreateExtract(extract NewExtract, now time.Time) (int64, error) 
 			extract.DocumentID, extract.ParentID, extract.Kind, extract.Title,
 			extract.ContentHTML, extract.Quote,
 			startBlock, startOffset, endBlock, endOffset,
-			extract.Priority, now.AddDate(0, 0, extract.DelayDays).Format(dateFormat),
+			extract.Priority, now.AddDate(0, 0, fuzzedDelay).Format(dateFormat),
 			extract.Origin, externalRef, ranges,
 			formatTime(now), formatTime(now),
 		)
@@ -739,8 +750,13 @@ func suspendIfActive(tx *sql.Tx, id int64, now time.Time) error {
 // failure importedPriority softens, at a scale it cannot. Parking them
 // instead makes going through the book its own deliberate act.
 type highlightImport struct {
-	// delayDays is how far ahead a queued annotation first becomes due.
-	delayDays int
+	// floorDays is the fewest days ahead a queued annotation can first become
+	// due; spreadDays is how much further out on top of that it might land,
+	// drawn deterministically per highlight — see ir.FuzzedAnnotationDelay.
+	// spreadDays of zero puts every highlight exactly on floorDays, with no
+	// spread at all.
+	floorDays  int
+	spreadDays int
 
 	// suspended parks new annotations out of the queue, awaiting triage.
 	suspended bool
@@ -877,11 +893,18 @@ func insertHighlights(tx *sql.Tx, documentID, parentID int64, highlights []sourc
 		// everything it knows — and triage's "keep this" is then an ordinary
 		// unsuspend rather than a second concept.
 		state, dueOn := string(ir.StateNew), any(
-			// Spread across the window rather than all landing on the same
-			// day: a library's import is hundreds of highlights at once, and
-			// stacking them on one date moves the pile instead of clearing it.
-			// The multiplier matches the queue's tie-break so the two agree.
-			now.AddDate(0, 0, spreadOffset(documentID, options.delayDays)).Format(dateFormat))
+			// Seeded per highlight (documentID plus its own external ref),
+			// not per document — a document's highlights are inserted in one
+			// loop with a stable documentID, so seeding on documentID alone
+			// used to compute the exact same offset for every highlight in a
+			// single import and land them all on one day, the very pile-up
+			// this exists to prevent. floorDays keeps a fresh import from
+			// showing up too soon; spreadDays is what actually distributes a
+			// batch across the following weeks — see ir.FuzzedAnnotationDelay.
+			now.AddDate(0, 0, ir.FuzzedAnnotationDelay(
+				highlightSeed(documentID, highlight.ExternalID),
+				options.floorDays, options.spreadDays,
+			)).Format(dateFormat))
 		if options.suspended {
 			state, dueOn = string(ir.StateSuspended), nil
 		}
@@ -1003,19 +1026,32 @@ func refreshAnnotation(tx *sql.Tx, documentID int64, highlight source.Highlight,
 	return nil
 }
 
-// spreadOffset scatters a batch of imports deterministically across a window.
+// highlightSeed and extractSeed turn identifying data into the deterministic
+// int64 seed ir.FuzzedAnnotationDelay and ir.FuzzedFirstDueDays need.
 //
-// The result runs 1..window rather than 0..window-1: a highlight scheduled
-// "ten days out" should not have a one-in-ten chance of being due the same day
-// it was imported, which is the immediacy the delay exists to remove.
+// Neither a freshly imported highlight nor a freshly made extract has an id
+// yet at the point its first due date is computed — the id is assigned by the
+// very INSERT the date is being computed for — so the seed has to come from
+// data that already exists. Using the same identity each row is deduplicated
+// on elsewhere in this file (document + external ref for a highlight, parent +
+// quote for an extract) also means the fuzz is stable across a later re-import
+// or resync: revisiting the same annotation recomputes the same seed and
+// therefore the same offset, rather than reshuffling a date already set.
 //
-// The multiplier is the one the queue's tie-break uses, so the two orderings
-// agree instead of one scrambling what the other arranged.
-func spreadOffset(seed int64, window int) int {
-	if window <= 0 {
-		return 0
-	}
-	return int(((seed*2654435761)%int64(window)+int64(window))%int64(window)) + 1
+// fnv rather than the multiplicative-constant scramble used elsewhere in this
+// file (the queue's tie-break, the old per-document spread this replaces):
+// those scramble an int64 that is already effectively random relative to
+// insertion order; this needs to hash a string.
+func highlightSeed(documentID int64, externalID string) int64 {
+	h := fnv.New64a()
+	fmt.Fprintf(h, "%d:%s", documentID, externalID)
+	return int64(h.Sum64())
+}
+
+func extractSeed(parentID int64, quote string) int64 {
+	h := fnv.New64a()
+	fmt.Fprintf(h, "%d:%s", parentID, quote)
+	return int64(h.Sum64())
 }
 
 // AnchorExtract records where an extract sits in its parent, for one that was

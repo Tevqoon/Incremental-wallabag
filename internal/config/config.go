@@ -51,9 +51,33 @@ type Config struct {
 	// zero one.
 	DailyLimit *int `yaml:"daily_limit"`
 
-	// ExtractDelayDays is how long before a newly made or newly imported
-	// extract first becomes due. Zero means today.
+	// ExtractDelayDays is how long before a passage pulled out while reading
+	// first becomes due. Zero means today. Lightly fuzzed a few days either
+	// way (see ir.FuzzedFirstDueDays) rather than landing on the exact same
+	// date every time — pulling several passages from one article in a
+	// sitting used to put them all back in front of the reader together.
+	//
+	// This governs only extracts made by hand. A batch of annotations arriving
+	// at once — a wallabag sync, a book import — is a different situation with
+	// its own settings: see AnnotationDelayDays.
 	ExtractDelayDays int `yaml:"extract_delay_days"`
+
+	// AnnotationDelayDays is the fewest days ahead a freshly imported
+	// annotation can first become due; AnnotationDelaySpreadDays is how much
+	// further out on top of that it might land, spread across the window
+	// per annotation rather than uniformly — see ir.FuzzedAnnotationDelay.
+	//
+	// Both apply to a wallabag sync's highlights and to an uploaded book or
+	// PDF's annotations alike (when queued outright rather than sent through
+	// triage), because either can arrive hundreds at a time. The floor keeps
+	// a large import from surfacing before its context has had a chance to
+	// fade; the spread is what actually scatters the batch across the
+	// following weeks instead of the "1..delay" range still leaving some of
+	// them due tomorrow, and instead of a poorly seeded spread landing every
+	// annotation in one document on the exact same day regardless of the
+	// window's width.
+	AnnotationDelayDays       int `yaml:"annotation_delay_days"`
+	AnnotationDelaySpreadDays int `yaml:"annotation_delay_spread_days"`
 
 	Sources Sources `yaml:"sources"`
 
@@ -124,11 +148,13 @@ func Load(path string) (Config, error) {
 	})
 
 	config := Config{
-		Bind:             "0.0.0.0:8080",
-		Database:         "./increader.db",
-		Timezone:         "Local",
-		SyncInterval:     Duration{30 * time.Minute},
-		ExtractDelayDays: 10,
+		Bind:                      "0.0.0.0:8080",
+		Database:                  "./increader.db",
+		Timezone:                  "Local",
+		SyncInterval:              Duration{30 * time.Minute},
+		ExtractDelayDays:          10,
+		AnnotationDelayDays:       30,
+		AnnotationDelaySpreadDays: 60,
 	}
 	if err := yaml.Unmarshal([]byte(expanded), &config); err != nil {
 		return Config{}, fmt.Errorf("config: parse %s: %w", path, err)
@@ -152,6 +178,14 @@ func Load(path string) (Config, error) {
 	if config.ExtractDelayDays < 0 {
 		return Config{}, fmt.Errorf("config: extract_delay_days cannot be negative, got %d",
 			config.ExtractDelayDays)
+	}
+	if config.AnnotationDelayDays < 0 {
+		return Config{}, fmt.Errorf("config: annotation_delay_days cannot be negative, got %d",
+			config.AnnotationDelayDays)
+	}
+	if config.AnnotationDelaySpreadDays < 0 {
+		return Config{}, fmt.Errorf("config: annotation_delay_spread_days cannot be negative, got %d",
+			config.AnnotationDelaySpreadDays)
 	}
 	if config.Database == "" {
 		return Config{}, fmt.Errorf("config: database path is required")

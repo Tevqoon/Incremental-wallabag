@@ -622,7 +622,7 @@ func TestFuzzedBacklogDaysStaysWithinSpread(t *testing.T) {
 // TestFuzzedBacklogDaysSpreadsAcrossElements is the whole point of fuzzing:
 // if everyone who clicks "1mo" today lands on the exact same due date, the
 // pile-up the fuzz exists to prevent happens anyway, just one step removed —
-// see spreadOffset for the same problem on the import side.
+// see FuzzedAnnotationDelay for the same problem on the import side.
 func TestFuzzedBacklogDaysSpreadsAcrossElements(t *testing.T) {
 	preset := BacklogPreset{Days: 30, Label: "1mo"}
 	seen := make(map[int]bool)
@@ -727,5 +727,114 @@ func TestBacklogAppliesToFreshAndGradedElementsAlike(t *testing.T) {
 	wantDue := Day(today).AddDate(0, 0, 7)
 	if !after.DueOn.Equal(wantDue) {
 		t.Errorf("due = %v, want %v", after.DueOn, wantDue)
+	}
+}
+
+// TestFuzzedFirstDueDaysStaysWithinSpread mirrors
+// TestFuzzedBacklogDaysStaysWithinSpread: the jitter must move the delay, but
+// never past the eighth on either side that defines it.
+func TestFuzzedFirstDueDaysStaysWithinSpread(t *testing.T) {
+	for _, delayDays := range []int{2, 7, 10, 30} {
+		spread := max(1, delayDays/firstDueFuzzDivisor)
+		low, high := delayDays-spread, delayDays+spread
+
+		for seed := int64(1); seed <= 200; seed++ {
+			got := FuzzedFirstDueDays(seed, delayDays)
+			if got < low || got > high {
+				t.Fatalf("delay %d, seed %d: fuzzed = %d, want in [%d, %d]",
+					delayDays, seed, got, low, high)
+			}
+		}
+	}
+}
+
+// TestFuzzedFirstDueDaysSpreadsAcrossSeeds is the whole point: several
+// extracts pulled from one article in a sitting must not all come back on the
+// exact same future date.
+func TestFuzzedFirstDueDaysSpreadsAcrossSeeds(t *testing.T) {
+	seen := make(map[int]bool)
+	for seed := int64(1); seed <= 50; seed++ {
+		seen[FuzzedFirstDueDays(seed, 10)] = true
+	}
+	if len(seen) < 3 {
+		t.Errorf("50 seeds at delay=10 produced only %d distinct due dates, want a real spread", len(seen))
+	}
+}
+
+// TestFuzzedFirstDueDaysIsDeterministic: the same seed and delay must always
+// produce the same offset, since store.CreateExtract computes it once, before
+// the row (and its own id) exists, with nothing to reconcile it against later.
+func TestFuzzedFirstDueDaysIsDeterministic(t *testing.T) {
+	first := FuzzedFirstDueDays(12345, 10)
+	for i := 0; i < 5; i++ {
+		if got := FuzzedFirstDueDays(12345, 10); got != first {
+			t.Fatalf("call %d: got %d, want %d (same every time)", i, got, first)
+		}
+	}
+}
+
+// TestFuzzedFirstDueDaysLeavesShortDelaysAlone: a configured delay of zero or
+// one day has no equivalent of a preset chosen on purpose, but is small
+// enough that fuzzing it would either do nothing or read as broken — see
+// FuzzedFirstDueDays's own doc comment.
+func TestFuzzedFirstDueDaysLeavesShortDelaysAlone(t *testing.T) {
+	for _, delayDays := range []int{0, 1} {
+		for seed := int64(1); seed <= 20; seed++ {
+			if got := FuzzedFirstDueDays(seed, delayDays); got != delayDays {
+				t.Errorf("delay %d, seed %d: got %d, want it unchanged", delayDays, seed, got)
+			}
+		}
+	}
+}
+
+// TestFuzzedAnnotationDelayRespectsTheFloor is the property the whole
+// function exists to guarantee: nothing lands before floorDays, no matter
+// what the seed is.
+func TestFuzzedAnnotationDelayRespectsTheFloor(t *testing.T) {
+	const floor, spread = 30, 60
+	for seed := int64(-100); seed <= 100; seed++ {
+		got := FuzzedAnnotationDelay(seed, floor, spread)
+		if got < floor || got >= floor+spread {
+			t.Fatalf("seed %d: fuzzed = %d, want in [%d, %d)", seed, got, floor, floor+spread)
+		}
+	}
+}
+
+// TestFuzzedAnnotationDelaySpreadsAcrossSeeds is the point of the whole
+// design: a batch of highlights from one document, one seed per highlight,
+// must land across many different days rather than piling onto one — the bug
+// this replaces (a spread seeded on the document instead of the highlight,
+// so the seed never varied within one import) is exactly what this guards.
+func TestFuzzedAnnotationDelaySpreadsAcrossSeeds(t *testing.T) {
+	seen := make(map[int]bool)
+	for seed := int64(1); seed <= 200; seed++ {
+		seen[FuzzedAnnotationDelay(seed, 30, 60)] = true
+	}
+	if len(seen) < 20 {
+		t.Errorf("200 seeds produced only %d distinct due dates across a 60-day window, want a wide spread", len(seen))
+	}
+}
+
+// TestFuzzedAnnotationDelayNoSpreadIsExactlyTheFloor: spreadDays of zero is
+// how a caller asks for no randomisation at all, not a window of width zero
+// that happens to divide by zero.
+func TestFuzzedAnnotationDelayNoSpreadIsExactlyTheFloor(t *testing.T) {
+	for seed := int64(1); seed <= 20; seed++ {
+		if got := FuzzedAnnotationDelay(seed, 30, 0); got != 30 {
+			t.Errorf("seed %d: got %d, want exactly the floor (30) with no spread", seed, got)
+		}
+	}
+}
+
+// TestFuzzedAnnotationDelayIsDeterministic: store.insertHighlights computes
+// this once per highlight, before that row (and its id) exists. Re-syncing or
+// re-importing the same file must recompute the identical offset, or an
+// annotation's due date would reshuffle every time its source was revisited.
+func TestFuzzedAnnotationDelayIsDeterministic(t *testing.T) {
+	first := FuzzedAnnotationDelay(98765, 30, 60)
+	for i := 0; i < 5; i++ {
+		if got := FuzzedAnnotationDelay(98765, 30, 60); got != first {
+			t.Fatalf("call %d: got %d, want %d (same every time)", i, got, first)
+		}
 	}
 }

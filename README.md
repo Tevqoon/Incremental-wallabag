@@ -157,7 +157,16 @@ the top of the scale, a year at the bottom. Important material can never drift
 out of sight.
 
 Highlights you already made in wallabag's own reader are imported as extracts
-during sync, and located in the article text the first time you open it.
+during sync, and located in the article text the first time you open it. A
+sync brings in everything that changed since the last one — which can be a
+large batch on a first sync, or after not having opened increader for a
+while — so these are scheduled differently from a passage you pull out by
+hand: not for days, but for **a month or more**, spread unpredictably across
+the following weeks (`annotation_delay_days` and `annotation_delay_spread_days`,
+below) rather than clustering right after the floor. The point is
+serendipity — an old highlight resurfacing on its own timetable reads as
+rediscovery, not homework, and a hundred of them piling up on the one day you
+happened to sync is neither.
 
 ### Books and papers
 
@@ -181,7 +190,10 @@ order, each one kept (into the extract queue on the usual delay), parked, left
 as it is, or deleted. That is a different thing from the extract queue, which is
 ordered by priority — going through a work means going through it front to back,
 with the chapter you were just in still in mind. A short piece can skip the pass
-and go straight into the queue; the upload form asks.
+and go straight into the queue; the upload form asks — and when it does, its
+passages are scheduled the same way a wallabag sync's highlights are:
+`annotation_delay_days` and `annotation_delay_spread_days`, not
+`extract_delay_days`.
 
 Re-uploading is how these are corrected. A work is identified by its normalised
 title and author, and each passage by a content hash, so exporting a book again

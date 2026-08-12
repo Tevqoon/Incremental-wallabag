@@ -34,8 +34,10 @@ type Syncer struct {
 	sources []source.Source
 	logger  *slog.Logger
 
-	// extractDelayDays is how far ahead imported highlights are scheduled.
-	extractDelayDays int
+	// annotationFloorDays and annotationSpreadDays are how far ahead imported
+	// highlights are scheduled — see store.UpsertDocuments.
+	annotationFloorDays  int
+	annotationSpreadDays int
 
 	// nudge carries requests to publish the outbox early. Buffered with room
 	// for one so a burst of edits collapses into a single drain rather than
@@ -68,13 +70,16 @@ func New(db *store.Store, logger *slog.Logger, sources ...source.Source) *Syncer
 	}
 }
 
-// WithExtractDelay sets how far ahead imported highlights become due.
+// WithAnnotationDelay sets how far ahead imported highlights become due:
+// floorDays at the soonest, spread up to spreadDays further out from there —
+// see store.UpsertDocuments.
 //
 // Go note: a small option method rather than another positional argument to
 // New. Callers that do not care are unaffected, and the one that does reads as
 // a sentence at the call site.
-func (s *Syncer) WithExtractDelay(days int) *Syncer {
-	s.extractDelayDays = days
+func (s *Syncer) WithAnnotationDelay(floorDays, spreadDays int) *Syncer {
+	s.annotationFloorDays = floorDays
+	s.annotationSpreadDays = spreadDays
 	return s
 }
 
@@ -152,7 +157,7 @@ func (s *Syncer) Sync(ctx context.Context, provider source.Source) (Result, erro
 		return Result{}, fmt.Errorf("sync %s: %w", name, err)
 	}
 
-	imported, err := s.store.UpsertDocuments(name, documents, s.extractDelayDays, time.Now())
+	imported, err := s.store.UpsertDocuments(name, documents, s.annotationFloorDays, s.annotationSpreadDays, time.Now())
 	if err != nil {
 		return Result{}, fmt.Errorf("sync %s: %w", name, err)
 	}
@@ -213,7 +218,7 @@ func (s *Syncer) Reconcile(ctx context.Context) error {
 			continue
 		}
 
-		if _, err := s.store.UpsertDocuments(provider.Name(), documents, s.extractDelayDays, time.Now()); err != nil {
+		if _, err := s.store.UpsertDocuments(provider.Name(), documents, s.annotationFloorDays, s.annotationSpreadDays, time.Now()); err != nil {
 			s.logger.Error("reconcile: upsert failed", "source", provider.Name(), "error", err)
 			if firstErr == nil {
 				firstErr = err

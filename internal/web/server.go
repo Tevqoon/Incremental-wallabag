@@ -47,9 +47,16 @@ type Server struct {
 	sources        map[string]source.Source
 	queuePageLimit int
 	extractDelay   int
-	logger         *slog.Logger
-	policy         *bluemonday.Policy
-	pages          map[string]*template.Template
+
+	// annotationDelayDays and annotationDelaySpreadDays schedule a book or
+	// PDF import's annotations when it is queued outright rather than sent
+	// through triage — see store.ImportOptions.
+	annotationDelayDays       int
+	annotationDelaySpreadDays int
+
+	logger *slog.Logger
+	policy *bluemonday.Policy
+	pages  map[string]*template.Template
 
 	// publish asks the syncer to drain the outbox now. Optional: without it
 	// queued writes still go out on the next sync, just later.
@@ -73,6 +80,12 @@ type Options struct {
 	// ExtractDelay is how many days ahead a newly made extract becomes due.
 	ExtractDelay int
 
+	// AnnotationDelayDays and AnnotationDelaySpreadDays schedule a book or PDF
+	// import's annotations when queued outright rather than triaged — see
+	// store.ImportOptions.
+	AnnotationDelayDays       int
+	AnnotationDelaySpreadDays int
+
 	Logger *slog.Logger
 
 	// Publish is called after a change that needs sending to a provider, so it
@@ -93,15 +106,17 @@ type Options struct {
 // time someone opens that page.
 func New(options Options) (*Server, error) {
 	server := &Server{
-		store:          options.Store,
-		sources:        options.Sources,
-		queuePageLimit: options.QueuePageLimit,
-		extractDelay:   options.ExtractDelay,
-		logger:         options.Logger,
-		policy:         newPolicy(),
-		pages:          make(map[string]*template.Template),
-		publish:        options.Publish,
-		syncNow:        options.SyncNow,
+		store:                     options.Store,
+		sources:                   options.Sources,
+		queuePageLimit:            options.QueuePageLimit,
+		extractDelay:              options.ExtractDelay,
+		annotationDelayDays:       options.AnnotationDelayDays,
+		annotationDelaySpreadDays: options.AnnotationDelaySpreadDays,
+		logger:                    options.Logger,
+		policy:                    newPolicy(),
+		pages:                     make(map[string]*template.Template),
+		publish:                   options.Publish,
+		syncNow:                   options.SyncNow,
 	}
 
 	for _, name := range pageNames {

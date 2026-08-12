@@ -31,12 +31,33 @@ sync_interval: 30m
 # page says so rather than quietly showing you a fraction.
 queue_page_limit: 0
 
-# How long before a new extract first comes back — whether made here or
-# imported from a wallabag highlight. Putting one straight back in front of you
-# defeats the point; the value of an extract is re-reading it once the article
-# has faded. Imports are spread across this window rather than all landing on
-# the same day.
+# How long before a passage pulled out while reading first comes back.
+# Putting one straight back in front of you defeats the point; the value of an
+# extract is re-reading it once the article has faded. Lightly fuzzed a few
+# days either way so pulling several passages from one article in a sitting
+# does not put them all back on the same date.
+#
+# Only for extracts made by hand — annotations arriving in bulk (a wallabag
+# sync, a book import) use the two settings below instead.
 extract_delay_days: 10
+
+# How annotations imported in bulk are scheduled: annotation_delay_days is the
+# fewest days ahead one can first become due, annotation_delay_spread_days is
+# how much further out on top of that it might land — the two together give a
+# 30-to-90-day range by default. Applies to a wallabag sync's highlights and to
+# an uploaded book or PDF's annotations when queued outright (skipping the
+# triage pass — see the README's "Books and papers" section).
+#
+# The floor exists because a highlight from months or years of a library
+# arriving all at once should not immediately compete with what you are
+# actually reading. The spread exists for serendipity: without it, everything
+# from one sync or one book would surface within days of each other rather
+# than turning up unpredictably, spread thin, over the following couple of
+# months — and a spread that is not seeded per annotation reproduces the same
+# problem in a different form, landing every highlight from one document on
+# the exact same day regardless of how wide the window is.
+annotation_delay_days: 30
+annotation_delay_spread_days: 60
 
 sources:
   wallabag:

@@ -66,7 +66,7 @@ func TestUpsertCreatesDocumentAndRootTopic(t *testing.T) {
 		Title:      "First article",
 		URL:        "https://example.com/1",
 		UpdatedAt:  time.Date(2026, 7, 30, 8, 0, 0, 0, time.UTC),
-	}}, 0, now)
+	}}, 0, 0, now)
 	if err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
@@ -106,12 +106,12 @@ func TestUpsertIsIdempotent(t *testing.T) {
 		UpdatedAt:  time.Date(2026, 7, 30, 8, 0, 0, 0, time.UTC),
 	}
 
-	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, now); err != nil {
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, 0, now); err != nil {
 		t.Fatalf("first upsert: %v", err)
 	}
 
 	document.Title = "Retitled upstream"
-	result, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, now)
+	result, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, 0, now)
 	if err != nil {
 		t.Fatalf("second upsert: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestMetadataSyncPreservesFetchedContent(t *testing.T) {
 		ExternalID: "1",
 		Title:      "First article",
 		UpdatedAt:  updated,
-	}}, 0, now); err != nil {
+	}}, 0, 0, now); err != nil {
 		t.Fatalf("initial metadata sync: %v", err)
 	}
 
@@ -172,7 +172,7 @@ func TestMetadataSyncPreservesFetchedContent(t *testing.T) {
 		ExternalID: "1",
 		Title:      "First article",
 		UpdatedAt:  updated.Add(time.Hour),
-	}}, 0, now); err != nil {
+	}}, 0, 0, now); err != nil {
 		t.Fatalf("second metadata sync: %v", err)
 	}
 
@@ -196,7 +196,7 @@ func TestUpsertReportsNewestWatermark(t *testing.T) {
 		{ExternalID: "1", UpdatedAt: time.Date(2026, 7, 29, 8, 0, 0, 0, time.UTC)},
 		{ExternalID: "2", UpdatedAt: newest},
 		{ExternalID: "3", UpdatedAt: time.Date(2026, 7, 30, 6, 0, 0, 0, time.UTC)},
-	}, 0, time.Now())
+	}, 0, 0, time.Now())
 	if err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
@@ -257,7 +257,7 @@ func TestForeignKeysEnforced(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "1", Title: "Doomed", UpdatedAt: time.Now()},
-	}, 0, time.Now()); err != nil {
+	}, 0, 0, time.Now()); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -284,7 +284,7 @@ func TestArchivedDocumentsArriveSuspended(t *testing.T) {
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "1", Title: "Unread", UpdatedAt: now},
 		{ExternalID: "2", Title: "Already read", IsArchived: true, UpdatedAt: now},
-	}, 0, now); err != nil {
+	}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -324,13 +324,13 @@ func TestArchivingLaterSuspends(t *testing.T) {
 	now := time.Now()
 
 	document := source.Document{ExternalID: "1", Title: "In progress", UpdatedAt: now}
-	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, now); err != nil {
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, 0, now); err != nil {
 		t.Fatalf("first sync: %v", err)
 	}
 
 	document.IsArchived = true
 	document.UpdatedAt = now.Add(time.Hour)
-	result, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, now)
+	result, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, 0, now)
 	if err != nil {
 		t.Fatalf("second sync: %v", err)
 	}
@@ -354,7 +354,7 @@ func TestUnsuspendingSurvivesResync(t *testing.T) {
 	document := source.Document{
 		ExternalID: "1", Title: "Worth re-reading", IsArchived: true, UpdatedAt: now,
 	}
-	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, now); err != nil {
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, 0, now); err != nil {
 		t.Fatalf("first sync: %v", err)
 	}
 
@@ -364,7 +364,7 @@ func TestUnsuspendingSurvivesResync(t *testing.T) {
 
 	// Sync again — still archived upstream, but not a fresh transition.
 	document.UpdatedAt = now.Add(time.Hour)
-	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, now); err != nil {
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, 0, now); err != nil {
 		t.Fatalf("second sync: %v", err)
 	}
 
@@ -382,7 +382,7 @@ func TestSuspendPreservesProgress(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "1", Title: "Long read", UpdatedAt: now},
-	}, 0, now); err != nil {
+	}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -434,7 +434,7 @@ func TestHighlightsImportDuringSync(t *testing.T) {
 		},
 	}
 
-	result, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, now)
+	result, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, 0, now)
 	if err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
@@ -471,7 +471,7 @@ func TestHighlightsImportDuringSync(t *testing.T) {
 	}
 
 	// Re-syncing must not duplicate them.
-	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, now); err != nil {
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, 0, now); err != nil {
 		t.Fatalf("re-sync: %v", err)
 	}
 	extracts, _ = db.ChildrenOf(1)
@@ -498,7 +498,7 @@ func TestResyncBackfillsRangesOntoAnExistingHighlight(t *testing.T) {
 			{ExternalID: "500", Quote: "A passage worth keeping."},
 		},
 	}
-	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, now); err != nil {
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -514,7 +514,7 @@ func TestResyncBackfillsRangesOntoAnExistingHighlight(t *testing.T) {
 	// carrying a ranges payload, exactly as a real re-sync against a wallabag
 	// server would once ResolveRange's caller ships.
 	document.Highlights[0].Ranges = []byte(`["stub-range"]`)
-	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, now); err != nil {
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, 0, now); err != nil {
 		t.Fatalf("re-sync: %v", err)
 	}
 
@@ -535,7 +535,7 @@ func TestResyncBackfillsRangesOntoAnExistingHighlight(t *testing.T) {
 
 	// A third sync, ranges already set, must leave it alone rather than
 	// erroring or churning a write every time.
-	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, now); err != nil {
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, 0, now); err != nil {
 		t.Fatalf("third sync: %v", err)
 	}
 	final, _ := db.ChildrenOf(1)
@@ -559,7 +559,7 @@ func TestHighlightUnderANewRefAdoptsInsteadOfDuplicating(t *testing.T) {
 		ExternalID: "1", Title: "An article", UpdatedAt: now,
 		Highlights: []source.Highlight{{ExternalID: "100", Quote: "A passage worth keeping."}},
 	}
-	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, now); err != nil {
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, 0, now); err != nil {
 		t.Fatalf("first import: %v", err)
 	}
 
@@ -573,7 +573,7 @@ func TestHighlightUnderANewRefAdoptsInsteadOfDuplicating(t *testing.T) {
 	// newer ref (the old one, "100", is not in this listing at all — its
 	// delete just hasn't completed).
 	document.Highlights = []source.Highlight{{ExternalID: "200", Quote: "A passage worth keeping."}}
-	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, now); err != nil {
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, 0, now); err != nil {
 		t.Fatalf("second import: %v", err)
 	}
 
@@ -601,7 +601,7 @@ func TestHighlightUnderANewRefAdoptsInsteadOfDuplicating(t *testing.T) {
 	}
 
 	document.Highlights = []source.Highlight{{ExternalID: "300", Quote: "A passage worth keeping."}}
-	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, now); err != nil {
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, 0, now); err != nil {
 		t.Fatalf("third import: %v", err)
 	}
 	extracts, _ = db.ChildrenOf(1)
@@ -620,7 +620,7 @@ func TestExtractsBrowse(t *testing.T) {
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
 		ExternalID: "1", Title: "Source article", UpdatedAt: now,
 		Highlights: []source.Highlight{{ExternalID: "1", Quote: "An imported passage."}},
-	}}, 0, now); err != nil {
+	}}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -666,7 +666,7 @@ func TestExtractsSort(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
 		ExternalID: "1", Title: "Source article", UpdatedAt: now,
-	}}, 0, now); err != nil {
+	}}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -736,7 +736,7 @@ func TestDocumentImageCacheRoundTrip(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
 		ExternalID: "1", Title: "Has pictures", UpdatedAt: now,
-	}}, 0, now); err != nil {
+	}}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -833,7 +833,7 @@ func TestDocumentImageDimensionsDefaultToUnknown(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
 		ExternalID: "1", Title: "Predates dimension tracking", UpdatedAt: now,
-	}}, 0, now); err != nil {
+	}}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -870,7 +870,7 @@ func TestSetDocumentImageDimensionsPreservesEverythingElse(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
 		ExternalID: "1", Title: "Has a legacy image", UpdatedAt: fetchedAt,
-	}}, 0, fetchedAt); err != nil {
+	}}, 0, 0, fetchedAt); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -925,7 +925,7 @@ func TestQueueSeparatesArticlesFromExtracts(t *testing.T) {
 			UpdatedAt:  now,
 		})
 	}
-	if _, err := db.UpsertDocuments("wallabag", documents, 0, now); err != nil {
+	if _, err := db.UpsertDocuments("wallabag", documents, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 	for i := 1; i <= 10; i++ {
@@ -981,7 +981,7 @@ func TestQueueRejectsAnUnknownKind(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "1", Title: "An article", UpdatedAt: now},
-	}, 0, now); err != nil {
+	}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -1088,7 +1088,7 @@ func TestQueueOrderIsStableAcrossRemovals(t *testing.T) {
 		{ExternalID: "2", Title: "Article 2", UpdatedAt: now},
 		{ExternalID: "3", Title: "Annotated article", UpdatedAt: now, Highlights: highlights, IsArchived: true},
 	}
-	if _, err := db.UpsertDocuments("wallabag", documents, 0, now); err != nil {
+	if _, err := db.UpsertDocuments("wallabag", documents, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -1145,7 +1145,7 @@ func TestBuryIsPerQueue(t *testing.T) {
 		{ExternalID: "2", Title: "Article 2", UpdatedAt: now},
 		{ExternalID: "3", Title: "Annotated", UpdatedAt: now, Highlights: highlights, IsArchived: true},
 	}
-	if _, err := db.UpsertDocuments("wallabag", documents, 0, now); err != nil {
+	if _, err := db.UpsertDocuments("wallabag", documents, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -1204,7 +1204,7 @@ func TestWriteIsQueuedWithTheLocalChange(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "77", Title: "An article", UpdatedAt: now},
-	}, 0, now); err != nil {
+	}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -1241,7 +1241,7 @@ func TestManualExtractQueuesHighlightPush(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "77", Title: "An article", UpdatedAt: now},
-	}, 0, now); err != nil {
+	}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -1282,7 +1282,7 @@ func TestExtractsExcludedFromHighlightPush(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "77", Title: "An article", UpdatedAt: now},
-	}, 0, now); err != nil {
+	}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -1326,7 +1326,7 @@ func TestArchivingLocallyDoesNotRetriggerTheSyncTransition(t *testing.T) {
 	now := time.Now()
 
 	document := source.Document{ExternalID: "77", Title: "An article", UpdatedAt: now}
-	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, now); err != nil {
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -1341,7 +1341,7 @@ func TestArchivingLocallyDoesNotRetriggerTheSyncTransition(t *testing.T) {
 	// wallabag now reports it archived, because increader archived it.
 	document.IsArchived = true
 	document.UpdatedAt = now.Add(time.Hour)
-	result, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, now)
+	result, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, 0, now)
 	if err != nil {
 		t.Fatalf("re-sync: %v", err)
 	}
@@ -1365,7 +1365,7 @@ func TestQueuedWritesSupersede(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "77", UpdatedAt: now},
-	}, 0, now); err != nil {
+	}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -1401,7 +1401,7 @@ func TestTagWritesDoNotSupersedeDifferentTags(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "77", UpdatedAt: now},
-	}, 0, now); err != nil {
+	}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -1440,7 +1440,7 @@ func TestFailedWritesRetryThenStop(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "77", UpdatedAt: now},
-	}, 0, now); err != nil {
+	}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 	if err := db.SetArchived(1, "wallabag", "77", true, now); err != nil {
@@ -1480,7 +1480,7 @@ func TestTagsSyncFromProvider(t *testing.T) {
 		ExternalID: "77", Title: "Tagged", UpdatedAt: now,
 		Tags: []string{"philosophy", "long-read"}, ReadingTime: 21,
 	}
-	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, now); err != nil {
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -1498,7 +1498,7 @@ func TestTagsSyncFromProvider(t *testing.T) {
 	// so merging rather than replacing would strand it forever.
 	document.Tags = []string{"philosophy"}
 	document.UpdatedAt = now.Add(time.Hour)
-	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, now); err != nil {
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{document}, 0, 0, now); err != nil {
 		t.Fatalf("re-sync: %v", err)
 	}
 
@@ -1518,7 +1518,7 @@ func TestLibraryFilters(t *testing.T) {
 		{ExternalID: "3", Title: "Archived one", UpdatedAt: now, IsArchived: true},
 		{ExternalID: "4", Title: "Annotated one", UpdatedAt: now, IsArchived: true,
 			Highlights: []source.Highlight{{ExternalID: "9", Quote: "A passage."}}},
-	}, 0, now); err != nil {
+	}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -1573,7 +1573,7 @@ func TestBurySinksWithinTodayAndClearsItself(t *testing.T) {
 			UpdatedAt:  now,
 		})
 	}
-	if _, err := db.UpsertDocuments("wallabag", documents, 0, now); err != nil {
+	if _, err := db.UpsertDocuments("wallabag", documents, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -1619,7 +1619,7 @@ func TestRepeatedBuryIsARoundRobinNotAFixedCycle(t *testing.T) {
 			ExternalID: strconv.Itoa(i), Title: "Article " + strconv.Itoa(i), UpdatedAt: now,
 		})
 	}
-	if _, err := db.UpsertDocuments("wallabag", documents, 0, now); err != nil {
+	if _, err := db.UpsertDocuments("wallabag", documents, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -1686,7 +1686,7 @@ func TestExtractsAreDueLater(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "1", Title: "An article", UpdatedAt: now},
-	}, 0, now); err != nil {
+	}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -1698,7 +1698,11 @@ func TestExtractsAreDueLater(t *testing.T) {
 	}
 
 	extract, _ := db.ElementByID(id)
-	want := ir.Day(now.AddDate(0, 0, 10))
+	// Fuzzed a little rather than exactly 10 days out — see
+	// ir.FuzzedFirstDueDays — so the expectation is computed the same way
+	// CreateExtract itself computes it, from the same seed.
+	fuzzedDelay := ir.FuzzedFirstDueDays(extractSeed(1, "A passage."), 10)
+	want := ir.Day(now.AddDate(0, 0, fuzzedDelay))
 	if !ir.Day(extract.Schedule.DueOn).Equal(want) {
 		t.Errorf("due %v, want %v", extract.Schedule.DueOn, want)
 	}
@@ -1710,9 +1714,38 @@ func TestExtractsAreDueLater(t *testing.T) {
 	}
 }
 
+// dueDayCounts groups every imported extract's due_on by date, for the two
+// spread tests below.
+func dueDayCounts(t *testing.T, db *Store) (days, largest int) {
+	t.Helper()
+	rows, err := db.db.Query(`
+		SELECT due_on, COUNT(*) FROM elements
+		WHERE origin = 'import' GROUP BY due_on ORDER BY due_on`)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var date string
+		var count int
+		if err := rows.Scan(&date, &count); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		days++
+		if count > largest {
+			largest = count
+		}
+	}
+	return days, largest
+}
+
 // TestImportedHighlightsSpreadAcrossTheWindow: a library's import is hundreds
 // of highlights at once, and putting them all on one date moves the pile
-// rather than clearing it.
+// rather than clearing it. One highlight per document, across many documents —
+// see TestImportedHighlightsFromOneDocumentSpread for the same property
+// within a single document, which is the case a per-document seed used to
+// get wrong.
 func TestImportedHighlightsSpreadAcrossTheWindow(t *testing.T) {
 	db := testStore(t)
 	now := time.Now()
@@ -1728,31 +1761,12 @@ func TestImportedHighlightsSpreadAcrossTheWindow(t *testing.T) {
 			},
 		})
 	}
-	if _, err := db.UpsertDocuments("wallabag", documents, 10, now); err != nil {
+	const floor, spread = 10, 30
+	if _, err := db.UpsertDocuments("wallabag", documents, floor, spread, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
-	rows, err := db.db.Query(`
-		SELECT due_on, COUNT(*) FROM elements
-		WHERE origin = 'import' GROUP BY due_on ORDER BY due_on`)
-	if err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	defer rows.Close()
-
-	days, largest := 0, 0
-	for rows.Next() {
-		var date string
-		var count int
-		if err := rows.Scan(&date, &count); err != nil {
-			t.Fatalf("scan: %v", err)
-		}
-		days++
-		if count > largest {
-			largest = count
-		}
-	}
-
+	days, largest := dueDayCounts(t, db)
 	if days < 5 {
 		t.Errorf("40 highlights landed on %d distinct days; they are not spread", days)
 	}
@@ -1760,10 +1774,98 @@ func TestImportedHighlightsSpreadAcrossTheWindow(t *testing.T) {
 		t.Errorf("the busiest day holds %d of 40 highlights, want them spread", largest)
 	}
 
-	// And none of them are due today, which is the point of the delay.
+	// And none of them are due today, which is the point of the floor.
 	due, _ := db.CountDue(now, QueueArticles)
 	if due != 40 {
 		t.Errorf("%d due today, want just the 40 articles", due)
+	}
+}
+
+// TestImportedHighlightsFromOneDocumentSpread guards the actual bug report:
+// spreadOffset used to be seeded on documentID alone, which is the same value
+// for every highlight in one document's import — so a single heavily
+// annotated article, or a single book, landed every one of its passages on
+// the identical due date no matter how wide the configured window was. The
+// seed is per highlight now (document plus its own external ref), so this is
+// the case TestImportedHighlightsSpreadAcrossTheWindow's one-highlight-per-
+// document setup could never have caught.
+func TestImportedHighlightsFromOneDocumentSpread(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	highlights := make([]source.Highlight, 0, 50)
+	for i := 1; i <= 50; i++ {
+		highlights = append(highlights, source.Highlight{
+			ExternalID: "h" + strconv.Itoa(i),
+			Quote:      "Passage " + strconv.Itoa(i),
+		})
+	}
+	documents := []source.Document{
+		{ExternalID: "book", Title: "One heavily annotated piece", UpdatedAt: now,
+			Highlights: highlights, IsArchived: true},
+	}
+	const floor, spread = 30, 60
+	if _, err := db.UpsertDocuments("wallabag", documents, floor, spread, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	days, largest := dueDayCounts(t, db)
+	if days < 10 {
+		t.Errorf("50 highlights from one document landed on %d distinct days; want a real spread", days)
+	}
+	if largest > 10 {
+		t.Errorf("the busiest day holds %d of 50 highlights from one document, want them spread", largest)
+	}
+}
+
+// TestImportedHighlightsRespectTheFloor: nothing imported shows up before
+// annotation_delay_days, no matter how the spread happens to land.
+func TestImportedHighlightsRespectTheFloor(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	highlights := make([]source.Highlight, 0, 30)
+	for i := 1; i <= 30; i++ {
+		highlights = append(highlights, source.Highlight{
+			ExternalID: "h" + strconv.Itoa(i), Quote: "Passage " + strconv.Itoa(i),
+		})
+	}
+	documents := []source.Document{
+		{ExternalID: "book", Title: "A book", UpdatedAt: now, Highlights: highlights, IsArchived: true},
+	}
+	const floor, spread = 30, 60
+	if _, err := db.UpsertDocuments("wallabag", documents, floor, spread, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	rows, err := db.db.Query(`SELECT due_on FROM elements WHERE origin = 'import'`)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	defer rows.Close()
+
+	floorDate := ir.Day(now).AddDate(0, 0, floor)
+	ceilDate := ir.Day(now).AddDate(0, 0, floor+spread)
+	count := 0
+	for rows.Next() {
+		var date string
+		if err := rows.Scan(&date); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		due, err := time.ParseInLocation(dateFormat, date, time.Local)
+		if err != nil {
+			t.Fatalf("parse due_on %q: %v", date, err)
+		}
+		if due.Before(floorDate) {
+			t.Errorf("highlight due %v, before the floor %v", due, floorDate)
+		}
+		if !due.Before(ceilDate) {
+			t.Errorf("highlight due %v, at or past floor+spread %v", due, ceilDate)
+		}
+		count++
+	}
+	if count != 30 {
+		t.Fatalf("checked %d rows, want 30", count)
 	}
 }
 
@@ -1775,7 +1877,7 @@ func TestDeleteExtractCascades(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "1", Title: "An article", UpdatedAt: now},
-	}, 0, now); err != nil {
+	}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -1817,7 +1919,7 @@ func TestDeleteClozeRemovesOnlyThatOne(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "1", Title: "An article", UpdatedAt: now},
-	}, 0, now); err != nil {
+	}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 	extractID, err := db.CreateExtract(NewExtract{
@@ -1852,7 +1954,7 @@ func TestDeleteClozeMissing(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "1", Title: "An article", UpdatedAt: now},
-	}, 0, now); err != nil {
+	}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 	extractID, err := db.CreateExtract(NewExtract{
@@ -1878,7 +1980,7 @@ func TestDeleteExtractQueuesHighlightRemoval(t *testing.T) {
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
 		ExternalID: "1", Title: "An article", UpdatedAt: now,
 		Highlights: []source.Highlight{{ExternalID: "97418", Quote: "A passage."}},
-	}}, 0, now); err != nil {
+	}}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -1911,7 +2013,7 @@ func TestDeleteExtractOnManualOriginQueuesNothing(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "1", Title: "An article", UpdatedAt: now},
-	}, 0, now); err != nil {
+	}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 	extractID, err := db.CreateExtract(NewExtract{
@@ -1937,7 +2039,7 @@ func TestDeleteExtractRejectsRootTopic(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "1", Title: "An article", UpdatedAt: now},
-	}, 0, now); err != nil {
+	}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -1969,7 +2071,7 @@ func TestReconcileMissingFlagsAbsentDocuments(t *testing.T) {
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "1", Title: "Still there", UpdatedAt: now},
 		{ExternalID: "2", Title: "Deleted at wallabag", UpdatedAt: now},
-	}, 0, now); err != nil {
+	}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -2015,7 +2117,7 @@ func TestDeleteDocumentCascades(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "1", Title: "An article", UpdatedAt: now},
-	}, 0, now); err != nil {
+	}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 	extractID, err := db.CreateExtract(NewExtract{
@@ -2064,7 +2166,7 @@ func TestReconcileMissingHighlightsFlagsDeletedAnnotations(t *testing.T) {
 			{ExternalID: "h1", Quote: "Stays annotated."},
 			{ExternalID: "h2", Quote: "Deleted at wallabag."},
 		}},
-	}, 0, now); err != nil {
+	}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -2148,7 +2250,7 @@ func TestQueueLocationUpdatesFindsExtractsNeedingOne(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "1", Title: "An article", UpdatedAt: now},
-	}, 0, now); err != nil {
+	}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -2223,7 +2325,7 @@ func TestBackfillHighlightPushesQueuesMissedExtracts(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "77", Title: "An article", UpdatedAt: now},
-	}, 0, now); err != nil {
+	}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 
@@ -2325,7 +2427,7 @@ func TestBackfillHighlightPushesResetsAbandonedWrites(t *testing.T) {
 
 	if _, err := db.UpsertDocuments("wallabag", []source.Document{
 		{ExternalID: "77", Title: "An article", UpdatedAt: now},
-	}, 0, now); err != nil {
+	}, 0, 0, now); err != nil {
 		t.Fatalf("UpsertDocuments: %v", err)
 	}
 

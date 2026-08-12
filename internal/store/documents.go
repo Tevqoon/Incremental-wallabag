@@ -87,15 +87,18 @@ type UpsertResult struct {
 // UpsertDocuments imports a batch of documents from one source, creating a root
 // topic for each new one so it enters the reading queue.
 //
-// delayDays is how far ahead imported highlights are scheduled. A highlight made
-// in another client should join the rotation a little way out rather than
-// arriving already due — and dated from the import, not from the provider's own
+// annotationFloorDays and annotationSpreadDays are how imported highlights are
+// scheduled: floorDays ahead at the soonest, spread further out from there per
+// highlight rather than uniformly — see ir.FuzzedAnnotationDelay. A highlight
+// made in another client should join the rotation a good way out rather than
+// arriving already due, and dated from the import, not from the provider's own
 // timestamp, or a two-year-old highlight would land two years overdue.
 //
 // Everything happens in a single transaction: a sync that fails halfway should
 // leave no partial state, and in particular must not advance the watermark past
 // documents that were never written.
-func (s *Store) UpsertDocuments(sourceName string, documents []source.Document, delayDays int, now time.Time) (UpsertResult, error) {
+func (s *Store) UpsertDocuments(sourceName string, documents []source.Document,
+	annotationFloorDays, annotationSpreadDays int, now time.Time) (UpsertResult, error) {
 	var result UpsertResult
 
 	transaction, err := s.db.Begin()
@@ -174,7 +177,7 @@ func (s *Store) UpsertDocuments(sourceName string, documents []source.Document, 
 		}
 
 		imported, err := insertHighlights(transaction, documentID, rootID, document.Highlights,
-			highlightImport{delayDays: delayDays}, now)
+			highlightImport{floorDays: annotationFloorDays, spreadDays: annotationSpreadDays}, now)
 		if err != nil {
 			return result, err
 		}

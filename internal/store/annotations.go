@@ -44,9 +44,12 @@ type ImportOptions struct {
 	// by one, rather than queueing them outright. See highlightImport.
 	Triage bool
 
-	// DelayDays is how far ahead a queued annotation first becomes due,
-	// ignored when Triage is set.
-	DelayDays int
+	// FloorDays is the fewest days ahead a queued annotation can first become
+	// due; SpreadDays is how much further out on top of that it might land,
+	// drawn per highlight rather than applied uniformly — see
+	// ir.FuzzedAnnotationDelay. Both are ignored when Triage is set.
+	FloorDays  int
+	SpreadDays int
 }
 
 // ImportResult reports what one upload did.
@@ -147,9 +150,10 @@ func (s *Store) ImportAnnotations(document source.Document, options ImportOption
 
 		imported, err := insertHighlights(tx, result.DocumentID, rootID, document.Highlights,
 			highlightImport{
-				delayDays: options.DelayDays,
-				suspended: options.Triage,
-				triaged:   !options.Triage,
+				floorDays:  options.FloorDays,
+				spreadDays: options.SpreadDays,
+				suspended:  options.Triage,
+				triaged:    !options.Triage,
 			}, now)
 		if err != nil {
 			return err
