@@ -69,10 +69,44 @@ func TestExtractHTMLPreservesInlineMarkup(t *testing.T) {
 			want:  `<pre>code here</pre>`,
 		},
 		{
-			name:  "a list item becomes a paragraph outside its list",
+			name:  "a heading keeps its own tag rather than flattening to a paragraph",
+			html:  `<h2>A heading</h2><p>Body.</p>`,
+			given: Range{StartBlock: 0, StartOffset: 0, EndBlock: 1, EndOffset: 5},
+			want:  `<h2>A heading</h2><p>Body.</p>`,
+		},
+		{
+			name:  "a single extracted list item keeps its list wrapper",
 			html:  `<ul><li>An item</li></ul>`,
 			given: Range{StartBlock: 0, StartOffset: 0, EndBlock: 0, EndOffset: 7},
-			want:  `<p>An item</p>`,
+			want:  `<ul><li>An item</li></ul>`,
+		},
+		{
+			name:  "consecutive list items share one wrapper rather than one each",
+			html:  `<ul><li>First.</li><li>Second.</li><li>Third.</li></ul>`,
+			given: Range{StartBlock: 0, StartOffset: 0, EndBlock: 2, EndOffset: 6},
+			want:  `<ul><li>First.</li><li>Second.</li><li>Third.</li></ul>`,
+		},
+		{
+			name:  "an ordered list stays ordered",
+			html:  `<ol><li>First.</li><li>Second.</li></ol>`,
+			given: Range{StartBlock: 0, StartOffset: 0, EndBlock: 1, EndOffset: 7},
+			want:  `<ol><li>First.</li><li>Second.</li></ol>`,
+		},
+		{
+			name:  "a paragraph between two lists closes the first and opens the second",
+			html:  `<ul><li>Before.</li></ul><p>Between.</p><ul><li>After.</li></ul>`,
+			given: Range{StartBlock: 0, StartOffset: 0, EndBlock: 2, EndOffset: 6},
+			want:  `<ul><li>Before.</li></ul><p>Between.</p><ul><li>After.</li></ul>`,
+		},
+		{
+			// A list item inside a blockquote is the one shape HTML.HTML
+			// leaves to extractTag rather than wrapping in <ul>: there is no
+			// tag that means both "list item" and "quotation" at once, and
+			// the quote is what the passage is really about.
+			name:  "a quoted list item keeps its quote tag instead of a list wrapper",
+			html:  `<blockquote><ul><li>Quoted item.</li></ul></blockquote>`,
+			given: Range{StartBlock: 0, StartOffset: 0, EndBlock: 0, EndOffset: 12},
+			want:  `<blockquote>Quoted item.</blockquote>`,
 		},
 		{
 			// Offsets are measured against the decoded text "a < b & c"
@@ -82,6 +116,17 @@ func TestExtractHTMLPreservesInlineMarkup(t *testing.T) {
 			html:  `<p>a &lt; b &amp; c</p>`,
 			given: Range{StartBlock: 0, StartOffset: 0, EndBlock: 0, EndOffset: 9},
 			want:  `<p>a &lt; b &amp; c</p>`,
+		},
+		{
+			// Same leaf-rule shape as insideBlockquote's own doc comment in
+			// render.go, but exercised through HTML() rather than Render():
+			// extracting a passage out of a multi-paragraph pull quote must
+			// not lose the quote's own tag just because collectBlocks made
+			// the inner <p> the block, not the <blockquote>.
+			name:  "extracting from a multi-paragraph blockquote keeps its tag",
+			html:  `<blockquote><p>First quoted line.</p><p>Second quoted line.</p></blockquote>`,
+			given: Range{StartBlock: 0, StartOffset: 0, EndBlock: 1, EndOffset: 19},
+			want:  `<blockquote>First quoted line.</blockquote><blockquote>Second quoted line.</blockquote>`,
 		},
 	}
 
@@ -167,6 +212,34 @@ func TestRenderMarksExtracts(t *testing.T) {
 			name: "block indices are stable across mixed block types",
 			html: `<h2>Title</h2><ul><li>Item</li></ul><p>Body</p>`,
 			want: `<h2 data-b="0">Title</h2><p class="list-item" data-b="1">Item</p><p data-b="2">Body</p>`,
+		},
+		{
+			// The shape Substack's own editor writes for a multi-paragraph
+			// pull quote: collectBlocks' leaf rule means the <blockquote>
+			// never emits a block of its own, so both inner <p>s must still
+			// come out tagged as quotes rather than as indistinguishable
+			// plain paragraphs.
+			name: "each paragraph of a multi-paragraph blockquote keeps quote styling",
+			html: `<blockquote><p>First quoted line.</p><p>Second quoted line.</p></blockquote>`,
+			want: `<blockquote data-b="0">First quoted line.</blockquote>` +
+				`<blockquote data-b="1">Second quoted line.</blockquote>`,
+		},
+		{
+			name: "a quote paragraph nested one level deeper than the blockquote still keeps quote styling",
+			html: `<blockquote><div><p>Quoted line.</p></div></blockquote>`,
+			want: `<blockquote data-b="0">Quoted line.</blockquote>`,
+		},
+		{
+			// A quoted bulleted list — <blockquote><ul><li>...</li></ul></blockquote>
+			// — hits the same leaf rule as the multi-paragraph case above, but
+			// atom.Li has its own switch case in renderTag, so without its own
+			// insideBlockquote check the quote's border would apply to every
+			// other tag but this one. Rendered as <blockquote class="list-item">
+			// so the bullet (keyed on the class) and the left border (keyed on
+			// the tag) both still apply.
+			name: "a quoted list item keeps both its bullet and its quote styling",
+			html: `<blockquote><ul><li>Quoted item.</li></ul></blockquote>`,
+			want: `<blockquote class="list-item" data-b="0">Quoted item.</blockquote>`,
 		},
 		{
 			name: "a stale mark is skipped rather than breaking the page",
