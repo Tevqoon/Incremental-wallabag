@@ -76,6 +76,7 @@ type Applied struct {
 //     content write that failed has left the entry exactly as it was before
 //     this run; touching annotations on top of that would be building on
 //     content this run does not actually control.
+//
 //  2. Each annotation whose Verdict is VerdictUnique or VerdictAmbiguous,
 //     re-anchored via UpdateHighlightLocation. VerdictAnchored is skipped as
 //     pointless churn (see its own doc comment). VerdictMissing is skipped
@@ -106,6 +107,7 @@ type Applied struct {
 //     annotations either. The alternative, making one annotation's failure
 //     block the others, would turn "8 of 9 annotations re-anchored, 1
 //     network blip" into "0 of 9", for no benefit to anyone.
+//
 //  3. Tags — only for an existing entry (ActionUpdate / ActionAnnotationsOnly).
 //     A brand-new entry's tags already went out with its NewEntry.Tags on
 //     create (see entryForm), but EntryUpdate carries no Tags field at all
