@@ -1,15 +1,45 @@
 {{define "content"}}
-<section class="queue">
+<section class="queue cal">
   <div class="queue-head">
     <h1>Calendar</h1>
+    <span class="meta-inline">articles read</span>
   </div>
 
-  <p class="meta">
-    <a href="/calendar?month={{.PrevMonth}}">‹ {{.PrevMonth}}</a>
+  <nav class="cal-nav">
+    <a href="/calendar?month={{.PrevMonth}}" rel="prev" title="previous month">‹</a>
     <strong>{{.MonthLabel}}</strong>
-    <a href="/calendar?month={{.NextMonth}}">{{.NextMonth}} ›</a>
-  </p>
+    <a href="/calendar?month={{.NextMonth}}" rel="next" title="next month">›</a>
+    {{if not .IsThisMonth}}<a class="cal-today" href="/calendar">this month</a>{{end}}
+  </nav>
 
+  <div class="tiles">
+    <span class="tile is-primary">
+      <span class="tile-value">{{.Month.Articles}}</span>
+      <span class="tile-label">articles read</span>
+      <span class="tile-note">{{.Month.Reviews}} reading session{{if ne .Month.Reviews 1}}s{{end}}</span>
+    </span>
+    <span class="tile">
+      <span class="tile-value">{{.Month.Finished}}</span>
+      <span class="tile-label">finished</span>
+    </span>
+    <span class="tile">
+      <span class="tile-value">{{.Month.ActiveDays}}</span>
+      <span class="tile-label">days read on</span>
+      <span class="tile-note">of {{.MonthDays}}</span>
+    </span>
+    <span class="tile">
+      <span class="tile-value">{{.Month.Extracts}}</span>
+      <span class="tile-label">extracts taken</span>
+      {{if .Month.ExtractReviews}}
+        <span class="tile-note">{{.Month.ExtractReviews}} revisited</span>
+      {{end}}
+    </span>
+  </div>
+
+  <!-- The number in a cell is articles read that day, and the shading follows
+       it. Extract work shows as a dot rather than a second number: it is the
+       other queue's business, and two numbers in one cell would make neither
+       readable at a glance. -->
   <div class="calendar-grid">
     <div class="calendar-weekday">Mon</div>
     <div class="calendar-weekday">Tue</div>
@@ -21,14 +51,47 @@
     {{range .Days}}
       <a class="calendar-day
                 {{if not .InMonth}}is-outside{{end}}
-                {{if .Total}}has-activity{{end}}
+                {{if .IsFuture}}is-future{{end}}
                 {{if .IsToday}}is-today{{end}}"
+         style="--level: {{.Level}}"
          href="/calendar/day/{{isoDate .Date}}"
-         title="{{.Reviews}} review{{if ne .Reviews 1}}s{{end}}, {{.Extracts}} extract{{if ne .Extracts 1}}s{{end}}, {{.Articles}} article{{if ne .Articles 1}}s{{end}}, {{.Words}} word{{if ne .Words 1}}s{{end}}">
+         title="{{date .Date}}: {{.Articles}} article{{if ne .Articles 1}}s{{end}} read{{if .Finished}}, {{.Finished}} finished{{end}}{{if .Extracts}} · {{.Extracts}} extract{{if ne .Extracts 1}}s{{end}} taken{{end}}{{if .ExtractReviews}} · {{.ExtractReviews}} revisited{{end}}">
         <span class="calendar-daynum">{{.Date.Day}}</span>
-        {{if .Total}}<span class="calendar-count">{{.Total}}</span>{{end}}
+        {{if .Articles}}
+          <span class="calendar-count">{{.Articles}}</span>
+        {{else}}
+          <span class="calendar-count is-quiet">·</span>
+        {{end}}
+        {{if or .Extracts .ExtractReviews}}<span class="calendar-mark"></span>{{end}}
       </a>
     {{end}}
   </div>
+
+  {{if .Busiest.Articles}}
+    <p class="meta">
+      Best day: <a href="/calendar/day/{{isoDate .Busiest.Date}}">{{date .Busiest.Date}}</a>,
+      {{.Busiest.Articles}} article{{if ne .Busiest.Articles 1}}s{{end}}.
+      {{if .Month.Words}}{{.Month.Words}} word{{if ne .Month.Words 1}}s{{end}} extracted this month.{{end}}
+    </p>
+  {{else}}
+    <p class="meta">Nothing read this month yet.</p>
+  {{end}}
+
+  <section class="dash-section">
+    <div class="dash-section-head">
+      <h2>Articles read, by month</h2>
+      <span class="meta-inline">{{.StripTotal}} in 12 months</span>
+    </div>
+    <div class="months">
+      {{range .Months}}
+        <a class="monthbar {{if .IsShown}}is-shown{{end}}"
+           href="/calendar?month={{.Param}}" title="{{.Title}}">
+          <span class="monthbar-track"><span style="height: {{.Percent}}%"></span></span>
+          <span class="monthbar-count">{{.Articles}}</span>
+          <span class="monthbar-label">{{.Label}}</span>
+        </a>
+      {{end}}
+    </div>
+  </section>
 </section>
 {{end}}

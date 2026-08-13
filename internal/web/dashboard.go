@@ -1,6 +1,7 @@
 package web
 
 import (
+	"fmt"
 	"net/http"
 	"sort"
 	"time"
@@ -8,72 +9,88 @@ import (
 	"github.com/Tevqoon/increader/internal/store"
 )
 
-// dashboardPreviewLimit caps how many due items the dashboard shows before
-// pointing to the full queue — a taste of what's next, not a second queue.
+// dashboardPreviewLimit caps how many due items each queue's preview shows
+// before pointing to the queue itself — a taste of what's next, not a second
+// queue.
 const dashboardPreviewLimit = 5
 
-// dashboardHeatmapDays covers twelve weeks, long enough to see a pattern in
-// the activity heatmap without the grid growing unwieldy.
-const dashboardHeatmapDays = 84
+// dashboardWeeks is how far the weekly chart looks back: twelve weeks, long
+// enough for a habit to be visible and short enough to still be about now.
+const dashboardWeeks = 12
 
 // dashboardTagLimit caps the tag breakdown to what's worth a glance; the
 // library's own tag filter nav is where the rest live.
 const dashboardTagLimit = 8
 
-// weekBar is one bar in the weekly review chart: a week's worth of daily
-// activity-heatmap counts, rolled up.
+// weekBar is one bar in the weekly reading chart: articles read in a 7-day
+// window, counted distinct within it — an article read on Monday and again on
+// Thursday was one article that week.
 type weekBar struct {
-	From, To time.Time
-	Reviews  int
-	Articles int
-	Words    int
-	Percent  int
+	From, To  time.Time
+	Articles  int
+	Percent   int
+	IsCurrent bool
 }
 
 // dashboardData is what the dashboard page renders.
+//
+// The page is organised the way a session is: what to do now, how the reading
+// has been going, then the two populations it draws on — articles, and the
+// extracts taken out of them — with the second folded away, since a reader
+// opening the dashboard is nearly always about to read rather than to
+// audit the extract backlog.
 type dashboardData struct {
-	Title string
-	Today time.Time
+	Title      string
+	Today      time.Time
+	TodayParam string
 
-	// Queue & backlog health. Preview is the reading queue, which is where a
-	// session starts; ExtractsDue carries the other queue's size so that a
-	// growing extract backlog is visible from here without opening it — the
-	// one thing separate queues cost that the old interleave gave away for
-	// free, by putting extracts in front of you whether you asked or not.
-	Due         int
-	ExtractsDue int
-	Total       int
-	Preview     []store.QueueItem
-	Counts      map[string]int
+	// What's due, and a look at the head of each queue.
+	Due            int
+	ExtractsDue    int
+	Preview        []store.QueueItem
+	ExtractPreview []store.QueueItem
+	Total          int
 
-	// Reading composition
-	Tags           []store.Tag
+	// How the reading is going. ReadToday is articles, not reviews: the
+	// question the number answers is "have I read anything today".
+	ReadToday    int
+	Streak       int
+	WeekArticles int
+	Trend        string
+	Weeks        []weekBar
+	WeeksTotal   int
+
+	// The article backlog.
+	Counts map[string]int
+	Tags   []store.Tag
+
+	// The extract side, behind its own disclosure.
+	ExtractsToday  int
+	WeekExtracts   int
+	WeekWords      int
 	ManualExtracts int
 	ImportExtracts int
 	ExtractsTotal  int
 	Missing        int
 
-	// Reading activity & streaks
-	Streak       int
-	WeekReviews  int
-	WeekArticles int
-	WeekWords    int
-	Heatmap      []store.DayCount
-	Weeks        []weekBar
-
-	// Sync — a minor line, not a headline section
+	// Sync — a minor line, not a headline section.
 	PendingWrites   int
 	AbandonedWrites int
 }
 
-// handleDashboard is the app's home page: a status snapshot — queue/backlog
-// health, reading composition, and now reading activity over time — plus a
-// preview of what's next. The queue itself lives at its own page (see
-// handleQueue); this only shows the first few due items.
+// handleDashboard is the app's home page: what is due now, how much has been
+// read lately, and the shape of the backlog behind both. The queues
+// themselves live at their own pages (see handleQueue); this shows the first
+// few of each.
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	today := s.today()
 
 	preview, err := s.store.Queue(today, store.QueueArticles, dashboardPreviewLimit)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	extractPreview, err := s.store.Queue(today, store.QueueExtracts, dashboardPreviewLimit)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -125,17 +142,28 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	heatmap, err := s.store.ActivityHeatmap(today.AddDate(0, 0, -(dashboardHeatmapDays-1)), today)
+	todayCount, err := s.store.ActivityBetween(today, today)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
-	weeks := weeklyBars(heatmap)
-	var weekReviews, weekArticles, weekWords int
-	if len(weeks) > 0 {
-		last := weeks[len(weeks)-1]
-		weekReviews, weekArticles, weekWords = last.Reviews, last.Articles, last.Words
+	week, err := s.store.ActivityBetween(today.AddDate(0, 0, -6), today)
+	if err != nil {
+		s.fail(w, err)
+		return
 	}
+
+	// One pass over the (day, article) pairs feeds every window on the page,
+	// so the bar for this week and the "this week" figure beside it can never
+	// disagree — they are the same count of the same rows.
+	reads, err := s.store.ArticlesReadBetween(today.AddDate(0, 0, -(dashboardWeeks*7-1)), today)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	weeks := weeklyArticleBars(reads, today, dashboardWeeks)
+	weeksTotal := distinctArticles(reads, time.Time{}, today)
+	lastWeek := distinctArticles(reads, today.AddDate(0, 0, -13), today.AddDate(0, 0, -7))
 
 	queued, abandoned, err := s.store.CountPendingWrites("wallabag")
 	if err != nil {
@@ -144,24 +172,34 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.render(w, "dashboard.html", dashboardData{
-		Title:           "Dashboard",
-		Today:           today,
-		Due:             due,
-		ExtractsDue:     extractsDue,
-		Total:           total,
-		Preview:         preview,
-		Counts:          counts,
-		Tags:            tags,
-		ManualExtracts:  manual,
-		ImportExtracts:  imported,
-		ExtractsTotal:   manual + imported,
-		Missing:         missing,
-		Streak:          streak,
-		WeekReviews:     weekReviews,
-		WeekArticles:    weekArticles,
-		WeekWords:       weekWords,
-		Heatmap:         heatmap,
-		Weeks:           weeks,
+		Title:      "Dashboard",
+		Today:      today,
+		TodayParam: today.Format(dateLayout),
+
+		Due:            due,
+		ExtractsDue:    extractsDue,
+		Preview:        preview,
+		ExtractPreview: extractPreview,
+		Total:          total,
+
+		ReadToday:    todayCount.Articles,
+		Streak:       streak,
+		WeekArticles: week.Articles,
+		Trend:        trend(week.Articles, lastWeek),
+		Weeks:        weeks,
+		WeeksTotal:   weeksTotal,
+
+		Counts: counts,
+		Tags:   tags,
+
+		ExtractsToday:  todayCount.Extracts,
+		WeekExtracts:   week.Extracts,
+		WeekWords:      week.Words,
+		ManualExtracts: manual,
+		ImportExtracts: imported,
+		ExtractsTotal:  manual + imported,
+		Missing:        missing,
+
 		PendingWrites:   queued,
 		AbandonedWrites: abandoned,
 	})
@@ -180,49 +218,91 @@ func topTags(tags []store.Tag, n int) []store.Tag {
 	return sorted
 }
 
-// weeklyBars rolls daily heatmap counts into 7-day buckets, oldest first, so
-// the chart reads left to right the same direction time does.
-// dashboardHeatmapDays is a multiple of 7, so every bucket is a full week and
-// the last one is always the current week, ending today.
-func weeklyBars(days []store.DayCount) []weekBar {
-	if len(days) == 0 {
+// weeklyArticleBars buckets (day, article) pairs into 7-day windows ending
+// today, oldest first, so the chart reads left to right the same direction
+// time does. The last bar is the current week, which is normally still in
+// progress — hence IsCurrent, so the template can say so rather than let a
+// short bar read as a bad week.
+func weeklyArticleBars(reads []store.ArticleRead, today time.Time, weeks int) []weekBar {
+	if weeks < 1 {
 		return nil
 	}
 
-	var weeks []weekBar
+	start := today.AddDate(0, 0, -(weeks*7 - 1))
+	seen := make([]map[int64]bool, weeks)
+	for i := range seen {
+		seen[i] = map[int64]bool{}
+	}
+	for _, read := range reads {
+		bucket := daysBetween(start, read.Day) / 7
+		if bucket < 0 || bucket >= weeks {
+			continue
+		}
+		seen[bucket][read.DocumentID] = true
+	}
+
+	bars := make([]weekBar, weeks)
 	max := 0
-	for i := 0; i < len(days); i += 7 {
-		end := i + 7
-		if end > len(days) {
-			end = len(days)
+	for i := range bars {
+		from := start.AddDate(0, 0, i*7)
+		bars[i] = weekBar{
+			From:      from,
+			To:        from.AddDate(0, 0, 6),
+			Articles:  len(seen[i]),
+			IsCurrent: i == weeks-1,
 		}
-		bucket := days[i:end]
-		// Articles sums each day's distinct-document count across the week,
-		// so an article reviewed on two different days counts twice — once
-		// per day it was actually touched, which is what "articles this
-		// week" means here, as opposed to "distinct articles this week".
-		var reviews, articles, words int
-		for _, d := range bucket {
-			reviews += d.Reviews
-			articles += d.Articles
-			words += d.Words
+		if bars[i].Articles > max {
+			max = bars[i].Articles
 		}
-		if reviews > max {
-			max = reviews
-		}
-		weeks = append(weeks, weekBar{
-			From:     bucket[0].Date,
-			To:       bucket[len(bucket)-1].Date,
-			Reviews:  reviews,
-			Articles: articles,
-			Words:    words,
-		})
 	}
 	if max == 0 {
 		max = 1
 	}
-	for i := range weeks {
-		weeks[i].Percent = weeks[i].Reviews * 100 / max
+	for i := range bars {
+		bars[i].Percent = bars[i].Articles * 100 / max
 	}
-	return weeks
+	return bars
+}
+
+// distinctArticles counts the articles read in [from, to], each once however
+// many days it was read on. A zero from means "from the beginning of what was
+// loaded", which is how the whole-chart total is taken.
+func distinctArticles(reads []store.ArticleRead, from, to time.Time) int {
+	seen := map[int64]bool{}
+	for _, read := range reads {
+		if !from.IsZero() && read.Day.Before(from) {
+			continue
+		}
+		if read.Day.After(to) {
+			continue
+		}
+		seen[read.DocumentID] = true
+	}
+	return len(seen)
+}
+
+// trend phrases this week against last week. Deliberately a sentence rather
+// than a signed number: "3 more than last week" needs no legend, and a lone
+// "+3" beside a count invites reading it as part of the count.
+func trend(thisWeek, lastWeek int) string {
+	switch {
+	case lastWeek == 0 && thisWeek == 0:
+		return "nothing last week either"
+	case lastWeek == 0:
+		return "nothing last week"
+	case thisWeek == lastWeek:
+		return "same as last week"
+	case thisWeek > lastWeek:
+		return fmt.Sprintf("%d more than last week", thisWeek-lastWeek)
+	default:
+		return fmt.Sprintf("%d fewer than last week", lastWeek-thisWeek)
+	}
+}
+
+// daysBetween counts whole days from one midnight to another. Rounding to the
+// nearest day rather than truncating is what makes it survive a daylight
+// saving change inside the range, where the elapsed time between two local
+// midnights is 23 or 25 hours and a truncating divide would lose a day.
+func daysBetween(from, to time.Time) int {
+	return int(to.Sub(from).Round(24*time.Hour) / (24 * time.Hour))
 }

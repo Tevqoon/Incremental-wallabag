@@ -26,9 +26,11 @@ article source of record:
 - Second ingestion route: **KOReader and PDF annotations** via file upload
   (both the plugin and KOReader's built-in exporter), with a per-work triage
   pass.
-- Extra views: library with bulk actions, extracts browser, dashboard with
-  article/word counts, calendar of reviewed articles/highlights, light/dark
-  theme override.
+- Extra views: library with bulk actions, extracts browser, a dashboard led by
+  articles-read (queue preview, streak, a 12-week bar chart) with extract
+  activity folded into its own disclosure, a calendar of articles read (month
+  grid plus a 12-month strip) with each day's own page splitting what was read
+  from what was harvested/revisited, light/dark theme override.
 
 ## Package layout
 

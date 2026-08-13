@@ -609,22 +609,4 @@ var templateFuncs = template.FuncMap{
 		parsed.RawQuery = values.Encode()
 		return parsed.String()
 	},
-
-	// level buckets a day's activity count into a handful of discrete shades
-	// for the heatmap grid — a raw count would make two different days look
-	// like two different colours for no perceptible reason.
-	"level": func(reviews, extracts int) int {
-		switch n := reviews + extracts; {
-		case n == 0:
-			return 0
-		case n == 1:
-			return 1
-		case n <= 2:
-			return 2
-		case n <= 4:
-			return 3
-		default:
-			return 4
-		}
-	},
 }

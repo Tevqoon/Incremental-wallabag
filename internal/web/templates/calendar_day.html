@@ -1,49 +1,118 @@
 {{define "content"}}
-<section class="queue">
+<section class="queue cal-day">
   <div class="queue-head">
-    <h1>{{date .Day}}</h1>
+    <h1>{{date .Day}}{{if .IsToday}} <span class="meta-inline">today</span>{{end}}</h1>
   </div>
-  <p class="meta">
-    <a href="/calendar/day/{{.PrevDay}}">‹ prev day</a>
-    <a href="/calendar?month={{.Month}}">calendar</a>
-    <a href="/calendar/day/{{.NextDay}}">next day ›</a>
-  </p>
+  <nav class="cal-nav">
+    <a href="/calendar/day/{{.PrevDay}}" rel="prev" title="previous day">‹</a>
+    <a href="/calendar?month={{.Month}}">{{.Day.Format "January 2006"}}</a>
+    <a href="/calendar/day/{{.NextDay}}" rel="next" title="next day">›</a>
+  </nav>
 
-  {{if .Entries}}
-    <p class="meta">
-      {{.Articles}} article{{if ne .Articles 1}}s{{end}} touched ·
-      {{.Words}} word{{if ne .Words 1}}s{{end}} extracted
-    </p>
+  {{if or .Articles .Harvested .Revisited}}
+    <div class="tiles">
+      <span class="tile is-primary">
+        <span class="tile-value">{{len .Articles}}</span>
+        <span class="tile-label">article{{if ne (len .Articles) 1}}s{{end}} read</span>
+        <span class="tile-note">{{.Reviews}} reading session{{if ne .Reviews 1}}s{{end}}</span>
+      </span>
+      {{if .Finished}}
+        <span class="tile">
+          <span class="tile-value">{{.Finished}}</span>
+          <span class="tile-label">finished</span>
+        </span>
+      {{end}}
+      {{if .Harvested}}
+        <span class="tile">
+          <span class="tile-value">{{len .Harvested}}</span>
+          <span class="tile-label">extracts taken</span>
+          <span class="tile-note">{{.Words}} word{{if ne .Words 1}}s{{end}}</span>
+        </span>
+      {{end}}
+      {{if .Revisited}}
+        <span class="tile">
+          <span class="tile-value">{{len .Revisited}}</span>
+          <span class="tile-label">extracts revisited</span>
+        </span>
+      {{end}}
+    </div>
   {{end}}
 
-  {{if .Entries}}
-    <ol class="items">
-      {{range .Entries}}
-        <li class="item {{if .IsRoot}}is-article{{else}}is-extract{{end}}">
-          <a class="item-title" href="/read/{{.ID}}">
-            {{if .IsRoot}}
-              {{.DocumentTitle}}
-            {{else}}
-              {{if .Title}}{{.Title}}{{else}}{{.Quote}}{{end}}
+  <section class="dash-section">
+    <h2>Articles read</h2>
+    {{if .Articles}}
+      <ol class="items">
+        {{range .Articles}}
+          <li class="item is-article">
+            <a class="item-title" href="/read/{{.ElementID}}">{{.Title}}</a>
+            <div class="item-meta">
+              <span class="badge{{if .Finished}} badge-done{{end}}">{{.Grade}}</span>
+              {{if gt .Reviews 1}}<span>{{.Reviews}} sessions</span>{{end}}
+              {{if .Extracts}}<span>{{.Extracts}} extract{{if ne .Extracts 1}}s{{end}} taken</span>{{end}}
+              <a class="source" href="/documents/{{.DocumentID}}">contents</a>
+            </div>
+          </li>
+        {{end}}
+      </ol>
+    {{else}}
+      <div class="empty">
+        <p>No articles read this day.</p>
+      </div>
+    {{end}}
+  </section>
+
+  <!-- Extracts behind a disclosure, as on the dashboard: a day's record is
+       first of all what was read, and a long list of passages harvested would
+       otherwise bury the handful of articles they came out of. -->
+  {{if or .Harvested .Revisited}}
+    <details class="dash-drawer">
+      <summary>
+        <span class="drawer-title">Extracts</span>
+        <span class="drawer-summary">
+          {{if .Harvested}}{{len .Harvested}} taken{{end}}
+          {{if and .Harvested .Revisited}} · {{end}}
+          {{if .Revisited}}{{len .Revisited}} revisited{{end}}
+        </span>
+      </summary>
+
+      <div class="drawer-body">
+        {{if .Harvested}}
+          <h3 class="drawer-heading">Taken</h3>
+          <ol class="items">
+            {{range .Harvested}}
+              <li class="item is-extract">
+                <a class="item-title" href="/read/{{.ID}}">
+                  {{if .Title}}{{.Title}}{{else}}{{.Quote}}{{end}}
+                </a>
+                <div class="item-meta">
+                  <span>{{.Words}} word{{if ne .Words 1}}s{{end}}</span>
+                  {{if .Chapter}}<span class="source">{{.Chapter}}</span>{{end}}
+                  <span class="source">from {{.DocumentTitle}}</span>
+                </div>
+              </li>
             {{end}}
-          </a>
-          <div class="item-meta">
-            {{if eq .Kind "review"}}
-              <span class="badge">{{.Grade}}</span>
-            {{else}}
-              <span class="badge">extract</span>
-              <span class="source">{{.Words}} word{{if ne .Words 1}}s{{end}}</span>
+          </ol>
+        {{end}}
+
+        {{if .Revisited}}
+          <h3 class="drawer-heading">Revisited</h3>
+          <ol class="items">
+            {{range .Revisited}}
+              <li class="item is-extract">
+                <a class="item-title" href="/read/{{.ID}}">
+                  {{if .Title}}{{.Title}}{{else}}{{.Quote}}{{end}}
+                </a>
+                <div class="item-meta">
+                  <span class="badge">{{.Grade}}</span>
+                  {{if .Chapter}}<span class="source">{{.Chapter}}</span>{{end}}
+                  <span class="source">from {{.DocumentTitle}}</span>
+                </div>
+              </li>
             {{end}}
-            {{if .Chapter}}<span class="source">{{.Chapter}}</span>{{end}}
-            {{if not .IsRoot}}<span class="source">from {{.DocumentTitle}}</span>{{end}}
-          </div>
-        </li>
-      {{end}}
-    </ol>
-  {{else}}
-    <div class="empty">
-      <p>Nothing logged this day.</p>
-    </div>
+          </ol>
+        {{end}}
+      </div>
+    </details>
   {{end}}
 </section>
 {{end}}
