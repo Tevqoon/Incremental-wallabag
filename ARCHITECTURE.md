@@ -40,8 +40,11 @@ Dependency direction is strictly downward — no leaf package reaches up into
 - `internal/source` — dependency-free leaf. Defines `Source` plus small
   *optional* capability interfaces (`Enricher`, `Writer`, `RangeResolver`)
   discovered by type assertion, so a read-only provider (a future Zotero,
-  say) never has to stub write methods. Wallabag is one source; Anki and
-  org-roam are targets behind a `Target` interface.
+  say) never has to stub write methods. Wallabag is one source. There is no
+  corresponding `Target` interface: annotations leave through the JSON API
+  instead (`internal/web/api.go`), so that a consumer which already knows its
+  own format — org-roam, via a thin elisp layer — owns that knowledge rather
+  than a Go exporter reimplementing it here.
 - `internal/ir` — pure, I/O-free domain logic: block indexing, extraction,
   cloze rendering, scheduling (`schedule.go`, timezone-consistent "today" via
   `time.Local` pinned at startup). Fully unit-testable and fully unit-tested.
@@ -61,7 +64,8 @@ Dependency direction is strictly downward — no leaf package reaches up into
   for partial swaps. Handlers split across `server.go`, `queue.go`
   (grading/tags/library/bulk actions), `reader.go`, `document.go`,
   `dashboard.go`, `calendar.go`, `import.go`, `images.go`, `embeds.go`,
-  `footnotes.go`, `sanitize.go`. State-changing actions are plain HTML forms
+  `footnotes.go`, `sanitize.go`, and `api.go` — a small read-mostly JSON
+  surface over annotations, for mirroring them into org-roam. State-changing actions are plain HTML forms
   that work with JS disabled; `app.js` only layers convenience on top
   (selection→block/offset coordinates, scroll anchoring across swaps,
   bulk-select).
@@ -75,6 +79,15 @@ Dependency direction is strictly downward — no leaf package reaches up into
   outage delays a write instead of losing it. Deleting an extract cascades
   away its not-yet-sent create-write. The drain side (read pending → call
   provider → complete) is serialized behind `drainMu`.
+- **A passage's verbatim text is never written from outside.** `quote` is what
+  a highlight is *located* by — re-derived against the article on every open —
+  and what the outbox pushes upstream as a wallabag annotation's body. The
+  JSON API therefore cannot write it: a correction goes to `edited_quote`,
+  read only by the display (`Element.DisplayQuote`). That is what makes
+  "fix the mangled maths from Emacs" safe by construction rather than by the
+  caller knowing which rows happen to be anchored. increader's own annotation
+  editor still rewrites `quote` directly, and clears the override when it
+  does; see migration 018.
 - **Stale-selection protection.** Extract/cloze creation re-derives the
   selected passage server-side from its own sanitized copy of the article and
   responds 409 on mismatch, so an annotation cannot silently attach to the

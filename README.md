@@ -216,6 +216,52 @@ Tags and the star toggle sit above the article and write straight through to
 wallabag. The Library's filter tabs carry the same counts as wallabag's own
 sidebar — Unread, Starred, Archive, Annotated — plus per-tag filters.
 
+## JSON API
+
+There is a small read-mostly JSON API under `/api`, for mirroring annotations
+somewhere else. It was built for an org-roam exporter: a thin elisp layer that
+turns each document's passages into one org file, so annotations are linkable
+from notes without increader needing to know anything about org's file layout
+or capture templates. That knowledge stays in Emacs, which already has it.
+
+```
+GET   /api/documents                 documents that have annotations
+GET   /api/documents/{id}            one document, with all of its annotations
+GET   /api/annotations/{id}          one annotation
+PATCH /api/annotations/{id}          edit title, note, chapter or text
+```
+
+`GET /api/documents` supports `?since=<RFC3339>`, `?source=`, and `?limit=`.
+Each entry carries `annotations_updated_at` — the newest change among that
+document's passages — and feeding it back as `since` returns only what has
+moved since, which is what makes an exporter incremental rather than a full
+rewrite every run. `?since` is strict, so handing back the value you were just
+given returns nothing rather than the row that produced it.
+
+`PATCH` takes any of `title`, `note`, `chapter`, `text`. Fields you leave out
+are left alone; sending `""` clears one. An unknown field is a 400 rather than
+being ignored, so a consumer is never left believing an edit landed.
+
+**`text` sets a display override, not the passage itself.** A passage's
+verbatim text is what increader locates a highlight by — it is re-derived
+against the article every time one is opened — and what gets pushed back to
+wallabag as the annotation's body. Rewriting it from outside would silently
+detach the highlight and change what goes upstream. So a correction is stored
+beside the original instead: `text` is what to display, `original_text` is what
+arrived, and `edited` says whether they differ by choice. Nothing but the
+display reads the override, which is what makes correcting mangled text — PDF
+maths that extracted as noise, an OCR'd ligature — safe on any annotation
+rather than only on the ones that happen not to be anchored. The reader shows
+the correction too. Clearing it (`{"text": ""}`) falls back to the original,
+and editing the passage in increader's own annotation editor rewrites the
+original outright and supersedes the override.
+
+What the API deliberately does not offer is grading, extracting or anything
+else that schedules: those run through `ir.Next` and the outbox, and a second
+surface over them is how one-caller-one-implementation stops being true. There
+is no auth, and no version prefix — the same reasoning as the rest of the app
+(see the deployment note in `config.yaml`).
+
 ## Development
 
 ```bash
@@ -232,9 +278,8 @@ internal/
   annotations/  KOReader / PDF file parsers  ← the other seam in
   ir/           addressing, extracts, clozes, scheduling (stdlib only)
   store/        SQLite, hand-written SQL
-  export/       the Target interface         ← seam out
   syncer/       source → store
-  web/          handlers, templates, assets
+  web/          handlers, templates, assets, JSON API  ← seam out
 ```
 
 Two things are worth knowing before changing anything:
@@ -274,6 +319,9 @@ heading" can become a bulk chapter override later.
 after a release that starts storing a field it did not before, since incremental
 sync would otherwise never see it on entries that have not changed.
 
-Not yet built: the Anki and org-roam exporters. The `exports` ledger they need
-already exists in the schema — idempotent re-export requires that history to
-have been recorded all along, and it cannot be reconstructed after the fact.
+Annotations leave through the JSON API above rather than through an exporter
+built in here. The `exports` ledger in the schema is unused as a result: a
+consumer that keeps its own copy — org-roam nodes have their own IDs — knows
+better than increader can whether something needs rewriting. It stays in the
+schema because that history cannot be reconstructed after the fact if an
+in-process exporter ever does turn out to be wanted.

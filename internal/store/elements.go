@@ -60,6 +60,13 @@ type Element struct {
 	ContentHTML string
 	Quote       string
 
+	// EditedQuote is the reader's own corrected wording of Quote, empty when
+	// there is none. It is display text and nothing else: no anchoring or
+	// write-back path reads it, which is what makes editing a passage from
+	// outside the reader safe even on an anchored highlight. Read it through
+	// DisplayQuote rather than directly — see migration 018.
+	EditedQuote string
+
 	// Range locates an extract inside its parent. Meaningful only when
 	// HasRange is set, which is false for root topics.
 	Range    ir.Range
@@ -126,6 +133,23 @@ type Element struct {
 
 // Triaged reports whether this element has been through a triage pass.
 func (e Element) Triaged() bool { return !e.TriagedAt.IsZero() }
+
+// DisplayQuote is the passage as it should be shown: the reader's own
+// correction when there is one, otherwise the text as it arrived.
+//
+// Every caller that shows a passage to a person goes through this rather than
+// reading Quote, and every caller that *locates* a passage — anchoring it in
+// an article, pushing it upstream — reads Quote directly. That split is the
+// whole point of the two fields; see migration 018.
+func (e Element) DisplayQuote() string {
+	if e.EditedQuote != "" {
+		return e.EditedQuote
+	}
+	return e.Quote
+}
+
+// Edited reports whether the reader has overridden this passage's text.
+func (e Element) Edited() bool { return e.EditedQuote != "" }
 
 // IsRoot reports whether this element is a whole document rather than an
 // extract taken from one.
@@ -212,7 +236,8 @@ const elementColumns = `
 	e.priority, e.state, e.due_on, e.interval_days, e.afactor, e.reps,
 	e.read_block, e.origin, COALESCE(e.external_ref, ''), e.missing_upstream,
 	e.buried_on, COALESCE(e.ranges, ''), e.created_at, e.updated_at,
-	e.note, e.chapter, e.page, e.color, e.ordinal, e.triaged_at`
+	e.note, e.chapter, e.page, e.color, e.ordinal, e.triaged_at,
+	e.edited_quote`
 
 // nullableElement holds the columns that can be NULL, which cannot be scanned
 // straight into the Element fields they populate.
@@ -247,6 +272,7 @@ func scanTargets(element *Element, nullable *nullableElement) []any {
 		&nullable.buriedOn, &element.Ranges, &nullable.createdAt, &nullable.updatedAt,
 		&element.Note, &element.Chapter, &element.Page, &element.Color,
 		&element.Ordinal, &nullable.triagedAt,
+		&element.EditedQuote,
 	}
 }
 
@@ -1300,10 +1326,18 @@ func (s *Store) AnchorExtract(id int64, position ir.Range, quote, contentHTML st
 //
 // Scoped to parent_id IS NOT NULL: a document's root topic has no passage or
 // chapter of its own to edit.
+//
+// Clears edited_quote, because this rewrites the passage itself and an
+// override exists only to shadow one that could not be. Leaving it would mean
+// correcting the text here and seeing nothing change, the old override still
+// standing in front of the new original — and the two editors would then
+// disagree about which of them owns the passage. They do not: this one is
+// authoritative and destructive, the API's override is neither, so a write
+// here supersedes it. See migration 018 and EditAnnotation.
 func (s *Store) UpdateAnnotation(id int64, quote, note, chapter string, now time.Time) error {
 	result, err := s.db.Exec(`
 		UPDATE elements SET
-		    quote = ?, note = ?, chapter = ?,
+		    quote = ?, note = ?, chapter = ?, edited_quote = '',
 		    content_html = CASE WHEN start_block IS NULL THEN ? ELSE content_html END,
 		    updated_at = ?
 		WHERE id = ? AND parent_id IS NOT NULL`,
@@ -1311,6 +1345,104 @@ func (s *Store) UpdateAnnotation(id int64, quote, note, chapter string, now time
 	)
 	if err != nil {
 		return fmt.Errorf("store: update annotation %d: %w", id, err)
+	}
+	if n, _ := result.RowsAffected(); n == 0 {
+		return fmt.Errorf("store: element %d: %w", id, ErrNotFound)
+	}
+	return nil
+}
+
+// AnnotationEdit is a partial change to the fields of an annotation that
+// belong to the reader rather than to the provider it came from.
+//
+// Every field is a pointer so that "leave this alone" and "set this to empty"
+// are different requests. That distinction is the whole reason this type
+// exists rather than another positional setter like UpdateAnnotation: an
+// external editor sends whichever fields it knows about, and one that never
+// heard of chapters must not blank the chapters of everything it touches.
+//
+// What is deliberately absent is as important as what is here. There is no
+// Quote: the verbatim text an annotation arrived with is the provider's, and
+// it is what anchoring and write-back are measured against — a correction
+// goes to EditedQuote, which nothing reads but the display. There is no
+// schedule, priority or state either; those move through ir.Next and the
+// grading path, not through a field assignment.
+type AnnotationEdit struct {
+	// Title is the annotation's heading. Derived from the passage by
+	// SummariseQuote when it was created, and free to be replaced by
+	// something meaningful — nothing depends on its value.
+	Title *string
+
+	// Note is the reader's comment on the passage, as opposed to the passage.
+	Note *string
+
+	// Chapter is where in the work the passage sits.
+	Chapter *string
+
+	// EditedQuote overrides the passage's wording for display. Setting it to
+	// the empty string removes the override and falls back to the original,
+	// which is why it is spelled as a pointer to an empty string rather than
+	// as its own "clear" operation.
+	EditedQuote *string
+}
+
+// isEmpty reports whether this edit would change nothing.
+func (e AnnotationEdit) isEmpty() bool {
+	return e.Title == nil && e.Note == nil && e.Chapter == nil && e.EditedQuote == nil
+}
+
+// EditAnnotation applies a partial edit to one annotation.
+//
+// Scoped to parent_id IS NOT NULL like UpdateAnnotation and for the same
+// reason: a document's root topic stands for the whole work and has no
+// passage, note or chapter of its own.
+//
+// Unlike UpdateAnnotation this never rebuilds content_html. UpdateAnnotation
+// does because it rewrites the passage itself, and an unanchored annotation's
+// markup is nothing but that passage escaped into a paragraph — so leaving it
+// would show the old wording. Here the passage is untouched by definition:
+// the override lives in its own column, and content_html remains the faithful
+// record of what arrived. Callers that want the correction render
+// DisplayQuote.
+func (s *Store) EditAnnotation(id int64, edit AnnotationEdit, now time.Time) error {
+	if edit.isEmpty() {
+		return nil
+	}
+
+	// Column names are fixed literals chosen by which pointers are set; only
+	// values are ever bound. Assembling the statement rather than writing one
+	// with a COALESCE per column keeps "was this field in the request" out of
+	// the SQL, where expressing it needs a sentinel that some legitimate value
+	// could collide with.
+	assignments := make([]string, 0, 5)
+	args := make([]any, 0, 6)
+
+	if edit.Title != nil {
+		assignments = append(assignments, "title = ?")
+		args = append(args, *edit.Title)
+	}
+	if edit.Note != nil {
+		assignments = append(assignments, "note = ?")
+		args = append(args, *edit.Note)
+	}
+	if edit.Chapter != nil {
+		assignments = append(assignments, "chapter = ?")
+		args = append(args, *edit.Chapter)
+	}
+	if edit.EditedQuote != nil {
+		assignments = append(assignments, "edited_quote = ?")
+		args = append(args, *edit.EditedQuote)
+	}
+	assignments = append(assignments, "updated_at = ?")
+	args = append(args, formatTime(now), id)
+
+	result, err := s.db.Exec(
+		`UPDATE elements SET `+strings.Join(assignments, ", ")+
+			` WHERE id = ? AND parent_id IS NOT NULL`,
+		args...,
+	)
+	if err != nil {
+		return fmt.Errorf("store: edit annotation %d: %w", id, err)
 	}
 	if n, _ := result.RowsAffected(); n == 0 {
 		return fmt.Errorf("store: element %d: %w", id, ErrNotFound)

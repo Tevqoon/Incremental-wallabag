@@ -76,7 +76,7 @@
           <input type="checkbox" name="ids" value="{{.ID}}" form="bulk-form"
                  class="item-select" aria-label="Select extract">
           <div class="item-body">
-          <a class="item-title" href="/read/{{.ID}}">{{.Quote}}</a>
+          <a class="item-title" href="/read/{{.ID}}">{{.DisplayQuote}}</a>
           <div class="item-meta">
             {{if eq .Origin "import"}}<span class="badge">wallabag</span>{{end}}
             {{if .MissingUpstream}}

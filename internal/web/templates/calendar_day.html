@@ -82,7 +82,7 @@
             {{range .Harvested}}
               <li class="item is-extract">
                 <a class="item-title" href="/read/{{.ID}}">
-                  {{if .Title}}{{.Title}}{{else}}{{.Quote}}{{end}}
+                  {{if .Title}}{{.Title}}{{else}}{{.DisplayQuote}}{{end}}
                 </a>
                 <div class="item-meta">
                   <span>{{.Words}} word{{if ne .Words 1}}s{{end}}</span>
@@ -100,7 +100,7 @@
             {{range .Revisited}}
               <li class="item is-extract">
                 <a class="item-title" href="/read/{{.ID}}">
-                  {{if .Title}}{{.Title}}{{else}}{{.Quote}}{{end}}
+                  {{if .Title}}{{.Title}}{{else}}{{.DisplayQuote}}{{end}}
                 </a>
                 <div class="item-meta">
                   <span class="badge">{{.Grade}}</span>
