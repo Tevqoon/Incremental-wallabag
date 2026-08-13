@@ -17,13 +17,20 @@ import (
 // whatever is left of their contents.
 //
 // Each block becomes its own element in the result, so a selection spanning
-// three paragraphs produces three paragraphs.
+// three paragraphs produces three paragraphs. This is the only copy of a
+// passage's structure increader keeps once the extract is made: the parent
+// article's own HTML can change or vanish on a re-fetch, and the plain-text
+// Quote stored alongside this (see web.handleExtract) is deliberately what
+// goes to wallabag — its highlight API has no field for markup at all — so
+// whatever this function fails to carry over is gone from increader's own
+// copy for good, not just unstyled on one page.
 func (a *Article) HTML(r Range) (string, error) {
 	if err := a.Valid(r); err != nil {
 		return "", err
 	}
 
 	var out strings.Builder
+	list := openList{}
 	for index := r.StartBlock; index <= r.EndBlock; index++ {
 		block := a.blocks[index]
 
@@ -48,31 +55,96 @@ func (a *Article) HTML(r Range) (string, error) {
 			continue
 		}
 
+		// A list item outside a blockquote gets its <ul>/<ol> back — see
+		// openList — rather than falling through to extractTag's plain "p"
+		// like every other tag does. One inside a blockquote is left to
+		// extractTag instead: HTML has no way to nest "this is a list item"
+		// and "this is a quotation" in one tag, and losing the bullet is the
+		// smaller loss of the two, since a quoted list is rare and the
+		// surrounding quote is what gives the passage its meaning.
+		if block.node.DataAtom == atom.Li && !insideBlockquote(block.node) {
+			list.add(block.node, fragment.String(), &out)
+			continue
+		}
+		list.close(&out)
+
 		tag := extractTag(block.node)
 		out.WriteString("<" + tag + ">")
 		out.WriteString(fragment.String())
 		out.WriteString("</" + tag + ">")
 	}
+	list.close(&out)
 
 	return out.String(), nil
 }
 
-// extractTag decides what element wraps a clipped block. Preformatted text and
-// quotations carry meaning in their tag; everything else becomes a paragraph,
-// because a list item or table cell makes no sense outside its container.
+// openList tracks the <ul>/<ol> HTML is partway through writing, so a run of
+// consecutive <li> blocks becomes one shared list instead of each reverting
+// to a bare, invalid <li> with nothing to contain it.
+//
+// Zero value is "no list open" — every method is safe to call on one before
+// add's first call ever runs.
+type openList struct {
+	tag  string // "" means no list is currently open.
+	open bool
+}
+
+// listTag reports whether node's own parent is an ordered list, so a
+// numbered source list stays numbered rather than becoming generic bullets.
+func listTag(node *html.Node) string {
+	if node.Parent != nil && node.Parent.DataAtom == atom.Ol {
+		return "ol"
+	}
+	return "ul"
+}
+
+// add writes one <li>, opening a new list first if none is open yet, or the
+// open one is the wrong kind for node (a numbered list immediately followed
+// by a bulleted one, or vice versa — two distinct source lists that happen
+// to sit in consecutive blocks with nothing extracted between them).
+func (l *openList) add(node *html.Node, inner string, out *strings.Builder) {
+	tag := listTag(node)
+	if l.open && l.tag != tag {
+		l.close(out)
+	}
+	if !l.open {
+		out.WriteString("<" + tag + ">")
+		l.tag, l.open = tag, true
+	}
+	out.WriteString("<li>" + inner + "</li>")
+}
+
+// close ends whatever list is open, if any. Safe to call unconditionally
+// between every non-<li> block and once more after the loop, since it is a
+// no-op when nothing is open.
+func (l *openList) close(out *strings.Builder) {
+	if !l.open {
+		return
+	}
+	out.WriteString("</" + l.tag + ">")
+	l.open = false
+}
+
+// extractTag decides what element wraps a clipped block that HTML's own
+// list handling above did not already take care of. Preformatted text,
+// quotations and headings all carry meaning in their tag; everything else
+// becomes a paragraph, because a table cell makes no sense outside its
+// container the way a run of list items now does.
 //
 // insideBlockquote (shared with renderTag in render.go) catches the same
 // shape that motivates it there: a multi-paragraph pull quote —
 // <blockquote><p>...</p><p>...</p></blockquote>, what Substack's own editor
 // writes for any quote of more than one paragraph — never has a block whose
 // node is the <blockquote> itself, since collectBlocks' leaf rule lets the
-// inner <p>s claim the blocks instead. Selecting text from such a passage and
-// extracting it would otherwise store the extract as a bare <p>, losing the
-// quote styling permanently at the point of extraction rather than just at
-// one render — every future render of that stored extract inherits the loss,
-// not just the article's own live view of it.
+// inner <p>s (or <li>s) claim the blocks instead. Selecting text from such a
+// passage and extracting it would otherwise store the extract as a bare
+// <p>, losing the quote styling permanently at the point of extraction
+// rather than just at one render — every future render of that stored
+// extract inherits the loss, not just the article's own live view of it.
 func extractTag(node *html.Node) string {
 	switch node.DataAtom {
+	case atom.H1, atom.H2, atom.H3, atom.H4, atom.H5, atom.H6:
+		return node.Data
 	case atom.Pre:
 		return "pre"
 	case atom.Blockquote:

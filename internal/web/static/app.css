@@ -209,7 +209,9 @@ h1 { font-size: 1.5rem; line-height: 1.25; margin: 0 0 0.35rem; }
 #article p { line-height: 1.7; }
 
 #article h1, #article h2, #article h3,
-#article h4, #article h5, #article h6 {
+#article h4, #article h5, #article h6,
+.triage-body h1, .triage-body h2, .triage-body h3,
+.triage-body h4, .triage-body h5, .triage-body h6 {
   font-size: 1.15rem;
   line-height: 1.35;
   margin: 2rem 0 0.75em;

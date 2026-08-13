@@ -69,10 +69,44 @@ func TestExtractHTMLPreservesInlineMarkup(t *testing.T) {
 			want:  `<pre>code here</pre>`,
 		},
 		{
-			name:  "a list item becomes a paragraph outside its list",
+			name:  "a heading keeps its own tag rather than flattening to a paragraph",
+			html:  `<h2>A heading</h2><p>Body.</p>`,
+			given: Range{StartBlock: 0, StartOffset: 0, EndBlock: 1, EndOffset: 5},
+			want:  `<h2>A heading</h2><p>Body.</p>`,
+		},
+		{
+			name:  "a single extracted list item keeps its list wrapper",
 			html:  `<ul><li>An item</li></ul>`,
 			given: Range{StartBlock: 0, StartOffset: 0, EndBlock: 0, EndOffset: 7},
-			want:  `<p>An item</p>`,
+			want:  `<ul><li>An item</li></ul>`,
+		},
+		{
+			name:  "consecutive list items share one wrapper rather than one each",
+			html:  `<ul><li>First.</li><li>Second.</li><li>Third.</li></ul>`,
+			given: Range{StartBlock: 0, StartOffset: 0, EndBlock: 2, EndOffset: 6},
+			want:  `<ul><li>First.</li><li>Second.</li><li>Third.</li></ul>`,
+		},
+		{
+			name:  "an ordered list stays ordered",
+			html:  `<ol><li>First.</li><li>Second.</li></ol>`,
+			given: Range{StartBlock: 0, StartOffset: 0, EndBlock: 1, EndOffset: 7},
+			want:  `<ol><li>First.</li><li>Second.</li></ol>`,
+		},
+		{
+			name:  "a paragraph between two lists closes the first and opens the second",
+			html:  `<ul><li>Before.</li></ul><p>Between.</p><ul><li>After.</li></ul>`,
+			given: Range{StartBlock: 0, StartOffset: 0, EndBlock: 2, EndOffset: 6},
+			want:  `<ul><li>Before.</li></ul><p>Between.</p><ul><li>After.</li></ul>`,
+		},
+		{
+			// A list item inside a blockquote is the one shape HTML.HTML
+			// leaves to extractTag rather than wrapping in <ul>: there is no
+			// tag that means both "list item" and "quotation" at once, and
+			// the quote is what the passage is really about.
+			name:  "a quoted list item keeps its quote tag instead of a list wrapper",
+			html:  `<blockquote><ul><li>Quoted item.</li></ul></blockquote>`,
+			given: Range{StartBlock: 0, StartOffset: 0, EndBlock: 0, EndOffset: 12},
+			want:  `<blockquote>Quoted item.</blockquote>`,
 		},
 		{
 			// Offsets are measured against the decoded text "a < b & c"
