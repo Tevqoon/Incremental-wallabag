@@ -1247,11 +1247,25 @@ func TestSanitizerStripsScripts(t *testing.T) {
 	// Asserted against the hostile payload rather than against "<script",
 	// because the page's own layout legitimately loads htmx and app.js.
 	for _, forbidden := range []string{
-		"alert(1)", "steal()", "onclick", "javascript:", "<iframe", "evil.example",
+		"alert(1)", "steal()", "onclick", "javascript:", "<iframe",
 	} {
 		if strings.Contains(body, forbidden) {
 			t.Errorf("rendered page contains %q:\n%s", forbidden, body)
 		}
+	}
+
+	// The frame's address does survive, as a link: rewriteEmbeds turns every
+	// iframe into one, because a frame the policy silently deletes takes an
+	// article's charts with it. That is not a loosening. What makes a frame
+	// dangerous is that it loads a nested browsing context by itself, with no
+	// reader involved — and the assertion above is what pins that shut. What
+	// is left is an ordinary outbound link, which a hostile article could
+	// have written directly as an <a> anyway, and which the policy still
+	// vets: it must be a real http(s) URL, and it carries the same
+	// nofollow/noreferrer/target the policy puts on every other link out.
+	want := `<a href="https://evil.example" rel="noopener noreferrer" target="_blank">Embedded content</a>`
+	if !strings.Contains(body, want) {
+		t.Errorf("the link a frame became is missing the policy's link protections:\n%s", body)
 	}
 	if !strings.Contains(body, "Before.") {
 		t.Error("sanitising removed the legitimate text too")

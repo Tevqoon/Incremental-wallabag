@@ -52,11 +52,11 @@ func stripInvisibleFormatting(s string) string {
 //
 // sourceURL is the article's own URL — empty for anything that is not a
 // whole article read at some address (a book annotation, an extract read
-// back through here for offset purposes only). See rewriteSamePageLinks for
-// what it is used for; passed through even when empty, since that rewrite is
-// itself a safe no-op with nothing to compare against.
+// back through here for offset purposes only). See rewriteSamePageLinks and
+// rewriteEmbeds for what it is used for; passed through even when empty,
+// since both are safe no-ops with nothing to resolve or compare against.
 func (s *Server) sanitize(rawHTML, sourceURL string) string {
-	preprocessed := rewriteFootnotes(rewriteEmbeds(rawHTML))
+	preprocessed := rewriteFootnotes(rewriteEmbeds(rawHTML, sourceURL))
 	sanitized := s.policy.Sanitize(preprocessed)
 	return stripInvisibleFormatting(rewriteSamePageLinks(sanitized, sourceURL))
 }

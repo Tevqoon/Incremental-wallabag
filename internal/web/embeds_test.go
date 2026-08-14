@@ -23,7 +23,7 @@ const substackTweetEmbed = `<a href="https://x.com/nabeelqu/status/1" target="_b
 // several disconnected, unstyled paragraphs with no link left at all —
 // becomes one blockquote wrapping one link back to the original tweet.
 func TestRewriteEmbedsProducesAWorkingLink(t *testing.T) {
-	got := rewriteEmbeds("<p>Before.</p>" + substackTweetEmbed + "<p>After.</p>")
+	got := rewriteEmbeds("<p>Before.</p>"+substackTweetEmbed+"<p>After.</p>", "")
 
 	if !strings.Contains(got, `<blockquote><a href="https://xcancel.com/nabeelqu/status/1">`) {
 		t.Errorf("rewriteEmbeds did not produce the expected blockquote+link, got:\n%s", got)
@@ -49,7 +49,7 @@ func TestRewriteEmbedsIgnoresOtherSubstackWidgets(t *testing.T) {
 	html := `<a href="https://example.com/x" data-component-name="Image2ToDOM">` +
 		`<img src="a.jpg" alt="a picture"/></a>`
 
-	got := rewriteEmbeds(html)
+	got := rewriteEmbeds(html, "")
 
 	if !strings.Contains(got, `data-component-name="Image2ToDOM"`) {
 		t.Errorf("an unrelated Substack widget should not be touched, got:\n%s", got)
@@ -73,7 +73,7 @@ func TestRewriteEmbedsFailsSafely(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got := rewriteEmbeds(test.html)
+			got := rewriteEmbeds(test.html, "")
 			if strings.Contains(got, `href=""`) {
 				t.Errorf("produced a link with an empty href, got:\n%s", got)
 			}
@@ -93,6 +93,89 @@ func TestSanitizeRewritesTweetEmbeds(t *testing.T) {
 
 	if !strings.Contains(got, `<blockquote><a href="https://xcancel.com/nabeelqu/status/1"`) {
 		t.Errorf("sanitize did not rewrite the embed, got:\n%s", got)
+	}
+}
+
+// danluuChartEmbed is one of the interactive charts in danluu.com/pl-tokens,
+// copied verbatim from the published page. It is the case this rewrite
+// exists for, and its shape is the whole problem: a relative src, a title
+// that is the only readable thing about it, and no fallback content of any
+// kind — once the frame goes, nothing records that a chart was there.
+const danluuChartEmbed = `<iframe class="interactive-chart" ` +
+	`src="/interactive/pl-tokens/v7-average-x-vs-correctness.html" ` +
+	`title="Zstd cost or time versus correctness by language and effort" loading="lazy"></iframe>`
+
+// TestRewriteEmbedsLinksAFrameToItsSource is the frame half of rewriteEmbeds'
+// promise: a chart embedded as a bare iframe, which newPolicy strips without
+// trace, becomes a blockquote linking to the chart at its original address.
+func TestRewriteEmbedsLinksAFrameToItsSource(t *testing.T) {
+	got := rewriteEmbeds("<p>Before.</p>"+danluuChartEmbed+"<p>After.</p>", "https://danluu.com/pl-tokens/")
+
+	want := `<blockquote><a href="https://danluu.com/interactive/pl-tokens/v7-average-x-vs-correctness.html">` +
+		`Embedded content: Zstd cost or time versus correctness by language and effort</a></blockquote>`
+	if !strings.Contains(got, want) {
+		t.Errorf("rewriteEmbeds did not link the frame to its source, got:\n%s", got)
+	}
+	if !strings.Contains(got, "<p>Before.</p>") || !strings.Contains(got, "<p>After.</p>") {
+		t.Errorf("surrounding content should be untouched, got:\n%s", got)
+	}
+}
+
+// TestRewriteEmbedsLabelsAnUntitledFrame covers the frame with nothing to
+// describe it: the link still has to say that something was embedded here,
+// because that fact is the part the reader cannot otherwise recover.
+func TestRewriteEmbedsLabelsAnUntitledFrame(t *testing.T) {
+	got := rewriteEmbeds(`<iframe src="https://example.com/widget"></iframe>`, "https://example.com/post")
+
+	if !strings.Contains(got, `<blockquote><a href="https://example.com/widget">Embedded content</a></blockquote>`) {
+		t.Errorf("an untitled frame should still become a labelled link, got:\n%s", got)
+	}
+	if strings.Contains(got, "Embedded content:") {
+		t.Errorf("no title means no trailing colon, got:\n%s", got)
+	}
+}
+
+// TestRewriteEmbedsLeavesUnfollowableFrames covers every src that must not
+// become a link. A frame the reader cannot follow is worse as an <a> than as
+// the deletion it already is — and a relative src with no article URL to
+// resolve it against is exactly as unfollowable as a javascript: one.
+func TestRewriteEmbedsLeavesUnfollowableFrames(t *testing.T) {
+	tests := []struct {
+		name, html, sourceURL string
+	}{
+		{"no src", `<iframe title="a chart"></iframe>`, "https://danluu.com/pl-tokens/"},
+		{"about:blank", `<iframe src="about:blank"></iframe>`, "https://danluu.com/pl-tokens/"},
+		{"javascript", `<iframe src="javascript:alert(1)"></iframe>`, "https://danluu.com/pl-tokens/"},
+		{"data document", `<iframe src="data:text/html,<p>hi</p>"></iframe>`, "https://danluu.com/pl-tokens/"},
+		{"relative src, no article URL", danluuChartEmbed, ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := rewriteEmbeds(test.html, test.sourceURL)
+			if strings.Contains(got, "<blockquote>") {
+				t.Errorf("should not have produced a link, got:\n%s", got)
+			}
+		})
+	}
+}
+
+// TestSanitizeLinksChartFrames is the integration point, and the reason the
+// rewrite has to run before bluemonday rather than after: by the time the
+// policy is done there is no iframe left to find, so a pass ordered after it
+// would have nothing at all to work with.
+func TestSanitizeLinksChartFrames(t *testing.T) {
+	server := &Server{policy: newPolicy()}
+
+	got := server.sanitize(danluuChartEmbed, "https://danluu.com/pl-tokens/")
+
+	if !strings.Contains(got, `href="https://danluu.com/interactive/pl-tokens/v7-average-x-vs-correctness.html"`) {
+		t.Errorf("sanitize did not preserve the chart link, got:\n%s", got)
+	}
+	if !strings.Contains(got, "Zstd cost or time versus correctness") {
+		t.Errorf("sanitize dropped the frame's title, got:\n%s", got)
+	}
+	if strings.Contains(got, "<iframe") {
+		t.Errorf("the frame itself must not survive the policy, got:\n%s", got)
 	}
 }
 
