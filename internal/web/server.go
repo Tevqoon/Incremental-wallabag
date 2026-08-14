@@ -464,7 +464,19 @@ func (s *Server) anchorHighlights(document store.Document, element store.Element
 		// Nothing actually changed — the common case for an already
 		// anchored highlight whose range had nothing further to offer.
 		// Skip the write rather than touching updated_at for no reason.
-		if extract.HasRange && quote == extract.Quote {
+		//
+		// The position has to be part of that comparison, not just the text.
+		// Matching on text alone asks "does this quote still read the same?"
+		// when the question is "is this still where it sits?", and those come
+		// apart precisely when a block is inserted ahead of the passage: the
+		// quote is found, unchanged, one block further down than the stored
+		// offsets say, so the text compares equal and the stale position is
+		// kept. Confirmed in production — rewriteEmbeds turning a dropped
+		// <iframe> into a blockquote added a block at index 4 of a real
+		// article, and four of its five highlights stopped rendering entirely
+		// because their now-shifted ranges no longer fit the blocks they
+		// pointed at, while this check kept skipping the repair.
+		if extract.HasRange && quote == extract.Quote && position == extract.Range {
 			continue
 		}
 		markup, err := article.HTML(position)

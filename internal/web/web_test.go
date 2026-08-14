@@ -2322,6 +2322,62 @@ func TestResolvedRangeMustBeLongerToReplaceAGoodAnchor(t *testing.T) {
 // the very next time its article is opened, that stale, truncated anchor
 // must be replaced with the full recovered text, not left as it was because
 // something was already sitting in start_block.
+// TestAnchorRepairsAStalePositionWhoseTextStillMatches covers the case where
+// a highlight's text is still exactly right and its position is not.
+//
+// That happens whenever a block is inserted ahead of the passage, which any
+// change to what the sanitiser emits can do: rewriteEmbeds turning a dropped
+// <iframe> into a linked blockquote did it to a real article, adding a block
+// at index 4 and shifting every highlight below it. Locate finds the quote
+// again without trouble — it reads the same as it always did — so a skip
+// keyed on text alone concludes nothing changed and keeps the stale offsets.
+// The highlights then stop rendering entirely, because a range that no longer
+// fits the block it points at is dropped rather than drawn.
+func TestAnchorRepairsAStalePositionWhoseTextStillMatches(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
+		ExternalID: "1", Title: "A test article", UpdatedAt: time.Now(),
+		Highlights: []source.Highlight{{
+			ExternalID: "500", Quote: "quick brown",
+			Ranges: json.RawMessage(`["stub-range"]`),
+		}},
+	}}, 0, 0, time.Now()); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	get(t, server, "/read/1")
+	anchored, _ := db.ChildrenOf(1)
+	if len(anchored) != 1 || !anchored[0].HasRange {
+		t.Fatalf("test premise is wrong: %+v", anchored)
+	}
+	correct := anchored[0].Range
+
+	// Displace it exactly as a block inserted above it would, leaving the
+	// quote itself untouched so only the position is wrong.
+	stale := correct
+	stale.StartBlock++
+	stale.EndBlock++
+	if err := db.AnchorExtract(anchored[0].ID, stale,
+		anchored[0].Quote, anchored[0].ContentHTML, time.Now()); err != nil {
+		t.Fatalf("AnchorExtract: %v", err)
+	}
+
+	get(t, server, "/read/1")
+
+	after, _ := db.ChildrenOf(1)
+	if len(after) != 1 {
+		t.Fatalf("got %d extracts, want 1", len(after))
+	}
+	if after[0].Range != correct {
+		t.Errorf("a stale position whose text still matches was not repaired:\n got %+v\nwant %+v",
+			after[0].Range, correct)
+	}
+	if after[0].Quote != "quick brown" {
+		t.Errorf("the repair rewrote the quote: %q", after[0].Quote)
+	}
+}
+
 func TestAlreadyAnchoredHighlightUpgradesOnceRangesArrivesLater(t *testing.T) {
 	server, db, provider := newTestServer(t, true)
 
