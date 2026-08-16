@@ -156,7 +156,7 @@ func applyCreate(ctx context.Context, client *wallabag.Client, item Item, applie
 	entry, err := client.CreateEntry(ctx, wallabag.NewEntry{
 		URL:         item.Post.URL,
 		Title:       item.Post.Title,
-		Content:     item.Post.ContentHTML,
+		Content:     forWallabag(item.Post.ContentHTML),
 		Language:    item.Post.Language,
 		Authors:     item.Post.Author,
 		PublishedAt: item.Post.PublishedAt,
@@ -185,7 +185,7 @@ func applyExisting(ctx context.Context, client *wallabag.Client, src *wallabag.S
 	if item.Action == ActionUpdate {
 		_, err := client.UpdateEntry(ctx, item.EntryID, wallabag.EntryUpdate{
 			Title:   item.Post.Title,
-			Content: item.Post.ContentHTML,
+			Content: forWallabag(item.Post.ContentHTML),
 			// Authors is re-sent on every write that touches content,
 			// deliberately: a content-only PATCH against the live API
 			// preserved the title but blanked published_by (see

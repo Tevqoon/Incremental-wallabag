@@ -445,3 +445,56 @@ func TestApplySkipsConflictAndSkipItems(t *testing.T) {
 		t.Errorf("Applied = %+v, want an entirely zero result", applied)
 	}
 }
+
+// TestApplySendsWallabagAdaptedContent is the integration-level half of
+// content.go's own unit tests: forWallabag itself is tested directly there,
+// this pins that Apply actually calls it on the way out for both a create
+// and a content-touching update, rather than only for one of the two paths
+// applyCreate/applyExisting duplicate the content field between.
+func TestApplySendsWallabagAdaptedContent(t *testing.T) {
+	var createdContent, updatedContent string
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /oauth/v2/token", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "test-token", "expires_in": 3600, "token_type": "bearer",
+		})
+	})
+	mux.HandleFunc("POST /api/entries.json", func(w http.ResponseWriter, r *http.Request) {
+		r.ParseForm()
+		createdContent = r.FormValue("content")
+		json.NewEncoder(w).Encode(wallabag.Entry{ID: 900})
+	})
+	mux.HandleFunc("PATCH /api/entries/1.json", func(w http.ResponseWriter, r *http.Request) {
+		r.ParseForm()
+		updatedContent = r.FormValue("content")
+		json.NewEncoder(w).Encode(wallabag.Entry{ID: 1})
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client, src := testClientAndSource(t, server.URL)
+
+	plan := Plan{Items: []Item{
+		{
+			Post:   source.Document{URL: "https://example.substack.com/p/new-post", ContentHTML: "<p>Intro.</p><h1>A Heading</h1>"},
+			Action: ActionCreate,
+		},
+		{
+			Post:    source.Document{URL: "https://example.substack.com/p/existing-post", ContentHTML: "<p>Intro.</p><h1>Another Heading</h1>", Author: "An Author"},
+			EntryID: 1,
+			Action:  ActionUpdate,
+		},
+	}}
+
+	if _, err := Apply(context.Background(), client, src, plan, discardLogger()); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	if strings.Contains(createdContent, "<h1") || !strings.Contains(createdContent, "<h2>A Heading</h2>") {
+		t.Errorf("created entry's content = %q, want the h1 demoted to h2", createdContent)
+	}
+	if strings.Contains(updatedContent, "<h1") || !strings.Contains(updatedContent, "<h2>Another Heading</h2>") {
+		t.Errorf("updated entry's content = %q, want the h1 demoted to h2", updatedContent)
+	}
+}
