@@ -94,5 +94,40 @@
 
     <button type="submit" class="primary">Import</button>
   </form>
+
+  {{if .SubstackEnabled}}
+    <h2>Import from a URL</h2>
+    <p class="meta">
+      One Substack post, fetched directly rather than through wallabag's own
+      extraction — which routinely drops structure, headings most visibly.
+      Creates the entry in wallabag if it does not exist there yet, or
+      replaces its content in place if what is there is not the full
+      article, re-anchoring any highlights already made on it either way.
+    </p>
+
+    {{if .SubstackError}}
+      <div class="notice notice-danger">could not import: {{.SubstackError}}</div>
+    {{end}}
+
+    {{if .SubstackReport}}
+      <div class="notice">
+        <p>Imported <a href="{{.SubstackURL}}" rel="noopener noreferrer" target="_blank">{{.SubstackURL}}</a>.</p>
+        <pre class="cloze-preview">{{.SubstackReport}}</pre>
+      </div>
+    {{end}}
+
+    <form class="import-form" method="post" action="/import/substack">
+      <label class="field">
+        <span>URL</span>
+        <input type="url" name="substack_url" placeholder="https://example.substack.com/p/…"
+               value="{{.SubstackURL}}" required>
+        <small>
+          A single post's own URL, not the publication's front page or
+          archive — the same address its "Share" button copies.
+        </small>
+      </label>
+      <button type="submit" class="primary">Import</button>
+    </form>
+  {{end}}
 </section>
 {{end}}

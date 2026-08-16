@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -37,6 +38,27 @@ type importData struct {
 	Warnings []string
 	Error    string
 	Filename string
+
+	// SubstackEnabled shows or hides the "import from a URL" section —
+	// see Server.importSubstackURL. There is nothing useful that section's
+	// own form can do without it configured, so it does not render at all
+	// rather than rendering disabled.
+	SubstackEnabled bool
+
+	// SubstackURL, SubstackReport and SubstackError describe a URL import
+	// that just happened, the same way Filename/Result/Warnings/Error
+	// describe a file upload above — kept as separate fields rather than
+	// reusing Error/Filename because either form can fail with the other
+	// left completely blank (an empty file field never reaches Filename;
+	// an empty URL field never reaches SubstackURL), which would otherwise
+	// make the two indistinguishable in the template. SubstackURL re-fills
+	// the form (a failed import is usually retried after fixing the same
+	// URL, not retyped from scratch); SubstackReport is ingest.WriteReport's
+	// own plain-text summary, rendered as-is rather than picked apart into
+	// template fields.
+	SubstackURL    string
+	SubstackReport string
+	SubstackError  string
 }
 
 func (s *Server) handleImportForm(w http.ResponseWriter, r *http.Request) {
@@ -52,10 +74,53 @@ func (s *Server) renderImport(w http.ResponseWriter, data importData) {
 		return
 	}
 	data.Existing = existing
+	data.SubstackEnabled = s.importSubstackURL != nil
 	if data.Title == "" {
 		data.Title = "Import annotations"
 	}
 	s.render(w, "import.html", data)
+}
+
+// importSubstackTimeout bounds one URL import: a handful of Substack
+// requests (throttled roughly a second and a half apart — see
+// substack.defaultRequestGap) plus the wallabag reconcile pass afterward,
+// comfortably inside a minute even on a paid post that needs the extra
+// differential fetch.
+const importSubstackTimeout = 60 * time.Second
+
+// handleImportSubstackURL fetches one Substack post directly — bypassing
+// wallabag's own readability extraction, which drops structure (headings,
+// most visibly) that internal/substack's cleaning keeps — and reconciles it
+// into wallabag in place: creating the entry if wallabag has never seen
+// this post, replacing its content if what is there is not yet the full
+// article, and re-anchoring any annotations already made on it either way.
+//
+// The web-triggered, single-URL counterpart to `increader import-substack`,
+// which does the same reconciliation across a publication's whole archive.
+// See internal/substack.FetchPost and internal/ingest for what actually
+// does the work; importSubstackURL (built in cmd/increader/main.go) is only
+// the wiring, and this handler only reads the form and reports the result.
+func (s *Server) handleImportSubstackURL(w http.ResponseWriter, r *http.Request) {
+	if s.importSubstackURL == nil {
+		http.Error(w, "substack import is not configured", http.StatusNotImplemented)
+		return
+	}
+
+	rawURL := strings.TrimSpace(r.FormValue("substack_url"))
+	if rawURL == "" {
+		s.renderImport(w, importData{SubstackError: "Paste a Substack post URL to import."})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), importSubstackTimeout)
+	defer cancel()
+
+	report, err := s.importSubstackURL(ctx, rawURL)
+	if err != nil {
+		s.renderImport(w, importData{SubstackURL: rawURL, SubstackError: err.Error()})
+		return
+	}
+	s.renderImport(w, importData{SubstackURL: rawURL, SubstackReport: report})
 }
 
 // handleImport reads an uploaded annotation file into the library.

@@ -66,6 +66,19 @@ type Server struct {
 	// finishes. Optional: without it, new documents at a provider only arrive
 	// on the next scheduled tick.
 	syncNow func(context.Context) error
+
+	// importSubstackURL fetches one Substack post and reconciles it into
+	// wallabag — the web-triggered, single-URL counterpart to the
+	// `import-substack` command's whole-archive backfill. nil when
+	// ingest.substack has no session cookie configured, which is what hides
+	// the section on the import page.
+	//
+	// A closure built in cmd/increader/main.go rather than this package
+	// importing internal/wallabag and internal/ingest directly — the same
+	// reason Publish and SyncNow are closures: dependency direction is
+	// strictly downward (see ARCHITECTURE.md), and web must not depend on a
+	// concrete provider.
+	importSubstackURL func(ctx context.Context, url string) (string, error)
 }
 
 // Options configures a Server.
@@ -97,6 +110,11 @@ type Options struct {
 	// Publish it is expected to block for the duration of the request: the
 	// point is for the page that follows to already show what it fetched.
 	SyncNow func(context.Context) error
+
+	// ImportSubstackURL backs the import page's "from a URL" section — see
+	// Server.importSubstackURL for what it does and why it is a closure.
+	// Leave nil to hide that section entirely.
+	ImportSubstackURL func(ctx context.Context, url string) (string, error)
 }
 
 // New builds a Server and parses its templates.
@@ -117,6 +135,7 @@ func New(options Options) (*Server, error) {
 		pages:                     make(map[string]*template.Template),
 		publish:                   options.Publish,
 		syncNow:                   options.SyncNow,
+		importSubstackURL:         options.ImportSubstackURL,
 	}
 
 	for _, name := range pageNames {
@@ -150,6 +169,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /library/bulk", s.handleLibraryBulk)
 	mux.HandleFunc("GET /import", s.handleImportForm)
 	mux.HandleFunc("POST /import", s.handleImport)
+	mux.HandleFunc("POST /import/substack", s.handleImportSubstackURL)
 	mux.HandleFunc("GET /documents/{id}", s.handleDocument)
 	mux.HandleFunc("POST /documents/{id}/titles", s.handleDocumentTitles)
 	mux.HandleFunc("POST /documents/{id}/chapters", s.handleSetChapters)

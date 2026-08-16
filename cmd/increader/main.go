@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -345,6 +346,128 @@ func importSubstack(settings config.Config, logger *slog.Logger, commit bool, ho
 	return nil
 }
 
+// importSubstackURLHandler returns the closure serve wires into
+// web.Options.ImportSubstackURL, or nil when there is no session cookie
+// configured to fetch with — nil is what hides the import page's "from a
+// URL" section entirely, the same on/off switch Enabled() is for the
+// archive-backfill command, just without requiring Host too (see
+// importSubstackURL's own doc comment for why Host does not belong in that
+// check here).
+func importSubstackURLHandler(db *store.Store, settings config.Config, logger *slog.Logger) func(context.Context, string) (string, error) {
+	if settings.Ingest.Substack.SessionCookie == "" {
+		return nil
+	}
+	return func(ctx context.Context, rawURL string) (string, error) {
+		return importSubstackURL(ctx, db, settings, logger, rawURL)
+	}
+}
+
+// importSubstackURL fetches and reconciles exactly one Substack post into
+// wallabag — the web-triggered counterpart to importSubstack, scoped to a
+// single URL instead of a whole archive. This is what backs the import
+// page's "from a URL" section (see web.Options.ImportSubstackURL), for the
+// common case importSubstack's own standing archive-backfill configuration
+// does not fit well: one or two articles from a publication the operator
+// has no ongoing reason to configure a whole backfill for, pulled in
+// because wallabag's own Substack extraction drops structure — headings,
+// most visibly — that internal/substack's own cleaning keeps.
+//
+// Unlike importSubstack, the publication host comes from the URL itself,
+// not settings.Ingest.Substack.Host: that field (and Enabled()) describes
+// the one publication a standing archive backfill is configured for, which
+// has nothing to do with which publication a pasted URL happens to belong
+// to. Only the session cookie — the operator's own account, valid across
+// any publication it can reach — and wallabag being configured are
+// required here. db is the already-open store the caller (serve) holds,
+// reused rather than opened again; client and src are still built fresh
+// here, the same as importSubstack already does and for the same reason
+// (see its own comment on openStore): internal/ingest needs the concrete
+// *wallabag.Client and *wallabag.Source, which openStore does not expose.
+func importSubstackURL(ctx context.Context, db *store.Store, settings config.Config, logger *slog.Logger, rawURL string) (string, error) {
+	if settings.Ingest.Substack.SessionCookie == "" {
+		return "", fmt.Errorf("substack import is not configured (need ingest.substack.session_cookie in config.yaml)")
+	}
+	if !settings.Sources.Wallabag.Enabled() {
+		return "", fmt.Errorf("substack import needs sources.wallabag configured; this reconciles into wallabag")
+	}
+
+	host, slug, err := substack.PostFromURL(rawURL)
+	if err != nil {
+		return "", err
+	}
+
+	cacheDir := settings.Ingest.Substack.CacheDir
+	if cacheDir == "" {
+		// Load only fills this in when Ingest.Substack.Host is also set (see
+		// config.Load) — a reasonable gap for the archive-backfill path,
+		// where Host is required anyway, but this path needs a value even
+		// when Host was never configured at all, since it never reads Host
+		// in the first place.
+		cacheDir = "./substack-cache"
+	}
+
+	imp, err := substack.New(substack.Config{
+		Host:      host,
+		SessionID: settings.Ingest.Substack.SessionCookie,
+		CacheDir:  cacheDir,
+	})
+	if err != nil {
+		return "", err
+	}
+
+	doc, warnings, err := imp.FetchPost(ctx, slug)
+	if err != nil {
+		return "", err
+	}
+	// Tagged with the post's own publication, not settings.Ingest.Substack.Tag
+	// — that default names the one publication the archive backfill is
+	// configured for, which this post very often is not.
+	doc.Tags = append(doc.Tags, strings.SplitN(host, ".", 2)[0])
+	docs := []source.Document{doc}
+
+	client, err := wallabag.New(wallabag.Config{
+		URL:          settings.Sources.Wallabag.URL,
+		ClientID:     settings.Sources.Wallabag.ClientID,
+		ClientSecret: settings.Sources.Wallabag.ClientSecret,
+		Username:     settings.Sources.Wallabag.Username,
+		Password:     settings.Sources.Wallabag.Password,
+	})
+	if err != nil {
+		return "", err
+	}
+	src := wallabag.NewSource(client)
+
+	snap, err := ingest.Gather(ctx, client, docs)
+	if err != nil {
+		return "", err
+	}
+	now := time.Now()
+	plan := ingest.BuildPlan(docs, snap, now)
+
+	applied, err := ingest.Apply(ctx, client, src, plan, logger)
+	if err != nil {
+		return "", err
+	}
+	repaired, err := ingest.Repair(ctx, db, applied, now, logger)
+	if err != nil {
+		return "", err
+	}
+
+	var report strings.Builder
+	for _, warning := range warnings {
+		fmt.Fprintln(&report, "substack warning:", warning)
+	}
+	if err := ingest.WriteReport(&report, plan, &applied); err != nil {
+		return "", err
+	}
+	fmt.Fprintf(&report, "repair: %d entries repaired locally, %d skipped (no local row yet), %d errors\n",
+		repaired.Repaired, repaired.Skipped, len(repaired.Errors))
+	for _, repairErr := range repaired.Errors {
+		fmt.Fprintln(&report, "repair warning:", repairErr)
+	}
+	return report.String(), nil
+}
+
 func serve(settings config.Config, logger *slog.Logger) error {
 	db, sources, err := openStore(settings, logger)
 	if err != nil {
@@ -389,6 +512,7 @@ func serve(settings config.Config, logger *slog.Logger) error {
 			}
 			return reconcileErr
 		},
+		ImportSubstackURL: importSubstackURLHandler(db, settings, logger),
 	})
 	if err != nil {
 		return err

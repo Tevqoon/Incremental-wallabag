@@ -1,8 +1,12 @@
 package main
 
 import (
+	"io"
+	"log/slog"
 	"reflect"
 	"testing"
+
+	"github.com/Tevqoon/increader/internal/config"
 )
 
 // TestSplitCommand exercises both flag orderings splitCommand exists to
@@ -81,5 +85,27 @@ func TestSplitCommand(t *testing.T) {
 func TestCommandsIncludesImportSubstack(t *testing.T) {
 	if !commands["import-substack"] {
 		t.Error(`commands["import-substack"] = false, want true`)
+	}
+}
+
+// TestImportSubstackURLHandlerGating: the single-URL web import needs only
+// the session cookie, unlike Enabled() (which the whole-archive backfill
+// command uses and which also requires Host) — a pasted URL supplies its
+// own publication, so requiring one already configured in config.yaml would
+// make the feature unusable for exactly the case it exists for: a
+// publication other than the one, if any, an archive backfill is set up
+// for. db is nil in both cases; the handler must never be invoked here, only
+// checked for nil-ness, so that is never dereferenced.
+func TestImportSubstackURLHandlerGating(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	var settings config.Config
+	if got := importSubstackURLHandler(nil, settings, logger); got != nil {
+		t.Error("handler is non-nil with no session cookie configured")
+	}
+
+	settings.Ingest.Substack.SessionCookie = "s%3Asecret"
+	if got := importSubstackURLHandler(nil, settings, logger); got == nil {
+		t.Error("handler is nil despite a session cookie being configured")
 	}
 }
