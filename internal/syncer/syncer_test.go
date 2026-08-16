@@ -22,6 +22,7 @@ import (
 type writingSource struct {
 	archived            map[string]bool
 	tags                map[string][]string
+	deletedEntries      []string
 	deletedHighlights   []string
 	createdHighlights   []string // "entryID:quote", in call order
 	relocatedHighlights []string // "oldID->newID:entryID:quote", in call order
@@ -106,6 +107,15 @@ func (w *writingSource) AddTags(_ context.Context, id string, labels []string) e
 func (w *writingSource) RemoveTag(context.Context, string, string) error {
 	w.calls++
 	return w.failWith
+}
+
+func (w *writingSource) DeleteEntry(_ context.Context, id string) error {
+	w.calls++
+	if w.failWith != nil {
+		return w.failWith
+	}
+	w.deletedEntries = append(w.deletedEntries, id)
+	return nil
 }
 
 func (w *writingSource) DeleteHighlight(_ context.Context, id string) error {
@@ -210,6 +220,29 @@ func TestDrainPublishesQueuedWrites(t *testing.T) {
 	remaining, _ := db.PendingWrites("wallabag", 10)
 	if len(remaining) != 0 {
 		t.Errorf("%d writes still queued after publishing", len(remaining))
+	}
+}
+
+// TestDrainPublishesEntryDelete covers OpEntryDelete's own dispatch in
+// applyWrite — the one whole-document write-back, as opposed to every other
+// op here which only ever touches one annotation or one flag on an entry
+// that stays.
+func TestDrainPublishesEntryDelete(t *testing.T) {
+	db, logger := testSetup(t)
+	seed(t, db)
+
+	if err := db.EnqueueWrite("wallabag", "77", store.OpEntryDelete, ""); err != nil {
+		t.Fatalf("EnqueueWrite: %v", err)
+	}
+
+	provider := newWritingSource()
+	published := New(db, logger, provider).drainWrites(context.Background(), provider)
+
+	if published != 1 {
+		t.Errorf("published %d writes, want 1", published)
+	}
+	if len(provider.deletedEntries) != 1 || provider.deletedEntries[0] != "77" {
+		t.Errorf("deletedEntries = %v, want [\"77\"]", provider.deletedEntries)
 	}
 }
 

@@ -84,6 +84,12 @@ type Writer interface {
 	AddTags(ctx context.Context, externalID string, labels []string) error
 	RemoveTag(ctx context.Context, externalID string, label string) error
 
+	// DeleteEntry removes a whole document at the provider, not just one
+	// annotation on it. Deleting a document locally without this would be
+	// pointless on its own — the provider still has it, and the very next
+	// sync would just re-create what was just removed.
+	DeleteEntry(ctx context.Context, externalID string) error
+
 	// DeleteHighlight removes one annotation at the provider, identified by its
 	// own external id — a Highlight.ExternalID, not a document's. Deleting an
 	// extract that came from an imported highlight must remove the highlight

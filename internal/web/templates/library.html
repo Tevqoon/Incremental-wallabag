@@ -140,14 +140,18 @@
             {{if .URL}}
               <a href="{{.URL}}" rel="noopener noreferrer" target="_blank">source ↗</a>
             {{end}}
-            {{if .MissingUpstream}}
-              <button class="tiny danger"
-                      hx-delete="/documents/{{.ID}}?swap_only=1"
-                      hx-target="#document-{{.ID}}" hx-swap="outerHTML"
-                      hx-confirm="Delete “{{.Heading}}” from increader? It no longer exists in wallabag, and this cannot be undone.">
-                delete
-              </button>
-            {{end}}
+            <!-- Unconditional now that Store.DeleteDocument queues the
+                 provider-side removal itself (see OpEntryDelete) — deleting
+                 one still present upstream no longer means it just comes
+                 back on the next sync. The confirm text still varies:
+                 nothing upstream to warn about for an upload, and a
+                 already-missing one has nothing left there to remove. -->
+            <button class="tiny danger"
+                    hx-delete="/documents/{{.ID}}?swap_only=1"
+                    hx-target="#document-{{.ID}}" hx-swap="outerHTML"
+                    hx-confirm="Delete “{{.Heading}}”? {{if .MissingUpstream}}It already no longer exists in wallabag; this only removes it here.{{else if not .IsUpload}}It will also be removed from wallabag.{{end}} This cannot be undone.">
+              delete
+            </button>
           </div>
           </div>
         </li>

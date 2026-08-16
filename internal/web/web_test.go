@@ -3571,18 +3571,28 @@ func TestDeleteExtractMissing(t *testing.T) {
 	}
 }
 
-// TestDeleteDocumentRequiresMissingFlag is what keeps the library's delete
-// button from being a general-purpose "remove any article" action: a
-// document still found upstream would just be re-created on the very next
-// sync, so deleting one is refused until reconciliation has flagged it gone.
-func TestDeleteDocumentRequiresMissingFlag(t *testing.T) {
+// TestDeleteDocumentQueuesUpstreamRemoval is what makes the library's delete
+// button safe to offer on a document still found upstream, unlike before
+// OpEntryDelete existed: deleting one used to be refused outright, since it
+// would just have been re-created on the very next sync. Now the removal is
+// queued for the provider in the same transaction as the local delete, so
+// there is nothing left there to bring it back.
+func TestDeleteDocumentQueuesUpstreamRemoval(t *testing.T) {
 	server, db, _ := newTestServer(t, true)
 
-	if response := del(t, server, "/documents/1"); response.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400 — the document still exists upstream", response.Code)
+	if response := del(t, server, "/documents/1"); response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", response.Code)
 	}
-	if _, err := db.DocumentByID(1); err != nil {
-		t.Errorf("the document was removed despite the rejection: %v", err)
+	if _, err := db.DocumentByID(1); err == nil {
+		t.Error("the document survived the delete")
+	}
+
+	writes, err := db.PendingWrites("wallabag", 10)
+	if err != nil {
+		t.Fatalf("PendingWrites: %v", err)
+	}
+	if len(writes) != 1 || writes[0].Operation != store.OpEntryDelete || writes[0].ExternalID != "1" {
+		t.Errorf("PendingWrites = %+v, want one OpEntryDelete for external id 1", writes)
 	}
 }
 

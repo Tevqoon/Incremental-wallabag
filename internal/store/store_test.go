@@ -2193,6 +2193,32 @@ func TestDeleteDocumentCascades(t *testing.T) {
 	}
 }
 
+// TestDeleteDocumentQueuesEntryDelete: deleting a document locally is only
+// half the job for one that still exists upstream — without OpEntryDelete
+// queued alongside it, the very next sync would just bring it right back.
+func TestDeleteDocumentQueuesEntryDelete(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "42", Title: "An article", UpdatedAt: now},
+	}, 0, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	if err := db.DeleteDocument(1); err != nil {
+		t.Fatalf("DeleteDocument: %v", err)
+	}
+
+	writes, err := db.PendingWrites("wallabag", 10)
+	if err != nil {
+		t.Fatalf("PendingWrites: %v", err)
+	}
+	if len(writes) != 1 || writes[0].Operation != OpEntryDelete || writes[0].ExternalID != "42" {
+		t.Errorf("PendingWrites = %+v, want one OpEntryDelete for external id 42", writes)
+	}
+}
+
 func TestDeleteDocumentMissing(t *testing.T) {
 	db := testStore(t)
 	if err := db.DeleteDocument(999); !errors.Is(err, ErrNotFound) {

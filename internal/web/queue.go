@@ -959,14 +959,16 @@ func (s *Server) handleLibraryBulk(w http.ResponseWriter, r *http.Request) {
 	s.redirect(w, r, redirectTarget(r, "/library"))
 }
 
-// handleDeleteDocument permanently removes a document no longer found
-// upstream, and everything under it.
+// handleDeleteDocument permanently removes a document and everything under
+// it, both here and at the provider.
 //
-// Scoped deliberately to documents ReconcileMissing has flagged: this is not
-// a general "delete any article" button. increader otherwise treats a
-// document's lifecycle as wallabag's to decide, and one still found upstream
-// would just be re-created on the very next sync anyway — so the guard here
-// is not just caution, it is what keeps the button from being pointless.
+// Used to be scoped to documents ReconcileMissing had already flagged gone
+// upstream, back when there was no way to reach wallabag from here at all —
+// deleting one still present would just have been re-created on the very
+// next sync. Store.DeleteDocument now queues the provider-side removal in
+// the same transaction as the local one (see OpEntryDelete), which is what
+// makes this safe to offer everywhere in the library instead: the entry
+// actually leaves wallabag too, so there is nothing left to bring it back.
 func (s *Server) handleDeleteDocument(w http.ResponseWriter, r *http.Request) {
 	id, err := elementID(r) // generic {id} path value, not element-specific
 	if err != nil {
@@ -974,21 +976,11 @@ func (s *Server) handleDeleteDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	document, err := s.store.DocumentByID(id)
-	if err != nil {
+	if err := s.store.DeleteDocument(id); err != nil {
 		s.notFoundOrFail(w, err)
 		return
 	}
-	if !document.MissingUpstream {
-		http.Error(w, "this document still exists upstream; only one missing from wallabag can be deleted here",
-			http.StatusBadRequest)
-		return
-	}
-
-	if err := s.store.DeleteDocument(id); err != nil {
-		s.fail(w, err)
-		return
-	}
+	s.publishSoon()
 
 	// The library page deletes a row in place — swap_only tells the handler
 	// to answer with an empty 200 so htmx's outerHTML swap on the containing

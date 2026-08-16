@@ -465,15 +465,36 @@ func (s *Store) MissingCandidates(sourceName string, present []string) ([]string
 // longer has the original, so the only choices left are keeping a permanent
 // orphan or removing it — and that is the reader's call, never automatic,
 // which is why nothing in the sync path calls this on its own.
+// DeleteDocument permanently removes a document and everything under it,
+// queuing its removal at the provider first, in the same transaction as the
+// local delete — the same pairing every other write-back in this file uses,
+// so a crash between the two never leaves one done without the other.
+//
+// A document with no provider identity (an uploaded book, say) has an empty
+// external_id, and enqueueWrite already no-ops on that: there is nothing to
+// queue against, so this is purely a local delete for one of those.
 func (s *Store) DeleteDocument(id int64) error {
-	result, err := s.db.Exec(`DELETE FROM documents WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("store: delete document %d: %w", id, err)
-	}
-	if n, _ := result.RowsAffected(); n == 0 {
-		return fmt.Errorf("store: document %d: %w", id, ErrNotFound)
-	}
-	return nil
+	return s.inTransaction(func(tx *sql.Tx) error {
+		var sourceName, externalID string
+		err := tx.QueryRow(
+			`SELECT source, external_id FROM documents WHERE id = ?`, id,
+		).Scan(&sourceName, &externalID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("store: document %d: %w", id, ErrNotFound)
+		}
+		if err != nil {
+			return fmt.Errorf("store: look up document %d: %w", id, err)
+		}
+
+		if err := enqueueWrite(tx, sourceName, externalID, OpEntryDelete, ""); err != nil {
+			return err
+		}
+
+		if _, err := tx.Exec(`DELETE FROM documents WHERE id = ?`, id); err != nil {
+			return fmt.Errorf("store: delete document %d: %w", id, err)
+		}
+		return nil
+	})
 }
 
 // CountDocuments returns how many documents are stored for a source.

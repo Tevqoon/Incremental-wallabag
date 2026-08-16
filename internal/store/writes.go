@@ -15,6 +15,7 @@ const (
 	OpHighlightDelete         = "highlight_delete"
 	OpHighlightCreate         = "highlight_create"
 	OpHighlightUpdateLocation = "highlight_update_location"
+	OpEntryDelete             = "entry_delete"
 )
 
 // maxWriteAttempts caps retries so a write that can never succeed stops

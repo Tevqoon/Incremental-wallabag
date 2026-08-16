@@ -340,6 +340,44 @@ func TestDeleteHighlightRejectsNonNumericID(t *testing.T) {
 	}
 }
 
+// TestDeleteEntry covers the whole-document delete the library's "delete"
+// button now uses everywhere, not just DeleteHighlight's per-annotation one —
+// asserting the request lands on the entry's own path, not an annotation's.
+func TestDeleteEntry(t *testing.T) {
+	var requestedPath string
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /oauth/v2/token", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(tokenResponse{AccessToken: "tok", ExpiresIn: 3600})
+	})
+	mux.HandleFunc("DELETE /api/entries/42.json", func(w http.ResponseWriter, r *http.Request) {
+		requestedPath = r.URL.Path
+		json.NewEncoder(w).Encode(map[string]any{"id": 42})
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := testClient(t, server.URL)
+	adapter := NewSource(client)
+
+	if err := adapter.DeleteEntry(context.Background(), "42"); err != nil {
+		t.Fatalf("DeleteEntry: %v", err)
+	}
+	if requestedPath != "/api/entries/42.json" {
+		t.Errorf("requested %q, want the entry's own path", requestedPath)
+	}
+}
+
+func TestDeleteEntryRejectsNonNumericID(t *testing.T) {
+	client := testClient(t, "https://example.invalid")
+	adapter := NewSource(client)
+
+	if err := adapter.DeleteEntry(context.Background(), "not-a-number"); err == nil {
+		t.Fatal("expected an error for a non-numeric entry id")
+	}
+}
+
 // TestCreateHighlight guards the one thing this endpoint gets wrong if
 // assumed rather than checked: wallabag's annotation controller reads
 // json_decode($request->getContent()) rather than the form body every other

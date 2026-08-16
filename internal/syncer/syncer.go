@@ -579,6 +579,8 @@ func (s *Syncer) applyWrite(ctx context.Context, writer source.Writer, write sto
 		return "", writer.RemoveTag(ctx, write.ExternalID, write.Payload)
 	case store.OpHighlightDelete:
 		return "", writer.DeleteHighlight(ctx, write.ExternalID)
+	case store.OpEntryDelete:
+		return "", writer.DeleteEntry(ctx, write.ExternalID)
 	case store.OpHighlightCreate:
 		return writer.CreateHighlight(ctx, write.ExternalID, write.Payload)
 	case store.OpHighlightUpdateLocation:

@@ -105,6 +105,19 @@ func (s *Source) RemoveTag(ctx context.Context, externalID string, label string)
 	return s.client.send(ctx, "DELETE", path, nil, nil)
 }
 
+// DeleteEntry removes a whole entry from wallabag, not just an annotation on
+// it — the library's "delete" button uses this so a document actually
+// leaves wallabag instead of only disappearing locally until the next sync
+// brings it right back.
+func (s *Source) DeleteEntry(ctx context.Context, externalID string) error {
+	id, err := entryID(externalID)
+	if err != nil {
+		return err
+	}
+	path := fmt.Sprintf("/api/entries/%d.json", id)
+	return s.client.send(ctx, "DELETE", path, nil, nil)
+}
+
 // DeleteHighlight removes one annotation, identified by its own id — not the
 // entry it sits on. Verified against the live API: DELETE returns 200 with the
 // deleted annotation's body, and it does not require the entry id at all.
