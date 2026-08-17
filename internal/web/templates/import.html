@@ -129,5 +129,33 @@
       <button type="submit" class="primary">Import</button>
     </form>
   {{end}}
+
+  {{if .FeedRefreshEnabled}}
+    <h2>Check for new articles</h2>
+    <p class="meta">
+      Re-walks the whole archive of the publication configured in
+      ingest.substack and reconciles anything new — or anything still
+      showing as a paywall preview — into wallabag, the same as
+      <code>increader import-substack</code> run by hand. Already-fetched
+      posts are served from cache, so this is quick after the first run, but
+      it still pages through the archive listing itself every time, which
+      can take a few minutes on a large publication — the page will sit on
+      this request until it finishes.
+    </p>
+
+    {{if .FeedRefreshError}}
+      <div class="notice notice-danger">could not refresh: {{.FeedRefreshError}}</div>
+    {{end}}
+
+    {{if .FeedRefreshReport}}
+      <div class="notice">
+        <pre class="cloze-preview">{{.FeedRefreshReport}}</pre>
+      </div>
+    {{end}}
+
+    <form class="import-form" method="post" action="/import/substack/refresh">
+      <button type="submit" class="primary">Check for new articles</button>
+    </form>
+  {{end}}
 </section>
 {{end}}

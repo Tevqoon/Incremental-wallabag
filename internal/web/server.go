@@ -79,6 +79,13 @@ type Server struct {
 	// strictly downward (see ARCHITECTURE.md), and web must not depend on a
 	// concrete provider.
 	importSubstackURL func(ctx context.Context, url string) (string, error)
+
+	// refreshSubstackFeed walks the whole archive of whatever publication
+	// ingest.substack is configured for and reconciles anything new into
+	// wallabag — the "check for new articles" button next to the
+	// single-URL section above. nil when ingest.substack is not
+	// configured, same as importSubstackURL.
+	refreshSubstackFeed func(ctx context.Context) (string, error)
 }
 
 // Options configures a Server.
@@ -115,6 +122,11 @@ type Options struct {
 	// Server.importSubstackURL for what it does and why it is a closure.
 	// Leave nil to hide that section entirely.
 	ImportSubstackURL func(ctx context.Context, url string) (string, error)
+
+	// RefreshSubstackFeed backs the "check for new articles" button next to
+	// the single-URL section — see Server.refreshSubstackFeed. Leave nil to
+	// hide that button entirely.
+	RefreshSubstackFeed func(ctx context.Context) (string, error)
 }
 
 // New builds a Server and parses its templates.
@@ -136,6 +148,7 @@ func New(options Options) (*Server, error) {
 		publish:                   options.Publish,
 		syncNow:                   options.SyncNow,
 		importSubstackURL:         options.ImportSubstackURL,
+		refreshSubstackFeed:       options.RefreshSubstackFeed,
 	}
 
 	for _, name := range pageNames {
@@ -170,6 +183,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /import", s.handleImportForm)
 	mux.HandleFunc("POST /import", s.handleImport)
 	mux.HandleFunc("POST /import/substack", s.handleImportSubstackURL)
+	mux.HandleFunc("POST /import/substack/refresh", s.handleRefreshSubstackFeed)
 	mux.HandleFunc("GET /documents/{id}", s.handleDocument)
 	mux.HandleFunc("POST /documents/{id}/titles", s.handleDocumentTitles)
 	mux.HandleFunc("POST /documents/{id}/chapters", s.handleSetChapters)

@@ -109,3 +109,27 @@ func TestImportSubstackURLHandlerGating(t *testing.T) {
 		t.Error("handler is nil despite a session cookie being configured")
 	}
 }
+
+// TestRefreshSubstackFeedHandlerGating: unlike importSubstackURLHandler,
+// this one gates on the full Enabled() (host and session cookie both) — a
+// whole-archive refresh has no per-request URL to take a host from the way
+// the single-URL import does, so it can only ever run against whichever one
+// publication ingest.substack itself names.
+func TestRefreshSubstackFeedHandlerGating(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	var settings config.Config
+	if got := refreshSubstackFeedHandler(nil, settings, logger); got != nil {
+		t.Error("handler is non-nil with nothing configured")
+	}
+
+	settings.Ingest.Substack.SessionCookie = "s%3Asecret"
+	if got := refreshSubstackFeedHandler(nil, settings, logger); got != nil {
+		t.Error("handler is non-nil with a session cookie but no host")
+	}
+
+	settings.Ingest.Substack.Host = "example.substack.com"
+	if got := refreshSubstackFeedHandler(nil, settings, logger); got == nil {
+		t.Error("handler is nil despite both host and session cookie being configured")
+	}
+}

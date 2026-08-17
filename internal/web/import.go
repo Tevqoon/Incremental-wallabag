@@ -59,6 +59,21 @@ type importData struct {
 	SubstackURL    string
 	SubstackReport string
 	SubstackError  string
+
+	// FeedRefreshEnabled shows or hides the "check for new articles"
+	// button — see Server.refreshSubstackFeed. A separate field from
+	// SubstackEnabled, not just a reuse of it, because the two describe
+	// different actions (one post by URL; the whole configured archive)
+	// and the template needs to tell them apart to show/hide each
+	// independently.
+	FeedRefreshEnabled bool
+
+	// FeedRefreshReport and FeedRefreshError describe a feed refresh that
+	// just happened, the same way SubstackReport/SubstackError describe a
+	// URL import — kept separate so the two actions' results are never
+	// shown attributed to the wrong one.
+	FeedRefreshReport string
+	FeedRefreshError  string
 }
 
 func (s *Server) handleImportForm(w http.ResponseWriter, r *http.Request) {
@@ -75,6 +90,7 @@ func (s *Server) renderImport(w http.ResponseWriter, data importData) {
 	}
 	data.Existing = existing
 	data.SubstackEnabled = s.importSubstackURL != nil
+	data.FeedRefreshEnabled = s.refreshSubstackFeed != nil
 	if data.Title == "" {
 		data.Title = "Import annotations"
 	}
@@ -121,6 +137,40 @@ func (s *Server) handleImportSubstackURL(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	s.renderImport(w, importData{SubstackURL: rawURL, SubstackReport: report})
+}
+
+// refreshFeedTimeout bounds a whole-archive refresh: mostly cache hits on
+// every run after the first (post's own on-disk cache — see
+// internal/substack/post.go — makes an already-fetched post free to skip),
+// but the archive *listing* itself still has to be walked page by page,
+// throttled the same as any other request to Substack, and a large,
+// long-running publication can genuinely have hundreds of pages. Generous
+// next to importSubstackTimeout above for exactly that reason — this is not
+// the same shape of request.
+const refreshFeedTimeout = 20 * time.Minute
+
+// handleRefreshSubstackFeed re-walks the whole archive ingest.substack is
+// configured for and reconciles anything new (or anything still showing as
+// a paywall preview) into wallabag — the web-triggered counterpart to
+// `increader import-substack`, without a dry-run step: see
+// refreshSubstackFeedHandler's own comment in cmd/increader/main.go for why
+// committing unconditionally is safe here even though the CLI defaults to
+// reporting only.
+func (s *Server) handleRefreshSubstackFeed(w http.ResponseWriter, r *http.Request) {
+	if s.refreshSubstackFeed == nil {
+		http.Error(w, "substack import is not configured", http.StatusNotImplemented)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), refreshFeedTimeout)
+	defer cancel()
+
+	report, err := s.refreshSubstackFeed(ctx)
+	if err != nil {
+		s.renderImport(w, importData{FeedRefreshError: err.Error()})
+		return
+	}
+	s.renderImport(w, importData{FeedRefreshReport: report})
 }
 
 // handleImport reads an uploaded annotation file into the library.
