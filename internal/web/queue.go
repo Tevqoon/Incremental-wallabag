@@ -45,6 +45,7 @@ var stateTagLabels = map[ir.State]string{
 // articles and new highlights alike, so both tabs have a reason to want it, and
 // neither should be bounced to the other for asking.
 func (s *Server) handleSyncNow(w http.ResponseWriter, r *http.Request) {
+	hasKind := r.URL.Query().Has("kind")
 	kind, ok := requestQueueKind(w, r)
 	if !ok {
 		return
@@ -53,6 +54,13 @@ func (s *Server) handleSyncNow(w http.ResponseWriter, r *http.Request) {
 		if err := s.syncNow(r.Context()); err != nil {
 			s.logger.Error("manual sync failed", "error", err)
 		}
+	}
+	if !hasKind {
+		// The combined queue page's own sync button (see handleQueue) —
+		// back to the page it was pressed from, same as the single-kind
+		// case below.
+		s.redirect(w, r, "/queue")
+		return
 	}
 	s.redirect(w, r, queuePath(kind))
 }
@@ -104,6 +112,15 @@ type queueData struct {
 
 	Total int
 	Today time.Time
+
+	// Combined renders both queues on one page — Items holds the articles
+	// list and ExtractItems the extracts one, the latter behind a drawer —
+	// rather than the single list a specific kind asks for. Set only by the
+	// toolbar's own "Queue" link, which names no kind; every other link into
+	// this page does, so a session already working through one queue is
+	// never shown the other's list mixed in.
+	Combined     bool
+	ExtractItems []store.QueueItem
 }
 
 // IsExtracts reports which tab is active, for a template that cannot compare
@@ -137,6 +154,11 @@ func (d queueData) Showing() int { return len(d.Items) }
 // of. When a limit is set and does cut the list short, the page says so; see
 // queueData.Truncated.
 func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
+	if !r.URL.Query().Has("kind") {
+		s.handleQueueCombined(w, r)
+		return
+	}
+
 	kind, ok := requestQueueKind(w, r)
 	if !ok {
 		return
@@ -177,6 +199,55 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleQueueCombined is the toolbar's own "Queue" link: both queues on one
+// page rather than the tabs above, articles as the page's own list and
+// extracts behind a drawer (see queue.html) — the mirror of handleNext,
+// which tries the extract queue first. Choosing "Queue" is choosing to look
+// at an article; choosing "Next" is choosing to catch up on highlights.
+//
+// A separate function rather than a branch threaded through the code above:
+// every redirect elsewhere in this file names a kind on purpose, to keep a
+// session in the queue it started in (see requestQueueKind's own doc), and
+// keeping this apart makes that invariant easy to see still holds — nothing
+// above ever has to consider the combined case.
+func (s *Server) handleQueueCombined(w http.ResponseWriter, r *http.Request) {
+	today := s.today()
+
+	articles, err := s.store.Queue(today, store.QueueArticles, s.queuePageLimit)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	extracts, err := s.store.Queue(today, store.QueueExtracts, s.queuePageLimit)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	articlesDue, extractsDue, err := s.dueCounts(today)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	total, err := s.store.CountElements("")
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+
+	s.render(w, "queue.html", queueData{
+		Title:        "Queue",
+		Kind:         store.QueueArticles,
+		Items:        articles,
+		Due:          articlesDue,
+		ArticlesDue:  articlesDue,
+		ExtractsDue:  extractsDue,
+		Total:        total,
+		Today:        today,
+		Combined:     true,
+		ExtractItems: extracts,
+	})
+}
+
 // dueCounts reads both queues' due counts, which every page showing one of
 // them also wants the other of.
 func (s *Server) dueCounts(today time.Time) (articles, extracts int, err error) {
@@ -200,6 +271,11 @@ func (s *Server) dueCounts(today time.Time) (articles, extracts int, err error) 
 // from the request rather than being rediscovered, so a session stays in the
 // queue it started in instead of drifting into the other one.
 func (s *Server) handleNext(w http.ResponseWriter, r *http.Request) {
+	if !r.URL.Query().Has("kind") {
+		s.handleNextEither(w, r)
+		return
+	}
+
 	kind, ok := requestQueueKind(w, r)
 	if !ok {
 		return
@@ -215,6 +291,30 @@ func (s *Server) handleNext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, "/read/"+strconv.FormatInt(items[0].ID, 10), http.StatusSeeOther)
+}
+
+// handleNextEither is the toolbar's own "Next" link: extracts before
+// articles, the mirror of the combined queue page (see handleQueueCombined),
+// which shows articles first. Choosing "Next" is choosing to catch up on
+// highlights before starting something new; choosing "Queue" is choosing to
+// look at an article.
+//
+// Every other entry into a reading session names a kind explicitly and stays
+// in it (requestQueueKind's own doc explains why), so this is the one place
+// a session's queue is chosen rather than asked for.
+func (s *Server) handleNextEither(w http.ResponseWriter, r *http.Request) {
+	for _, kind := range [...]store.QueueKind{store.QueueExtracts, store.QueueArticles} {
+		items, err := s.store.Queue(s.today(), kind, 1)
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
+		if len(items) > 0 {
+			http.Redirect(w, r, "/read/"+strconv.FormatInt(items[0].ID, 10), http.StatusSeeOther)
+			return
+		}
+	}
+	http.Redirect(w, r, "/queue", http.StatusSeeOther)
 }
 
 // handleGrade applies a grade and moves on.

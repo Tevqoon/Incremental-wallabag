@@ -206,15 +206,31 @@ changed, and leaves everything else alone. Where two exports of the same work
 disagree about its title — a book read on an ereader and annotated in a PDF
 reader — the form offers to merge into the work already stored.
 
-Titles from these files are unreliable: KOReader reads one out of ebook
-metadata, a PDF carries whatever produced it. Every document therefore has an
-optional **title override** and a **subtitle** you set yourself, which a sync
-never overwrites.
+Titles and authors from these files are unreliable: KOReader reads them out of
+ebook metadata, a PDF carries whatever produced it, and a scanned book's own
+metadata often has no author at all. Every document therefore has an optional
+**title override**, **subtitle** and **author**, all set at upload and all
+editable again afterward, which a sync never overwrites.
 
 PDF annotations record *where* a highlight is, not what it covers, so the
-passage is recovered from the glyphs underneath it. That works on a PDF with a
-text layer and not at all on a scan; a highlight whose text cannot be recovered
-is still imported with its page, colour and note, and the import says so.
+passage itself has to be recovered separately. For a PDF with its own text
+layer that reads the glyphs directly; for a scan, where the visible text is a
+separate OCR layer most small PDF readers never even look inside, it shells
+out to poppler's `pdftotext` instead (see `internal/annotations/pdftext.go`) —
+a highlight whose text still cannot be recovered by either route is imported
+with its page, colour and note regardless, and the import says so.
+
+A scanned book has no outline for a chapter name to come from. If you
+highlighted every heading in one colour while marking it up, naming that
+**chapter marker colour** on the upload form turns each of those highlights
+into the chapter applied to everything after it, instead of a passage of its
+own — correct any the OCR mangled from the contents page afterward. The same
+page also offers **Fix typos** on any selection of passages, when
+`llm.api_key` is configured (see `config.yaml`): a cheap model proposes
+mechanical OCR corrections — a dropcap's own letter turning up loose in the
+sentence, a swapped look-alike character — for review before anything is
+saved. Neither of these is specific to a scan; both are ordinary options for
+any upload.
 
 Tags and the star toggle sit above the article and write straight through to
 wallabag. The Library's filter tabs carry the same counts as wallabag's own

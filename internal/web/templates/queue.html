@@ -1,95 +1,156 @@
 {{define "content"}}
 <section class="queue">
-  <div class="queue-head">
-    <h1>{{.Title}}</h1>
-    <button type="button" hx-post="/sync?kind={{.Kind}}" title="Fetch anything new from wallabag right now, instead of waiting for the next scheduled sync">
-      Sync now
-    </button>
-  </div>
+  {{if .Combined}}
+    <div class="queue-head">
+      <h1>Queue</h1>
+      <button type="button" hx-post="/sync" title="Fetch anything new from wallabag right now, instead of waiting for the next scheduled sync">
+        Sync now
+      </button>
+    </div>
 
-  <!-- Two queues rather than one interleaved list: articles are read in
-       sessions, extracts are reviewed in sessions, and the two are different
-       sittings. Each tab carries its own due count so the queue you are not
-       in cannot quietly pile up unseen. -->
-  <nav class="filters">
-    <a href="/queue?kind=articles" class="{{if not .IsExtracts}}on{{end}}">Articles {{.ArticlesDue}}</a>
-    <a href="/queue?kind=extracts" class="{{if .IsExtracts}}on{{end}}">Extracts {{.ExtractsDue}}</a>
-  </nav>
+    <!-- Articles first, extracts behind a drawer: the mirror of Next (see
+         handleNext), which tries the extract queue first. Choosing "Queue"
+         from the toolbar is choosing to look at an article; choosing "Next"
+         is choosing to catch up on highlights first. -->
+    <section class="dash-section">
+      <h2>Articles</h2>
+      <p class="meta">
+        {{if .Truncated}}
+          showing {{.Showing}} of {{.Due}} due today
+        {{else}}
+          {{.Due}} due today
+        {{end}}
+      </p>
 
-  <p class="meta">
-    {{if .Truncated}}
-      showing {{.Showing}} of {{.Due}} due today · {{.Total}} elements in total
-    {{else}}
-      {{.Due}} due today · {{.Total}} elements in total
-    {{end}}
-  </p>
-  {{if .Truncated}}
-    <p class="meta">
-      The rest are still queued and still reachable — Read next always takes the
-      most important one. Raise <code>queue_page_limit</code> (or set it to 0)
-      to list them all.
-    </p>
-  {{end}}
-
-  {{if .Items}}
-    <ol class="items">
-      {{range .Items}}
-        <li class="item {{if .IsRoot}}is-article{{else}}is-extract{{end}}">
-          <a class="item-title" href="/read/{{.ID}}">
-            {{if .IsRoot}}
-              {{.DocumentTitle}}
-            {{else}}
-              {{.Title}}
-            {{end}}
-          </a>
-
-          <div class="item-meta">
-            <span class="badge">{{if .IsRoot}}article{{else}}extract{{end}}</span>
-            {{if eq .Kind "item"}}<span class="badge badge-item">cloze</span>{{end}}
-            <span title="priority: lower is more important">p{{percent .Schedule.Priority}}</span>
-            <span title="current interval">{{days .Schedule.IntervalDays}}</span>
-            <span title="repetitions">×{{.Schedule.Reps}}</span>
-            {{if and .IsRoot .ReadingTime}}<span title="estimated reading time">{{.ReadingTime}} min</span>{{end}}
-            {{if .IsRoot}}
-              {{if .DocumentAuthor}}<span>{{.DocumentAuthor}}</span>{{end}}
-              {{if not .DocumentPublishedAt.IsZero}}
-                <span title="published {{isoDate .DocumentPublishedAt}}">{{date .DocumentPublishedAt}}</span>
-              {{end}}
-            {{end}}
-            {{if not .IsRoot}}
-              <span class="source">from {{.DocumentTitle}}</span>
-            {{end}}
-          </div>
-        </li>
-      {{end}}
-    </ol>
-
-    <p class="continue">
-      <a class="button primary" href="/next?kind={{.Kind}}">
-        {{if .IsExtracts}}Start reviewing{{else}}Start reading{{end}}
-      </a>
-    </p>
-  {{else}}
-    <div class="empty">
-      {{if .IsExtracts}}
-        <p>No extracts are due today.</p>
-        <p class="meta">
-          Passages you take while reading come back on their own schedule, as do
-          highlights imported from wallabag and from uploaded books.
-          {{if .ArticlesDue}}
-            <a href="/queue?kind=articles">{{.ArticlesDue}} articles are due</a>.
-          {{end}}
+      {{if .Items}}
+        <ol class="items">
+          {{range .Items}}{{template "queue-item" .}}{{end}}
+        </ol>
+        <p class="continue">
+          <a class="button primary" href="/next?kind=articles">Start reading</a>
         </p>
       {{else}}
-        <p>Nothing is due today.</p>
-        <p class="meta">
-          New articles appear here as they sync from wallabag.
-          {{if .ExtractsDue}}
-            <a href="/queue?kind=extracts">{{.ExtractsDue}} extracts are due</a>.
-          {{end}}
-        </p>
+        <div class="empty">
+          <p>Nothing is due today.</p>
+        </div>
       {{end}}
+    </section>
+
+    <details class="dash-drawer"{{if not .Items}} open{{end}}>
+      <summary>
+        <span class="drawer-title">Extracts</span>
+        <span class="drawer-summary">{{.ExtractsDue}} due today</span>
+      </summary>
+
+      <div class="drawer-body">
+        {{if .ExtractItems}}
+          <ol class="items">
+            {{range .ExtractItems}}{{template "queue-item" .}}{{end}}
+          </ol>
+          <p class="continue">
+            <a class="button primary" href="/next?kind=extracts">Start reviewing</a>
+          </p>
+        {{else}}
+          <div class="empty">
+            <p>No extracts are due today.</p>
+          </div>
+        {{end}}
+      </div>
+    </details>
+  {{else}}
+    <div class="queue-head">
+      <h1>{{.Title}}</h1>
+      <button type="button" hx-post="/sync?kind={{.Kind}}" title="Fetch anything new from wallabag right now, instead of waiting for the next scheduled sync">
+        Sync now
+      </button>
     </div>
+
+    <!-- Two queues rather than one interleaved list: articles are read in
+         sessions, extracts are reviewed in sessions, and the two are different
+         sittings. Each tab carries its own due count so the queue you are not
+         in cannot quietly pile up unseen. -->
+    <nav class="filters">
+      <a href="/queue?kind=articles" class="{{if not .IsExtracts}}on{{end}}">Articles {{.ArticlesDue}}</a>
+      <a href="/queue?kind=extracts" class="{{if .IsExtracts}}on{{end}}">Extracts {{.ExtractsDue}}</a>
+    </nav>
+
+    <p class="meta">
+      {{if .Truncated}}
+        showing {{.Showing}} of {{.Due}} due today · {{.Total}} elements in total
+      {{else}}
+        {{.Due}} due today · {{.Total}} elements in total
+      {{end}}
+    </p>
+    {{if .Truncated}}
+      <p class="meta">
+        The rest are still queued and still reachable — Read next always takes the
+        most important one. Raise <code>queue_page_limit</code> (or set it to 0)
+        to list them all.
+      </p>
+    {{end}}
+
+    {{if .Items}}
+      <ol class="items">
+        {{range .Items}}{{template "queue-item" .}}{{end}}
+      </ol>
+
+      <p class="continue">
+        <a class="button primary" href="/next?kind={{.Kind}}">
+          {{if .IsExtracts}}Start reviewing{{else}}Start reading{{end}}
+        </a>
+      </p>
+    {{else}}
+      <div class="empty">
+        {{if .IsExtracts}}
+          <p>No extracts are due today.</p>
+          <p class="meta">
+            Passages you take while reading come back on their own schedule, as do
+            highlights imported from wallabag and from uploaded books.
+            {{if .ArticlesDue}}
+              <a href="/queue?kind=articles">{{.ArticlesDue}} articles are due</a>.
+            {{end}}
+          </p>
+        {{else}}
+          <p>Nothing is due today.</p>
+          <p class="meta">
+            New articles appear here as they sync from wallabag.
+            {{if .ExtractsDue}}
+              <a href="/queue?kind=extracts">{{.ExtractsDue}} extracts are due</a>.
+            {{end}}
+          </p>
+        {{end}}
+      </div>
+    {{end}}
   {{end}}
 </section>
+{{end}}
+
+{{define "queue-item"}}
+  <li class="item {{if .IsRoot}}is-article{{else}}is-extract{{end}}">
+    <a class="item-title" href="/read/{{.ID}}">
+      {{if .IsRoot}}
+        {{.DocumentTitle}}
+      {{else}}
+        {{.Title}}
+      {{end}}
+    </a>
+
+    <div class="item-meta">
+      <span class="badge">{{if .IsRoot}}article{{else}}extract{{end}}</span>
+      {{if eq .Kind "item"}}<span class="badge badge-item">cloze</span>{{end}}
+      <span title="priority: lower is more important">p{{percent .Schedule.Priority}}</span>
+      <span title="current interval">{{days .Schedule.IntervalDays}}</span>
+      <span title="repetitions">×{{.Schedule.Reps}}</span>
+      {{if and .IsRoot .ReadingTime}}<span title="estimated reading time">{{.ReadingTime}} min</span>{{end}}
+      {{if .IsRoot}}
+        {{if .DocumentAuthor}}<span>{{.DocumentAuthor}}</span>{{end}}
+        {{if not .DocumentPublishedAt.IsZero}}
+          <span title="published {{isoDate .DocumentPublishedAt}}">{{date .DocumentPublishedAt}}</span>
+        {{end}}
+      {{end}}
+      {{if not .IsRoot}}
+        <span class="source">from {{.DocumentTitle}}</span>
+      {{end}}
+    </div>
+  </li>
 {{end}}

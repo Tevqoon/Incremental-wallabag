@@ -30,6 +30,7 @@ import (
 
 	"github.com/Tevqoon/increader/internal/config"
 	"github.com/Tevqoon/increader/internal/ingest"
+	"github.com/Tevqoon/increader/internal/proofread"
 	"github.com/Tevqoon/increader/internal/source"
 	"github.com/Tevqoon/increader/internal/store"
 	"github.com/Tevqoon/increader/internal/substack"
@@ -532,6 +533,15 @@ func serve(settings config.Config, logger *slog.Logger) error {
 		byName[provider.Name()] = provider
 	}
 
+	// nil, not a Client with an empty key, when unconfigured: web.Server
+	// checks this pointer directly to decide whether to offer the "Fix
+	// typos" action at all, the same nil-hides-the-feature convention
+	// ImportSubstackURL and RefreshSubstackFeed already use below.
+	var proofreader *proofread.Client
+	if settings.LLM.Enabled() {
+		proofreader = proofread.NewClient(settings.LLM.APIKey, settings.LLM.BaseURL, settings.LLM.Model)
+	}
+
 	reader, err := web.New(web.Options{
 		Store:                     db,
 		Sources:                   byName,
@@ -555,6 +565,7 @@ func serve(settings config.Config, logger *slog.Logger) error {
 		},
 		ImportSubstackURL:   importSubstackURLHandler(db, settings, logger),
 		RefreshSubstackFeed: refreshSubstackFeedHandler(db, settings, logger),
+		Proofreader:         proofreader,
 	})
 	if err != nil {
 		return err

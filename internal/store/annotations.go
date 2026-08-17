@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Tevqoon/increader/internal/ir"
@@ -34,6 +35,14 @@ type ImportOptions struct {
 	// Subtitle is the reader's own, and has no counterpart in any file.
 	Subtitle string
 
+	// Author overrides the author the file itself claims, the same way
+	// DisplayTitle overrides its title. Most uses of this are not a
+	// correction but a supply: a PDF's own /Info dictionary very often has
+	// no author at all (an OCR pass adds none, and plenty of scans never
+	// had one to begin with), which otherwise leaves the field blank until
+	// a second visit to the document's own rename form fixes it.
+	Author string
+
 	// IntoDocumentID merges this file into an existing document instead of
 	// keying on the file's own derived identity. This is how a work whose
 	// exports disagree about its title — the usual case for a book read in
@@ -50,6 +59,12 @@ type ImportOptions struct {
 	// ir.FuzzedAnnotationDelay. Both are ignored when Triage is set.
 	FloorDays  int
 	SpreadDays int
+
+	// ChapterMarkerColor is a highlight colour ("#rrggbb") that stands in for
+	// a heading, the manual convention a document with no outline of its own
+	// needs — see deriveChapterMarkers. Empty leaves every highlight's own
+	// Chapter untouched, which is every upload before this option existed.
+	ChapterMarkerColor string
 }
 
 // ImportResult reports what one upload did.
@@ -141,6 +156,12 @@ func (s *Store) ImportAnnotations(document source.Document, options ImportOption
 		if err := setImportTitles(tx, result.DocumentID, options, document.Subtitle); err != nil {
 			return err
 		}
+		if options.Author != "" {
+			if _, err := tx.Exec(`UPDATE documents SET author = ? WHERE id = ?`,
+				options.Author, result.DocumentID); err != nil {
+				return fmt.Errorf("store: set author of document %d: %w", result.DocumentID, err)
+			}
+		}
 
 		rootID, err := rootTopicID(tx, result.DocumentID)
 		if err != nil {
@@ -148,7 +169,8 @@ func (s *Store) ImportAnnotations(document source.Document, options ImportOption
 		}
 		result.RootID = rootID
 
-		imported, err := insertHighlights(tx, result.DocumentID, rootID, document.Highlights,
+		highlights := deriveChapterMarkers(document.Highlights, options.ChapterMarkerColor)
+		imported, err := insertHighlights(tx, result.DocumentID, rootID, highlights,
 			highlightImport{
 				floorDays:  options.FloorDays,
 				spreadDays: options.SpreadDays,
@@ -165,6 +187,48 @@ func (s *Store) ImportAnnotations(document source.Document, options ImportOption
 		return ImportResult{}, err
 	}
 	return result, nil
+}
+
+// deriveChapterMarkers turns one highlight colour into chapter headings.
+//
+// A scanned book's OCR text has no outline for parsePDF to read a chapter
+// name from (see internal/annotations), so a reader who wants one has to
+// supply the convention by hand — highlighting each heading in a colour used
+// for nothing else, the same way a paper book's own chapter titles stand out
+// from its body text. A marker highlight is consumed rather than kept: its
+// own passage is the heading's OCR text, not something to review again, and
+// it becomes every highlight's Chapter from there until the next marker (or
+// the end of the document) instead of an extract of its own.
+//
+// Case-insensitive on purpose — a reader typing a hex colour into the upload
+// form is not reliably going to match a PDF annotation's own capitalisation.
+//
+// Only ever overrides an empty Chapter, never one already set: a PDF that
+// happens to have both an outline and a reader's own colour convention keeps
+// the outline's own chapter names, which came from the work itself rather
+// than from a highlight that might not land exactly on every boundary the
+// outline already gets right.
+func deriveChapterMarkers(highlights []source.Highlight, markerColor string) []source.Highlight {
+	markerColor = strings.TrimSpace(markerColor)
+	if markerColor == "" {
+		return highlights
+	}
+
+	kept := make([]source.Highlight, 0, len(highlights))
+	chapter := ""
+	for _, highlight := range highlights {
+		if strings.EqualFold(highlight.Color, markerColor) {
+			if name := strings.TrimSpace(highlight.Quote); name != "" {
+				chapter = name
+			}
+			continue
+		}
+		if highlight.Chapter == "" {
+			highlight.Chapter = chapter
+		}
+		kept = append(kept, highlight)
+	}
+	return kept
 }
 
 // setImportTitles applies an upload's title override and subtitle.

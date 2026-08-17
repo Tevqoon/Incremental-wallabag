@@ -23,6 +23,7 @@ import (
 	"github.com/microcosm-cc/bluemonday"
 
 	"github.com/Tevqoon/increader/internal/ir"
+	"github.com/Tevqoon/increader/internal/proofread"
 	"github.com/Tevqoon/increader/internal/source"
 	"github.com/Tevqoon/increader/internal/store"
 	"github.com/Tevqoon/increader/internal/version"
@@ -37,6 +38,7 @@ var assets embed.FS
 var pageNames = []string{
 	"dashboard.html", "queue.html", "reader.html", "library.html", "extracts.html",
 	"import.html", "document.html", "triage.html", "calendar.html", "calendar_day.html",
+	"proofread_review.html",
 }
 
 // Server holds everything the handlers need. Dependencies arrive through this
@@ -86,6 +88,15 @@ type Server struct {
 	// single-URL section above. nil when ingest.substack is not
 	// configured, same as importSubstackURL.
 	refreshSubstackFeed func(ctx context.Context) (string, error)
+
+	// proofreader proposes OCR/typo fixes for a batch of selected extracts —
+	// see internal/proofread and document.go's handleProofreadExtracts. nil
+	// when config.LLM has no api_key, which is what hides the "Fix typos"
+	// action on a document's contents page. Held directly rather than behind
+	// a closure the way importSubstackURL is: proofread.Client is a plain,
+	// stateless leaf client with no account/credential assembly of its own
+	// for main.go to hide, unlike an actual content provider.
+	proofreader *proofread.Client
 }
 
 // Options configures a Server.
@@ -127,6 +138,10 @@ type Options struct {
 	// the single-URL section — see Server.refreshSubstackFeed. Leave nil to
 	// hide that button entirely.
 	RefreshSubstackFeed func(ctx context.Context) (string, error)
+
+	// Proofreader backs the "Fix typos" bulk action on a document's contents
+	// page — see Server.proofreader. Leave nil to hide that action entirely.
+	Proofreader *proofread.Client
 }
 
 // New builds a Server and parses its templates.
@@ -149,6 +164,7 @@ func New(options Options) (*Server, error) {
 		syncNow:                   options.SyncNow,
 		importSubstackURL:         options.ImportSubstackURL,
 		refreshSubstackFeed:       options.RefreshSubstackFeed,
+		proofreader:               options.Proofreader,
 	}
 
 	for _, name := range pageNames {
@@ -187,6 +203,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /documents/{id}", s.handleDocument)
 	mux.HandleFunc("POST /documents/{id}/titles", s.handleDocumentTitles)
 	mux.HandleFunc("POST /documents/{id}/chapters", s.handleSetChapters)
+	mux.HandleFunc("POST /documents/{id}/proofread", s.handleProofreadExtracts)
+	mux.HandleFunc("POST /documents/{id}/proofread/apply", s.handleApplyProofread)
 	mux.HandleFunc("GET /documents/{id}/triage", s.handleTriage)
 	mux.HandleFunc("POST /documents/{id}/triage/reset", s.handleTriageReset)
 	mux.HandleFunc("DELETE /documents/{id}", s.handleDeleteDocument)

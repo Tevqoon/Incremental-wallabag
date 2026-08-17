@@ -91,9 +91,33 @@ type Config struct {
 	// not exist and never will for this provider.
 	Ingest Ingest `yaml:"ingest"`
 
+	// LLM configures the optional cheap-model fan-out that proposes OCR/typo
+	// fixes for a batch of selected extracts — see internal/proofread. Empty
+	// leaves the feature hidden entirely rather than erroring, the same way
+	// an unconfigured Substack section is simply not offered on the import
+	// page: this is an enhancement, not something anything else depends on.
+	LLM LLM `yaml:"llm"`
+
 	// Location is the resolved Timezone, filled in by Load.
 	Location *time.Location `yaml:"-"`
 }
+
+// LLM configures the OpenAI-compatible endpoint internal/proofread calls.
+type LLM struct {
+	// APIKey enables the feature when non-empty. Typically written as
+	// ${LLM_API_KEY} and supplied through the environment (see Load's own
+	// ${...} substitution) rather than committed alongside the rest of this
+	// file.
+	APIKey string `yaml:"api_key"`
+
+	// BaseURL and Model default to OpenRouter and deepseek/deepseek-chat
+	// respectively when left empty — see proofread.NewClient.
+	BaseURL string `yaml:"base_url"`
+	Model   string `yaml:"model"`
+}
+
+// Enabled reports whether enough is configured to call the LLM at all.
+func (l LLM) Enabled() bool { return l.APIKey != "" }
 
 // Sources holds per-provider configuration. Adding a provider adds a field.
 type Sources struct {

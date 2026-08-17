@@ -37,6 +37,11 @@ type documentData struct {
 	// Readable reports whether there is an article behind this document to
 	// open. Uploaded annotation files have none.
 	Readable bool
+
+	// ProofreadEnabled shows the "Fix typos" bulk action alongside the
+	// existing chapter one — see Server.proofreader. False, hiding the
+	// button, when config.yaml has no llm.api_key.
+	ProofreadEnabled bool
 }
 
 // handleDocument shows everything harvested from one work, in the order it
@@ -79,12 +84,13 @@ func (s *Server) handleDocument(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.render(w, "document.html", documentData{
-		Title:    document.Heading(),
-		Document: document,
-		RootID:   root.ID,
-		Groups:   groupByChapter(annotations),
-		Counts:   counts,
-		Readable: s.readable(document),
+		Title:            document.Heading(),
+		Document:         document,
+		RootID:           root.ID,
+		Groups:           groupByChapter(annotations),
+		Counts:           counts,
+		Readable:         s.readable(document),
+		ProofreadEnabled: s.proofreader != nil,
 	})
 }
 

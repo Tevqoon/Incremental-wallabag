@@ -318,6 +318,61 @@ func TestQueueRejectsAnUnknownKind(t *testing.T) {
 	}
 }
 
+// TestQueueCombinesBothKindsWhenNoneIsNamed covers the toolbar's own "Queue"
+// link, which asks for neither kind: both queues appear on the one page,
+// articles as the page's own list and extracts behind a drawer.
+func TestQueueCombinesBothKindsWhenNoneIsNamed(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	if _, err := db.CreateExtract(store.NewExtract{
+		ParentID: 1, DocumentID: 1,
+		Title: "A harvested passage", Quote: "A harvested passage",
+		ContentHTML: "<p>A harvested passage</p>",
+	}, time.Now()); err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+
+	body := get(t, server, "/queue").Body.String()
+	if !strings.Contains(body, "A test article") {
+		t.Error("combined queue does not list the article")
+	}
+	if !strings.Contains(body, "A harvested passage") {
+		t.Error("combined queue does not list the extract")
+	}
+}
+
+// TestNextCascadesToArticlesWhenNoExtractIsDue covers the toolbar's own
+// "Next" link, which — the mirror of the combined queue's article-first
+// listing — tries the extract queue before falling back to the reading
+// queue.
+func TestNextCascadesToArticlesWhenNoExtractIsDue(t *testing.T) {
+	server, _, _ := newTestServer(t, true)
+
+	if got := get(t, server, "/next").Header().Get("Location"); !strings.HasPrefix(got, "/read/") {
+		t.Errorf("Location = %q, want the due article since no extract is due", got)
+	}
+}
+
+// TestNextPrefersExtractsWhenNoKindIsNamed is the other half: with an extract
+// due too, the unqualified "Next" link reaches it first rather than the
+// article.
+func TestNextPrefersExtractsWhenNoKindIsNamed(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	id, err := db.CreateExtract(store.NewExtract{
+		ParentID: 1, DocumentID: 1,
+		Title: "A harvested passage", Quote: "A harvested passage",
+		ContentHTML: "<p>A harvested passage</p>",
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+
+	if got := get(t, server, "/next").Header().Get("Location"); got != "/read/"+itoa(id) {
+		t.Errorf("Location = %q, want the due extract ahead of the due article", got)
+	}
+}
+
 // TestGradingAnExtractStaysInTheExtractQueue is the property that makes two
 // queues usable at all: every redirect out of a decision derives its queue
 // from the element decided about, so a review session keeps handing back

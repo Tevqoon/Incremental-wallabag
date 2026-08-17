@@ -88,6 +88,16 @@
       <span id="bulk-count" class="bulk-count"></span>
       <input type="text" name="chapter" form="chapter-form" placeholder="chapter name" class="tiny">
       <button type="submit" form="chapter-form" class="tiny">Set chapter</button>
+      {{if .ProofreadEnabled}}
+        <!-- Same checkboxes, a different destination: a submit button's own
+             formaction overrides the form it belongs to, so this needs no
+             second set of checkboxes and no JavaScript. -->
+        <button type="submit" form="chapter-form"
+                formaction="/documents/{{.Document.ID}}/proofread" class="tiny"
+                title="Send the checked passages to a cheap model and review what it proposes fixing — nothing is changed until you approve it">
+          Fix typos
+        </button>
+      {{end}}
     </div>
   {{end}}
 

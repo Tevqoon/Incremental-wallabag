@@ -55,6 +55,28 @@
     </label>
 
     <label class="field">
+      <span>Author</span>
+      <input type="text" name="author" placeholder="leave empty to use the file’s own">
+      <small>
+        A scanned PDF's own metadata routinely has none at all — this is the
+        one chance to set it before the work sits authorless until a visit to
+        its own rename form.
+      </small>
+    </label>
+
+    <label class="field">
+      <span>Chapter marker colour</span>
+      <input type="text" name="chapter_marker_color" placeholder="optional, e.g. #ff767b">
+      <small>
+        A scanned book has no outline to take chapter names from. If you
+        highlighted every heading in one colour while marking it up, name that
+        colour here and each of those highlights becomes the chapter applied
+        to everything after it, instead of a passage of its own — rename any
+        of them afterward from the contents page if the OCR mangled one.
+      </small>
+    </label>
+
+    <label class="field">
       <span>Add to</span>
       <select name="into">
         <option value="">a new work, or one matching this file</option>

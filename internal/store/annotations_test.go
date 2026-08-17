@@ -135,6 +135,100 @@ func TestImportAnnotationsCanQueueImmediately(t *testing.T) {
 	}
 }
 
+// TestChapterMarkerColorDerivesChapters covers the manual convention a
+// scanned book with no outline needs: a highlight in the chosen colour is
+// consumed as a heading rather than imported as its own passage, and becomes
+// the Chapter of every highlight after it up to the next marker (or the end
+// of the document). Modelled on the real qabus-ocr.pdf import: yellow body
+// highlights, red heading highlights every few of them.
+func TestChapterMarkerColorDerivesChapters(t *testing.T) {
+	db := testStore(t)
+
+	document := source.Document{
+		ExternalID: "scanned-book",
+		Title:      "A Scanned Book",
+		Highlights: []source.Highlight{
+			{ExternalID: "h-1", Quote: "Chapter One", Color: "#FF767B", Ordinal: 1},
+			{ExternalID: "h-2", Quote: "the first passage", Color: "#ffff67", Ordinal: 2},
+			{ExternalID: "h-3", Quote: "the second passage", Color: "#ffff67", Ordinal: 3},
+			{ExternalID: "h-4", Quote: "Chapter Two", Color: "#ff767b", Ordinal: 4},
+			{ExternalID: "h-5", Quote: "the third passage", Color: "#ffff67", Ordinal: 5},
+		},
+	}
+
+	result, err := db.ImportAnnotations(document, ImportOptions{
+		Triage:             true,
+		ChapterMarkerColor: "#ff767b",
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("ImportAnnotations: %v", err)
+	}
+	if result.Offered != 5 {
+		t.Errorf("offered = %d, want all 5 highlights the file carried", result.Offered)
+	}
+	if result.Imported != 3 {
+		t.Errorf("imported = %d, want the 2 marker highlights consumed rather than imported", result.Imported)
+	}
+
+	annotations, err := db.DocumentAnnotations(result.DocumentID)
+	if err != nil {
+		t.Fatalf("DocumentAnnotations: %v", err)
+	}
+	if len(annotations) != 3 {
+		t.Fatalf("got %d annotations, want the 3 non-marker passages", len(annotations))
+	}
+	for _, annotation := range annotations {
+		if annotation.Quote == "Chapter One" || annotation.Quote == "Chapter Two" {
+			t.Errorf("marker highlight %q was imported as a passage of its own", annotation.Quote)
+		}
+	}
+
+	want := map[string]string{
+		"the first passage":  "Chapter One",
+		"the second passage": "Chapter One",
+		"the third passage":  "Chapter Two",
+	}
+	for _, annotation := range annotations {
+		if got, ok := want[annotation.Quote]; ok && annotation.Chapter != got {
+			t.Errorf("chapter of %q = %q, want %q", annotation.Quote, annotation.Chapter, got)
+		}
+	}
+}
+
+// TestChapterMarkerColorLeavesAnExistingChapterAlone covers a PDF that has
+// both its own outline and a reader's colour convention: the outline's own
+// chapter name — already correct, already the work's own — must not be
+// overwritten by a marker highlight that might not land exactly where the
+// outline does.
+func TestChapterMarkerColorLeavesAnExistingChapterAlone(t *testing.T) {
+	db := testStore(t)
+
+	document := source.Document{
+		ExternalID: "outlined-scan",
+		Title:      "An Outlined Scan",
+		Highlights: []source.Highlight{
+			{ExternalID: "o-1", Quote: "Some Heading", Color: "#ff767b", Ordinal: 1},
+			{ExternalID: "o-2", Quote: "already chaptered", Chapter: "From the outline", Ordinal: 2},
+		},
+	}
+
+	result, err := db.ImportAnnotations(document, ImportOptions{
+		Triage:             true,
+		ChapterMarkerColor: "#ff767b",
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("ImportAnnotations: %v", err)
+	}
+
+	annotations, err := db.DocumentAnnotations(result.DocumentID)
+	if err != nil {
+		t.Fatalf("DocumentAnnotations: %v", err)
+	}
+	if len(annotations) != 1 || annotations[0].Chapter != "From the outline" {
+		t.Errorf("got %+v, want the outline's own chapter left untouched", annotations)
+	}
+}
+
 // TestReimportUpdatesRatherThanDuplicates is what makes it safe to re-export
 // a book after adding a few more highlights and upload the whole thing again.
 func TestReimportUpdatesRatherThanDuplicates(t *testing.T) {

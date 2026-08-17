@@ -93,8 +93,14 @@ main { padding: 1.5rem 1.25rem 6rem; }
 .bar a { color: var(--muted); text-decoration: none; }
 .bar a:hover, .brand { color: var(--fg); }
 
+/* Import sits with the theme toggle rather than the main nav group: both are
+   auto-margined onto the row's right edge, so this is the one link that
+   moves with the toggle instead of wrapping with Next/Queue/Extracts/Books/
+   Library when the bar gets narrow. */
+.bar-end { margin-left: auto; }
+
 .theme-toggle {
-  margin-left: auto;
+  margin-left: 1rem;
   padding: 0;
   border: 0;
   background: none;
@@ -160,6 +166,12 @@ h1 { font-size: 1.5rem; line-height: 1.25; margin: 0 0 0.35rem; }
 .item-selectable { display: flex; gap: 0.6rem; align-items: flex-start; }
 .item-select { flex: none; margin-top: 0.35rem; }
 .item-body { flex: 1; min-width: 0; }
+
+/* The proofreading review page's own before/after, reusing .item-selectable
+   for the same checkbox-beside-text layout its other bulk-select rows use. */
+.proofread-was { color: var(--muted); text-decoration: none; }
+.proofread-was del { text-decoration-color: var(--danger); }
+.proofread-now { margin-top: 0.2rem; }
 
 /* The library's selection bar, above the list itself. */
 .bulk-bar {

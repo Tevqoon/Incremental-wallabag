@@ -98,6 +98,40 @@ func TestImportFormRenders(t *testing.T) {
 	if !strings.Contains(body, `name="mode" value="triage" checked`) {
 		t.Error("triage is not the default; a book could swamp the queue by leaving a radio alone")
 	}
+	if !strings.Contains(body, `name="author"`) {
+		t.Error("the upload form does not offer an author field")
+	}
+}
+
+// TestImportAuthorFieldOverridesTheFilesOwn covers the gap a scanned PDF
+// leaves: its own metadata routinely has no author at all (confirmed against
+// a real ocrmypdf file — no /Author, no XMP dc:creator), and until this field
+// existed the only way to set one was a second visit to the document's own
+// rename form after the upload had already landed with the field blank. The
+// form's own value wins even when the file does carry an author, the same way
+// the title field already does.
+func TestImportAuthorFieldOverridesTheFilesOwn(t *testing.T) {
+	server, db, _ := newTestServer(t, false)
+
+	response := postFile(t, server, "/import", "book.json", []byte(uploadJSON),
+		url.Values{"mode": {"triage"}, "author": {"A Corrected Author"}})
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("upload: status %d, body %s", response.Code, response.Body.String())
+	}
+	location := response.Header().Get("Location")
+	id, err := strconv.ParseInt(strings.TrimPrefix(location, "/documents/"), 10, 64)
+	if err != nil {
+		t.Fatalf("upload redirected to %q, want a document page", location)
+	}
+
+	document, err := db.DocumentByID(id)
+	if err != nil {
+		t.Fatalf("DocumentByID: %v", err)
+	}
+	if document.Author != "A Corrected Author" {
+		t.Errorf("author = %q, want the form's own value even though the file claims %q",
+			document.Author, "Michel Foucault")
+	}
 }
 
 func TestImportCreatesAWorkAndLandsOnIt(t *testing.T) {

@@ -229,9 +229,11 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, err := s.store.ImportAnnotations(parsed.Document, store.ImportOptions{
-		DisplayTitle:   strings.TrimSpace(r.FormValue("title")),
-		Subtitle:       strings.TrimSpace(r.FormValue("subtitle")),
-		IntoDocumentID: into,
+		DisplayTitle:       strings.TrimSpace(r.FormValue("title")),
+		Subtitle:           strings.TrimSpace(r.FormValue("subtitle")),
+		Author:             strings.TrimSpace(r.FormValue("author")),
+		ChapterMarkerColor: strings.TrimSpace(r.FormValue("chapter_marker_color")),
+		IntoDocumentID:     into,
 		// Triage unless the reader explicitly asked for the whole file to go
 		// into the queue. The default is the safe one: a book that turns out
 		// to hold four hundred passages should not be able to swamp the

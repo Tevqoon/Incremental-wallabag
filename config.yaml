@@ -122,3 +122,19 @@ sources:
 #     # publication's own subdomain (the first label of host, above) when
 #     # left unset.
 #     # tag: example
+
+# The "Fix typos" bulk action on a document's contents page (see
+# internal/proofread) — a cheap model fans out over the checked passages'
+# own text and proposes mechanical OCR corrections, which are then shown for
+# review before anything is saved. Left commented out, the action is simply
+# not offered, the same soft-optional treatment ingest.substack above gets.
+# Uncomment and fill in api_key to use it.
+#
+# llm:
+#   # An OpenRouter key works with the defaults below; any other
+#   # OpenAI-compatible provider works too if base_url and model are also
+#   # set to match it.
+#   api_key: ${LLM_API_KEY}
+#
+#   # base_url: https://openrouter.ai/api/v1
+#   # model: deepseek/deepseek-chat

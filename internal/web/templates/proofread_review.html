@@ -1,0 +1,45 @@
+{{define "content"}}
+<section class="queue">
+  <h1>Review proofreading</h1>
+  <p class="meta">
+    <a href="/documents/{{.Document.ID}}">{{.Document.Heading}}</a>
+  </p>
+
+  <p class="meta">
+    {{len .Suggestions}} change{{if ne (len .Suggestions) 1}}s{{end}} proposed
+    {{if .Unchanged}} · {{.Unchanged}} left as they were{{end}}
+    {{if .Failed}} · {{.Failed}} could not be checked{{end}}
+  </p>
+
+  {{if .Suggestions}}
+    <p class="meta">
+      Nothing below is saved yet. Uncheck anything that changes the meaning
+      rather than just the scan — this is a proposal, not a correction.
+    </p>
+
+    <form method="post" action="/documents/{{.Document.ID}}/proofread/apply">
+      <ol class="items">
+        {{range .Suggestions}}
+          <li class="item item-selectable">
+            <input type="checkbox" name="ids" value="{{.ID}}" checked
+                   class="item-select" aria-label="Apply this correction">
+            <input type="hidden" name="quote_{{.ID}}" value="{{.Proposed}}">
+            <div class="item-body">
+              <p class="proofread-was"><del>{{.Original}}</del></p>
+              <p class="proofread-now">{{.Proposed}}</p>
+            </div>
+          </li>
+        {{end}}
+      </ol>
+      <p class="continue">
+        <button type="submit" class="button primary">Apply checked</button>
+        <a class="button" href="/documents/{{.Document.ID}}">Discard all</a>
+      </p>
+    </form>
+  {{else}}
+    <div class="empty">
+      <p>Nothing came back worth changing.</p>
+    </div>
+  {{end}}
+</section>
+{{end}}

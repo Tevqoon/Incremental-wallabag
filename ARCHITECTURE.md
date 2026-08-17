@@ -27,7 +27,10 @@ article source of record:
   stars, tags, and Done/Dismissed/Suspended states push upstream.
 - Second ingestion route: **KOReader and PDF annotations** via file upload
   (both the plugin and KOReader's built-in exporter), with a per-work triage
-  pass.
+  pass. A scanned book with no outline can get chapter headings from a
+  highlight colour convention instead (one colour, chosen at upload, marks a
+  heading), and any passage can be sent through an optional cheap-LLM
+  proofreader that proposes OCR/typo fixes for review before they are saved.
 - Extra views: library with bulk actions, extracts browser, a dashboard led by
   articles-read (queue preview, streak, a 12-week bar chart) with extract
   activity folded into its own disclosure, a calendar of articles read (month
@@ -65,6 +68,15 @@ Dependency direction is strictly downward — no leaf package reaches up into
   `pdftotext -bbox` (see `pdftext.go`) rather than reading glyphs from
   `rsc.io/pdf` directly — the only reliable way to reach text a scanned
   PDF's OCR pass buried in a Form XObject.
+- `internal/proofread` — dependency-free leaf, like `internal/source`: a
+  small client for one OpenAI-compatible `/chat/completions` endpoint,
+  batched, strict-JSON-in-strict-JSON-out, a soft no-op when unconfigured.
+  Ported from a sibling project's own auto-tagger
+  (`watch-monitor/tag_llm.py`), same OpenRouter/deepseek-chat default and
+  the same reasoning for it. Knows nothing about elements or the store —
+  `internal/web/proofread.go` decides what to send and what to do with the
+  answer, and nothing is written to the store until the reader approves a
+  suggestion on the review page it renders.
 - `internal/web` — stdlib `http.ServeMux` (Go 1.22 method+path patterns, no
   router dependency), `html/template` parsed once from an `embed.FS`, htmx
   for partial swaps. Handlers split across `server.go`, `queue.go`
