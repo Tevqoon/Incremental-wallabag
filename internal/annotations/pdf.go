@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -45,12 +44,17 @@ const quadPad = 2.0
 //
 // Text under a highlight is not stored in the annotation: the PDF format
 // records only where the highlight is, and the passage has to be recovered by
-// working out which glyphs sit underneath it. That recovery is imperfect —
-// a scanned page with no text layer yields nothing at all, and an unusual
-// font encoding yields mojibake — so a highlight whose text cannot be
-// recovered is still imported, carrying its page, colour and note, and
-// warned about. An annotation you can see and fix is better than one
-// silently dropped.
+// working out which words sit underneath it. That recovery is imperfect — a
+// scanned page with genuinely no text layer at all yields nothing — so a
+// highlight whose text cannot be recovered is still imported, carrying its
+// page, colour and note, and warned about. An annotation you can see and fix
+// is better than one silently dropped.
+//
+// The word recovery itself shells out to poppler's pdftotext rather than
+// reading glyphs out of the PDF's own content streams the way this package
+// once did — see pageWords in pdftext.go for why: a scanned book's OCR text
+// routinely lives in a Form XObject rsc.io/pdf's own interpreter cannot
+// follow, and no small pure-Go PDF library checked can either.
 func parsePDF(filename string, data []byte, now time.Time) (result Parsed, err error) {
 	// rsc.io/pdf reports every structural problem by panicking: there are
 	// three dozen panic sites in it and not one recover. A malformed upload
@@ -90,6 +94,25 @@ func parsePDF(filename string, data []byte, now time.Time) (result Parsed, err e
 	outline := readOutline(reader)
 	ordinal := 0
 
+	// Read once for the whole document, up front, rather than lazily per
+	// page the way this used to read glyphs: pdftotext has no cheaper mode
+	// that reads only the pages asked for while still resolving every Form
+	// XObject a page's OCR text might live in, so there is nothing to gain
+	// by deferring it, and doing it once here means every page below just
+	// looks its own words up in a map instead of managing when to fetch
+	// them. A failure is not fatal to the whole import — every markup
+	// annotation still gets imported for its note alone, exactly as if its
+	// own individual text recovery had failed — but it is worth exactly one
+	// warning up top rather than one per annotation, since the page-by-page
+	// message ("the page may have no text layer") would otherwise repeat
+	// once per highlight in the file and say nothing more useful the second
+	// time.
+	words, wordsErr := pageWords(data)
+	if wordsErr != nil {
+		result.Warnings = append(result.Warnings, fmt.Sprintf(
+			"could not recover any passage text (%v); every highlight below was kept for its note only, if it has one", wordsErr))
+	}
+
 	for number := 1; number <= reader.NumPage(); number++ {
 		page := reader.Page(number)
 		if page.V.IsNull() {
@@ -100,13 +123,6 @@ func parsePDF(filename string, data []byte, now time.Time) (result Parsed, err e
 		if annots.Kind() != pdf.Array || annots.Len() == 0 {
 			continue
 		}
-
-		// The page's glyphs are read at most once, and only when the page
-		// actually carries an annotation — interpreting a content stream is
-		// by far the most expensive thing here, and most pages of most books
-		// have nothing on them to import.
-		var glyphs []pdf.Text
-		var glyphsRead bool
 
 		for i := 0; i < annots.Len(); i++ {
 			annot := annots.Index(i)
@@ -119,15 +135,12 @@ func parsePDF(filename string, data []byte, now time.Time) (result Parsed, err e
 
 			var quote string
 			if markupSubtypes[subtype] {
-				if !glyphsRead {
-					glyphs, glyphsRead = pageGlyphs(page), true
-				}
-				quote = textUnderMarkup(glyphs, annot)
-				if quote == "" && note == "" {
+				quote = textUnderMarkup(words[number], annot)
+				if quote == "" && note == "" && wordsErr == nil {
 					result.Warnings = append(result.Warnings, fmt.Sprintf(
 						"page %d: could not recover the text under a %s and it has no note; "+
 							"the page may have no text layer", number, strings.ToLower(subtype)))
-				} else if quote == "" {
+				} else if quote == "" && wordsErr == nil {
 					result.Warnings = append(result.Warnings, fmt.Sprintf(
 						"page %d: kept a %s for its note only — its text could not be recovered",
 						number, strings.ToLower(subtype)))
@@ -172,20 +185,6 @@ func pdfMetadata(reader *pdf.Reader) (title, author, subtitle string) {
 	return collapseSpace(info.Key("Title").Text()),
 		collapseSpace(info.Key("Author").Text()),
 		collapseSpace(info.Key("Subject").Text())
-}
-
-// pageGlyphs returns a page's text, or nothing if it cannot be interpreted.
-//
-// Wrapped separately from parsePDF's own recover so that one unreadable
-// content stream costs that page's highlights their text rather than costing
-// the upload every annotation in the file.
-func pageGlyphs(page pdf.Page) (glyphs []pdf.Text) {
-	defer func() {
-		if recover() != nil {
-			glyphs = nil
-		}
-	}()
-	return page.Content().Text
 }
 
 // rect is an axis-aligned box in PDF user space, y increasing upwards.
@@ -240,79 +239,72 @@ func markupRects(annot pdf.Value) []rect {
 	return rects
 }
 
-// textUnderMarkup recovers the passage a markup annotation covers.
+// textUnderMarkup recovers the passage a markup annotation covers, from the
+// page's own word list — see pageWords in pdftext.go for where that comes
+// from and why.
 //
-// rsc.io/pdf emits one Text per glyph, positioned at its baseline, and drops
-// spaces entirely — so both the words and the line breaks have to be
-// reconstructed from geometry. A glyph belongs to the annotation when its
-// horizontal midpoint and its baseline fall inside one of the covered boxes;
-// testing the midpoint rather than the whole glyph box is what keeps the
-// character straddling the edge of a highlight from being counted twice when
-// two highlights abut.
-func textUnderMarkup(glyphs []pdf.Text, annot pdf.Value) string {
+// A word belongs to the annotation when its bbox centre falls inside one of
+// the covered boxes. Centre rather than any corner or the whole box, for the
+// same reason pdf-annotation-extractor.py's own word-selection settled on
+// it (the Python/PyMuPDF extractor this route was ported from — see that
+// script's _text_under_markup): it is what keeps a word straddling the edge
+// of a highlight from being counted twice when two highlights abut, and
+// what avoids the doubled-up runs an OCR text layer's overlapping
+// marked-content groups can otherwise produce.
+func textUnderMarkup(words []pdfWord, annot pdf.Value) string {
 	boxes := markupRects(annot)
-	if len(boxes) == 0 || len(glyphs) == 0 {
+	if len(boxes) == 0 || len(words) == 0 {
 		return ""
 	}
 
-	var selected []pdf.Text
-	for _, glyph := range glyphs {
-		midpoint := glyph.X + glyph.W/2
+	var selected []pdfWord
+	for _, word := range words {
+		cx := (word.box.x0 + word.box.x1) / 2
+		cy := (word.box.y0 + word.box.y1) / 2
 		for _, box := range boxes {
-			if box.contains(midpoint, glyph.Y) {
-				selected = append(selected, glyph)
+			if box.contains(cx, cy) {
+				selected = append(selected, word)
 				break
 			}
 		}
 	}
-	return assemble(selected)
+	return assembleWords(selected)
 }
 
-// assemble turns positioned glyphs back into readable text.
-func assemble(glyphs []pdf.Text) string {
-	if len(glyphs) == 0 {
+// assembleWords turns selected words back into a readable passage.
+//
+// Unlike the glyph-level assembly this replaced, there is no sorting to do
+// first: pageWords already returns each page's words in poppler's own
+// reading order — real layout analysis, not a guess reconstructed from raw
+// coordinates — and filtering down to the ones a highlight covers preserves
+// that relative order. Trusting it also does the right thing in a layout
+// glyph-sorting could not: a multi-column page's reading order is "down
+// this column, then down the next", not "left to right across the whole
+// page", and poppler already knows the difference.
+func assembleWords(words []pdfWord) string {
+	if len(words) == 0 {
 		return ""
 	}
 
-	// Reading order: down the page, then across. Baselines of one line
-	// wobble by a fraction of a point, so lines are separated by a tolerance
-	// derived from the type size rather than by exact equality.
-	sorted := make([]pdf.Text, len(glyphs))
-	copy(sorted, glyphs)
-	sort.SliceStable(sorted, func(i, j int) bool {
-		if math.Abs(sorted[i].Y-sorted[j].Y) > lineTolerance(sorted[i], sorted[j]) {
-			return sorted[i].Y > sorted[j].Y
-		}
-		return sorted[i].X < sorted[j].X
-	})
-
 	var out strings.Builder
-	for index, glyph := range sorted {
+	for index, word := range words {
 		if index > 0 {
-			previous := sorted[index-1]
-			switch {
-			case math.Abs(glyph.Y-previous.Y) > lineTolerance(glyph, previous):
+			previous := words[index-1]
+			height := math.Max(word.box.y1-word.box.y0, 1)
+			cy := (word.box.y0 + word.box.y1) / 2
+			previousCY := (previous.box.y0 + previous.box.y1) / 2
+			if math.Abs(cy-previousCY) > 0.5*height {
 				// A new line. Written as a real newline so that
 				// joinHyphenation downstream can see the break and repair a
 				// word split across it.
 				out.WriteString("\n")
-			case glyph.X-(previous.X+previous.W) > 0.18*math.Max(glyph.FontSize, 1):
-				// Wide enough a gap to have been a space. PDF text showing
-				// operators drop spaces and re-position instead, so this is
-				// the only evidence there ever was one; the threshold is
-				// well under an inter-word gap and well over inter-letter
-				// tracking at any size.
+			} else {
 				out.WriteString(" ")
 			}
 		}
-		out.WriteString(glyph.S)
+		out.WriteString(word.text)
 	}
 	return cleanPassage(out.String())
-}
-
-// lineTolerance is how far two baselines may differ and still be one line.
-func lineTolerance(a, b pdf.Text) float64 {
-	return 0.5 * math.Max(math.Max(a.FontSize, b.FontSize), 1)
 }
 
 // annotationColor reads /C as "#rrggbb".

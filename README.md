@@ -13,8 +13,10 @@ become Anki cards.
 The point is being able to read a thousand articles at once by refusing to finish
 any of them.
 
-One static Go binary, SQLite, no runtime, five dependencies, a ~13 MB container
-image. Any device with a browser is a client.
+One static Go binary, SQLite, a ~54 MB container image built on top of
+poppler-utils (`pdftotext`, needed to recover text from a scanned book's OCR
+layer — see `internal/annotations/pdftext.go` — no pure-Go PDF library
+resolves it correctly). Any device with a browser is a client.
 
 ## What it does and does not do
 
@@ -61,7 +63,9 @@ mkdir -p data && sudo chown 65532:65532 data && docker compose up -d --build
 
 Two things about that line:
 
-- The `chown` matters: the image runs as uid 65532 (distroless's `nonroot`), and
+- The `chown` matters: the image runs as uid 65532 (a `nonroot` user created in
+  the Dockerfile, matching the uid distroless's own `nonroot` used before the
+  image needed poppler-utils — see the Dockerfile's own comment on why), and
   without it the first write to the volume fails.
 - **`--build` matters too.** Plain `docker compose up` only builds when the image
   is absent, so once `increader:latest` exists it will happily keep starting the
@@ -300,8 +304,9 @@ is holding — a deadlock rather than an error, so it hangs instead of failing.
 **"Today" is decided in exactly one place.** Due dates are stored as bare dates,
 so writing and comparing them must use the same zone. `main` pins `time.Local`
 to the configured timezone at startup and everything reads that. The container
-embeds the IANA database via `time/tzdata`, because distroless ships no zoneinfo
-and every date would otherwise silently be UTC.
+embeds the IANA database via `time/tzdata` regardless of what the base image
+provides, so a date can never silently become UTC because the container
+happened not to ship zoneinfo.
 
 ## Status
 

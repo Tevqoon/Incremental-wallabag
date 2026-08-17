@@ -1,9 +1,11 @@
 # increader — architecture overview
 
 A self-hosted incremental reader for [wallabag](https://wallabag.org). Single
-static Go binary + SQLite, ~5 dependencies, ~13 MB container image.
-Server-rendered HTML with htmx partial swaps; one hand-written ~500-line
-`app.js`; any browser is a client.
+static Go binary + SQLite, ~5 dependencies, ~54 MB container image (built on
+poppler-utils rather than distroless — see the Dockerfile's own comment and
+`internal/annotations/pdftext.go` for why `pdftotext` is a real process
+dependency, not just a Go one). Server-rendered HTML with htmx partial
+swaps; one hand-written ~500-line `app.js`; any browser is a client.
 
 ## What it does
 
@@ -59,6 +61,10 @@ Dependency direction is strictly downward — no leaf package reaches up into
   double-publish.
 - `internal/annotations` — KOReader/PDF annotation parsing; every call into
   the panic-prone `rsc.io/pdf` is `recover()`-guarded at file and page level.
+  Recovering a highlight's actual quote text shells out to poppler's
+  `pdftotext -bbox` (see `pdftext.go`) rather than reading glyphs from
+  `rsc.io/pdf` directly — the only reliable way to reach text a scanned
+  PDF's OCR pass buried in a Form XObject.
 - `internal/web` — stdlib `http.ServeMux` (Go 1.22 method+path patterns, no
   router dependency), `html/template` parsed once from an `embed.FS`, htmx
   for partial swaps. Handlers split across `server.go`, `queue.go`

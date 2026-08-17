@@ -36,7 +36,7 @@ services:
     command: ["serve", "-config", "/config.yaml"]
 
     healthcheck:
-      # distroless has no shell, curl or wget, so the binary probes itself.
+      # No curl/wget dependency needed either way: the binary probes itself.
       test: ["CMD", "/increader", "-config", "/config.yaml", "healthcheck"]
       interval: 30s
       timeout: 5s

@@ -2,13 +2,29 @@ package annotations
 
 import (
 	"fmt"
+	"os/exec"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
-
-	"rsc.io/pdf"
 )
+
+// requirePdftotext skips a test rather than failing it when poppler is not
+// on this machine's PATH. Every test that goes through Parse/parsePDF now
+// shells out to pdftotext for word recovery (see pageWords in pdftext.go),
+// which the increader production image installs deliberately but a plain
+// `go test` environment has no guarantee of — see the Dockerfile's own
+// comment on why that dependency exists at all. Skipping rather than
+// failing is what keeps a checkout without poppler installed able to run
+// the rest of this package's tests instead of reporting the whole suite
+// red for a missing binary that has nothing to do with what most of them
+// check.
+func requirePdftotext(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("pdftotext"); err != nil {
+		t.Skip("pdftotext (poppler-utils) not found on PATH; skipping")
+	}
+}
 
 // buildPDF assembles a minimal but genuinely valid PDF from object bodies.
 //
@@ -104,6 +120,7 @@ func annotatedPDF(t *testing.T) []byte {
 // highlight stores where it is, not what it covers, so the passage has to be
 // reconstructed from which glyphs sit underneath it.
 func TestParsePDFRecoversMarkedText(t *testing.T) {
+	requirePdftotext(t)
 	parsed, err := Parse("book.pdf", annotatedPDF(t), now)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
@@ -160,6 +177,7 @@ func TestParsePDFRecoversMarkedText(t *testing.T) {
 // TestParsePDFIsIdempotent guards the property that makes re-uploading a book
 // safe: nothing about a second read of the same file may differ.
 func TestParsePDFIsIdempotent(t *testing.T) {
+	requirePdftotext(t)
 	data := annotatedPDF(t)
 
 	first, err := Parse("book.pdf", data, now)
@@ -231,33 +249,44 @@ func TestPDFFallsBackToFilename(t *testing.T) {
 	}
 }
 
-func TestAssembleReconstructsSpacesAndLines(t *testing.T) {
-	// Two lines, each two words. Spaces are never stored in a PDF's text
-	// stream — the writer re-positions instead — so both the spaces and the
-	// line break have to come out of the geometry.
-	glyphs := positioned(t, []struct {
-		s    string
-		x, y float64
-	}{
-		{"a", 10, 100}, {"b", 16, 100}, {"c", 30, 100},
-		{"d", 10, 80}, {"e", 16, 80},
-	})
-
-	if got := assemble(glyphs); got != "ab c de" {
-		t.Errorf("assemble = %q, want %q", got, "ab c de")
+// TestAssembleWordsJoinsSameLine checks the ordinary case: poppler's own
+// word list already has real spaces between words on the wire (unlike
+// rsc.io/pdf's glyph stream, which had none), so the only thing left to
+// reconstruct from geometry is whether consecutive selected words are on
+// the same line at all.
+func TestAssembleWordsJoinsSameLine(t *testing.T) {
+	words := []pdfWord{
+		wordAt(10, 90, 30, 100, "Hello"),
+		wordAt(34, 90, 60, 100, "marked"),
+		wordAt(64, 90, 80, 100, "world"),
+	}
+	if got := assembleWords(words); got != "Hello marked world" {
+		t.Errorf("assembleWords = %q, want %q", got, "Hello marked world")
 	}
 }
 
-// positioned builds glyphs at given coordinates, 12pt with a 6pt advance —
-// the same geometry annotatedPDF produces.
-func positioned(t *testing.T, glyphs []struct {
-	s    string
-	x, y float64
-}) []pdf.Text {
-	t.Helper()
-	out := make([]pdf.Text, 0, len(glyphs))
-	for _, g := range glyphs {
-		out = append(out, pdf.Text{Font: "Helvetica", FontSize: 12, X: g.x, Y: g.y, W: 6, S: g.s})
+// TestAssembleWordsRepairsHyphenationAcrossLines is the reason the line
+// break has to survive as a real newline rather than collapsing straight to
+// a space the way collapseSpace would treat it otherwise: cleanPassage's
+// own joinHyphenation pass only fires on a hyphen immediately before a
+// newline, so this is what actually proves the newline insertion is load-
+// bearing and not merely cosmetic — the same output would come out of a
+// same-line join too, if the words themselves did not need repairing.
+func TestAssembleWordsRepairsHyphenationAcrossLines(t *testing.T) {
+	words := []pdfWord{
+		wordAt(10, 90, 60, 100, "anno-"),
+		wordAt(10, 70, 60, 80, "tation"),
 	}
-	return out
+	if got := assembleWords(words); got != "annotation" {
+		t.Errorf("assembleWords = %q, want %q (the hyphen repaired across the line break)", got, "annotation")
+	}
+}
+
+// wordAt builds a pdfWord at the given box, in PDF page-coordinate space —
+// bottom-left origin, y increasing upward, the space assembleWords and
+// textUnderMarkup both work in (see pdfWord's own doc comment on why that
+// is not the same space pdftotext -bbox reports coordinates in on the
+// wire).
+func wordAt(x0, y0, x1, y1 float64, text string) pdfWord {
+	return pdfWord{box: rect{x0: x0, y0: y0, x1: x1, y1: y1}, text: text}
 }

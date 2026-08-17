@@ -16,8 +16,8 @@ import (
 
 	// modernc.org/sqlite is a pure-Go SQLite. It is slower than the cgo
 	// binding, which does not matter at this scale, and it means the whole app
-	// cross-compiles to a static binary with CGO_ENABLED=0 — which is what
-	// lets the container image be distroless with no libc.
+	// cross-compiles to a static binary with CGO_ENABLED=0 — no libc needed
+	// at runtime regardless of which base image the Dockerfile ends up using.
 	//
 	// Go note: importing it also runs its init(), which is what registers the
 	// "sqlite" driver name with database/sql. That registration — not any

@@ -590,9 +590,10 @@ func serve(settings config.Config, logger *slog.Logger) error {
 
 // healthcheck probes a running instance over HTTP.
 //
-// It exists as a subcommand because the container image is distroless: there is
-// no shell, no curl and no wget for a compose healthcheck to call, but the
-// binary is already there.
+// It exists as a subcommand so compose's healthcheck can call the binary
+// that's already there rather than depend on curl or wget being installed
+// in the image — true necessity back when the base image was distroless,
+// and kept on Alpine so the healthcheck doesn't care which base is in use.
 func healthcheck(settings config.Config) error {
 	_, port, err := net.SplitHostPort(settings.Bind)
 	if err != nil {
