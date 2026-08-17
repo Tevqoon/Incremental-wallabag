@@ -54,20 +54,40 @@ func TestCleanBody(t *testing.T) {
 			wantNotIn: []string{"show-subscribe", "Subscribe to continue reading."},
 		},
 		{
-			name: "an Image2ToDOM component and its image classes survive untouched",
+			// The nesting here — an Image2ToDOM <a> inside <figure>, wrapping
+			// a captioned image, with an image-link-expand button pair as
+			// its sibling — is exactly what two real, unauthenticated
+			// fetches of free posts carried on 2026-08-17, not a guess: see
+			// imageZoomComponentName's own doc comment for why an earlier,
+			// simpler guess at this shape (a bare data-component-name on the
+			// outer div, no <a> at all) was wrong, and for the live wallabag
+			// round trip that caught it. The <img> and its caption are real
+			// content and must survive; the click-to-zoom <a> and the
+			// button pair beside it are not, and must not.
+			name: "an Image2ToDOM zoom link is unwrapped and its button pair stripped, keeping the image",
 			html: `<p>Before.</p>` +
-				`<div data-component-name="Image2ToDOM" class="captioned-image-container">` +
-				`<figure class="image2 image2-inset">` +
-				`<img class="is-viewable-img restack-image" src="https://substackcdn.com/image/fetch/w_1456/example.jpeg" alt="a photo">` +
+				`<div class="captioned-image-container"><figure>` +
+				`<a class="image-link image2 is-viewable-img" target="_blank" href="https://substackcdn.com/full-size.jpeg" data-component-name="Image2ToDOM">` +
+				`<div class="image2-inset"><picture>` +
+				`<img class="sizing-large" src="https://substackcdn.com/image/fetch/w_1456/example.jpeg" alt="a photo">` +
+				`</picture>` +
+				`<div class="image-link-expand"><div class="pencraft pc-display-flex">` +
+				`<button type="button" class="pencraft icon-container restack-image"><svg><path d="M1 2"></path></svg></button>` +
+				`<button type="button" class="pencraft icon-container view-image"><svg><path d="M3 4"></path></svg></button>` +
+				`</div></div>` +
+				`</div></a>` +
 				`<figcaption>A caption.</figcaption>` +
 				`</figure></div><p>After.</p>`,
 			wantIn: []string{
-				`data-component-name="Image2ToDOM"`,
 				`class="captioned-image-container"`,
-				`class="image2 image2-inset"`,
-				`class="is-viewable-img restack-image"`,
+				`class="image2-inset"`,
+				`class="sizing-large"`,
 				`src="https://substackcdn.com/image/fetch/w_1456/example.jpeg"`,
 				"A caption.", "Before.", "After.",
+			},
+			wantNotIn: []string{
+				"Image2ToDOM", "image-link", "full-size.jpeg",
+				"image-link-expand", "restack-image", "view-image", "<button", "<svg",
 			},
 		},
 		{
@@ -137,5 +157,40 @@ func TestCleanBodyEmptyInput(t *testing.T) {
 	}
 	if len(warnings) != 0 {
 		t.Errorf("warnings = %v, want none", warnings)
+	}
+}
+
+// TestCleanBodyUnwrapsSeveralImagesInSequence guards unwrap's own tree
+// mutation specifically: several Image2ToDOM wrappers as immediate
+// siblings is exactly the shape a real, image-heavy post has (sixteen in a
+// row, in the live post that first surfaced this), and each unwrap changes
+// its parent's child list out from under the very loop walking it —
+// captured `next` pointers have to keep every image reachable and correctly
+// ordered regardless.
+func TestCleanBodyUnwrapsSeveralImagesInSequence(t *testing.T) {
+	image := func(src string) string {
+		return `<figure><a data-component-name="Image2ToDOM" href="https://substackcdn.com/full.jpeg">` +
+			`<img src="` + src + `">` +
+			`<div class="image-link-expand"><button><svg></svg></button></div>` +
+			`</a></figure>`
+	}
+	html := `<p>Before.</p>` + image("one.jpeg") + image("two.jpeg") + image("three.jpeg") + `<p>After.</p>`
+
+	cleaned, _ := cleanBody(html)
+
+	for _, want := range []string{"Before.", "After.", `src="one.jpeg"`, `src="two.jpeg"`, `src="three.jpeg"`} {
+		if !strings.Contains(cleaned, want) {
+			t.Errorf("cleaned output missing %q\ngot: %s", want, cleaned)
+		}
+	}
+	for _, notWant := range []string{"Image2ToDOM", "image-link-expand", "<button", "<svg", "full.jpeg"} {
+		if strings.Contains(cleaned, notWant) {
+			t.Errorf("cleaned output still contains %q, want it stripped\ngot: %s", notWant, cleaned)
+		}
+	}
+	// Order must survive the three unwraps, not just presence.
+	one, two, three := strings.Index(cleaned, "one.jpeg"), strings.Index(cleaned, "two.jpeg"), strings.Index(cleaned, "three.jpeg")
+	if !(one < two && two < three) {
+		t.Errorf("images came out of order: one=%d two=%d three=%d\ngot: %s", one, two, three, cleaned)
 	}
 }

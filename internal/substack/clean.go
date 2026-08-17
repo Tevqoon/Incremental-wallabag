@@ -115,6 +115,68 @@ func isSubscribeChrome(n *html.Node) bool {
 	return false
 }
 
+// imageZoomComponentName is the data-component-name Substack puts on the
+// <a> it wraps around an inline image purely to make the image
+// click-to-zoom. Confirmed against two real, unauthenticated fetches of
+// free posts on 2026-08-17 — sixteen images in one post, one in the other,
+// every single one wrapped this way with no exception — after a live
+// wallabag round trip showed increader re-"growing" the same articles by
+// 7% to 36% on every single re-ingest, forever, because wallabag's own
+// storage strips this <a> (and imageZoomButtonsClass below) but this
+// package was sending it fresh every time: the two sides could never
+// converge, and content that had not actually changed kept looking like it
+// had, which is what wrongly returned already-finished articles to the
+// reading queue (see Item.ContentGrew in internal/ingest/plan.go).
+//
+// The wrapped <a>'s own href just points at a larger copy of the exact same
+// image, not a different resource, so unwrapping it — see stripChoreNodes —
+// loses nothing a reader could not already get by opening the <img> itself.
+const imageZoomComponentName = "Image2ToDOM"
+
+// imageZoomButtonsClass is the wrapper around Substack's own restack and
+// fullscreen icon buttons that sits *beside*, not around, the image inside
+// imageZoomComponentName's own wrapper. Confirmed the same live check as
+// imageZoomComponentName: present exactly once per image in both posts
+// checked, always a pair of <button><svg>...</svg></button> elements with
+// no text content at all — pure client-side UI this reader never runs
+// JavaScript to operate anyway, the same reasoning that already excludes
+// the subscribe widget. Deleted outright rather than unwrapped, unlike
+// imageZoomComponentName's own wrapper: there is no content inside worth
+// keeping.
+const imageZoomButtonsClass = "image-link-expand"
+
+// isImageZoomLink reports whether n is the <a> Substack wraps around an
+// inline image to make it click-to-zoom — see imageZoomComponentName.
+func isImageZoomLink(n *html.Node) bool {
+	if n.Type != html.ElementNode {
+		return false
+	}
+	for _, attr := range n.Attr {
+		if attr.Key == "data-component-name" && attr.Val == imageZoomComponentName {
+			return true
+		}
+	}
+	return false
+}
+
+// isImageZoomButtons reports whether n is the restack/fullscreen button
+// pair beside an image — see imageZoomButtonsClass.
+func isImageZoomButtons(n *html.Node) bool {
+	if n.Type != html.ElementNode {
+		return false
+	}
+	for _, attr := range n.Attr {
+		if attr.Key == "class" {
+			for _, class := range strings.Fields(attr.Val) {
+				if class == imageZoomButtonsClass {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // cleanBody strips Substack's own subscribe-widget chrome out of a post
 // body and strips invisibleFormatting's characters from what remains. It
 // parses the markup with x/net/html and removes whole nodes rather than
@@ -207,30 +269,72 @@ func cleanBody(bodyHTML string) (string, []string) {
 	return out.String(), nil
 }
 
-// stripChoreNodes removes every descendant of n that isSubscribeChrome
-// matches, in place, along with everything inside it.
+// stripChoreNodes removes every descendant of n that isSubscribeChrome or
+// isImageZoomButtons matches, in place, along with everything inside it —
+// and unwraps (keeps the children, discards just the wrapper) every one
+// isImageZoomLink matches, since unlike the other two that one wraps real
+// content, not chrome.
 //
 // A tweet embed survives this untouched even though it, too, is identified
 // by a data-component-name attribute: tweetEmbedReplacement in
 // internal/web/embeds.go matches "Twitter2ToDOM" specifically, a different
 // value from subscribeComponentName's "SubscribeWidgetToDOM", so the two
-// never collide — see cleanBody's point 3 above. Likewise Image2ToDOM and
-// PreformattedTextBlockToDOM (Substack's own image and code-block
-// components, both confirmed present in real body_html) and the
-// captioned-image-container / image2 / image2-inset / restack-image /
-// is-viewable-img class family that goes with them are never touched: none
-// of them is "SubscribeWidgetToDOM", and none carries a class matching
+// never collide — see cleanBody's point 3 above. Likewise
+// PreformattedTextBlockToDOM (Substack's own code-block component,
+// confirmed present in real body_html) and the captioned-image-container /
+// image2 / image2-inset / restack-image / is-viewable-img class family are
+// never touched: none of them is "SubscribeWidgetToDOM" or
+// imageZoomButtonsClass, and none carries a class matching
 // subscribeWidgetClassPrefix or subscribeWidgetExactClass.
 func stripChoreNodes(n *html.Node) {
 	for child := n.FirstChild; child != nil; {
 		next := child.NextSibling
-		if isSubscribeChrome(child) {
-			n.RemoveChild(child)
-		} else {
-			stripChoreNodes(child)
-		}
+		handleChoreNode(n, child)
 		child = next
 	}
+}
+
+// handleChoreNode applies stripChoreNodes' own rule to node, a child of
+// parent: delete it outright (subscribe chrome, an image-zoom button pair),
+// unwrap it in place (an image-zoom link, keeping its own children), or,
+// failing both, recurse into its children to find chrome nested further
+// down.
+//
+// Split out from stripChoreNodes' loop so unwrap below can hand a promoted
+// child back through the exact same rule an ordinary child of n would get —
+// not merely search inside the promoted child, which would miss the
+// promoted child itself matching. That gap was live, not hypothetical:
+// unwrapping an Image2ToDOM wrapper promotes its image-link-expand sibling
+// (the button pair, see imageZoomButtonsClass) to be n's own child too, and
+// a first version of this code that called stripChoreNodes(child) instead
+// of this function left that promoted div — chrome in its own right —
+// sitting untouched, because stripChoreNodes only ever tests a node's
+// children against the switch below, never the node it was handed.
+func handleChoreNode(parent, node *html.Node) {
+	switch {
+	case isSubscribeChrome(node), isImageZoomButtons(node):
+		parent.RemoveChild(node)
+	case isImageZoomLink(node):
+		unwrap(parent, node)
+	default:
+		stripChoreNodes(node)
+	}
+}
+
+// unwrap replaces node — a child of parent — with node's own children, in
+// the same position, discarding node itself. Each promoted child goes
+// through handleChoreNode again, exactly as if it had always been one of
+// parent's own children — see handleChoreNode's own comment for why that
+// distinction matters.
+func unwrap(parent, node *html.Node) {
+	for child := node.FirstChild; child != nil; {
+		next := child.NextSibling
+		node.RemoveChild(child)
+		parent.InsertBefore(child, node)
+		handleChoreNode(parent, child)
+		child = next
+	}
+	parent.RemoveChild(node)
 }
 
 // stripInvisibleText applies stripInvisibleFormatting to every text node
