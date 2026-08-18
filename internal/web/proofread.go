@@ -1,6 +1,8 @@
 package web
 
 import (
+	"html"
+	"html/template"
 	"net/http"
 	"sort"
 	"strconv"
@@ -16,6 +18,86 @@ type proofreadSuggestion struct {
 	ID       int64
 	Original string
 	Proposed string
+
+	// Diff is Original and Proposed merged into one marked-up passage —
+	// unchanged words plain, removed ones in <del>, added ones in <ins> —
+	// rather than the full text twice over. A model fixing one dropped
+	// letter in an otherwise-long passage used to mean reading the whole
+	// thing twice to find what actually changed; this is the point of
+	// reviewing a proposal rather than just applying it.
+	Diff template.HTML
+}
+
+// wordDiff renders a and b as one word-level diff: an LCS alignment (plain
+// dynamic programming — passage-length word counts, not documents, so this
+// is cheap) walked to emit runs of unchanged, removed and added words,
+// rather than the two full passages side by side. A deleted run is always
+// emitted immediately before the insertion that replaces it, which is what
+// keeps "the wrong word" and "the right word" next to each other instead of
+// on opposite ends of the passage the way a naive line-diff would.
+//
+// Splits on whitespace only, which is safe here specifically because every
+// passage reaching this already went through cleanPassage on the way in
+// (see annotations.cleanPassage) and so carries no internal line breaks to
+// lose by doing that.
+func wordDiff(a, b string) template.HTML {
+	oldWords := strings.Fields(a)
+	newWords := strings.Fields(b)
+	n, m := len(oldWords), len(newWords)
+
+	// lcs[i][j] is the length of the longest common subsequence of
+	// oldWords[i:] and newWords[j:], filled bottom-up so the walk below can
+	// greedily follow whichever neighbour holds the longer subsequence.
+	lcs := make([][]int, n+1)
+	for i := range lcs {
+		lcs[i] = make([]int, m+1)
+	}
+	for i := n - 1; i >= 0; i-- {
+		for j := m - 1; j >= 0; j-- {
+			switch {
+			case oldWords[i] == newWords[j]:
+				lcs[i][j] = lcs[i+1][j+1] + 1
+			case lcs[i+1][j] >= lcs[i][j+1]:
+				lcs[i][j] = lcs[i+1][j]
+			default:
+				lcs[i][j] = lcs[i][j+1]
+			}
+		}
+	}
+
+	var out strings.Builder
+	space := func() {
+		if out.Len() > 0 {
+			out.WriteByte(' ')
+		}
+	}
+	i, j := 0, 0
+	for i < n && j < m {
+		switch {
+		case oldWords[i] == newWords[j]:
+			space()
+			out.WriteString(html.EscapeString(oldWords[i]))
+			i++
+			j++
+		case lcs[i+1][j] >= lcs[i][j+1]:
+			space()
+			out.WriteString("<del>" + html.EscapeString(oldWords[i]) + "</del>")
+			i++
+		default:
+			space()
+			out.WriteString("<ins>" + html.EscapeString(newWords[j]) + "</ins>")
+			j++
+		}
+	}
+	for ; i < n; i++ {
+		space()
+		out.WriteString("<del>" + html.EscapeString(oldWords[i]) + "</del>")
+	}
+	for ; j < m; j++ {
+		space()
+		out.WriteString("<ins>" + html.EscapeString(newWords[j]) + "</ins>")
+	}
+	return template.HTML(out.String())
 }
 
 // proofreadReviewData is the page shown after a batch comes back — nothing
@@ -119,6 +201,7 @@ func (s *Server) handleProofreadExtracts(w http.ResponseWriter, r *http.Request)
 		}
 		suggestions = append(suggestions, proofreadSuggestion{
 			ID: element.ID, Original: element.Quote, Proposed: proposed,
+			Diff: wordDiff(element.Quote, proposed),
 		})
 	}
 	sort.Slice(suggestions, func(i, j int) bool { return suggestions[i].ID < suggestions[j].ID })

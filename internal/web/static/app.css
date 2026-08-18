@@ -169,9 +169,16 @@ h1 { font-size: 1.5rem; line-height: 1.25; margin: 0 0 0.35rem; }
 
 /* The proofreading review page's own before/after, reusing .item-selectable
    for the same checkbox-beside-text layout its other bulk-select rows use. */
-.proofread-was { color: var(--muted); text-decoration: none; }
-.proofread-was del { text-decoration-color: var(--danger); }
-.proofread-now { margin-top: 0.2rem; }
+.proofread-diff del {
+  text-decoration: line-through;
+  text-decoration-color: var(--danger);
+  color: var(--muted);
+}
+.proofread-diff ins {
+  text-decoration: none;
+  color: var(--accent);
+  font-weight: 600;
+}
 
 /* The library's selection bar, above the list itself. */
 .bulk-bar {

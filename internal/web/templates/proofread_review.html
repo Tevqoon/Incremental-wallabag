@@ -25,8 +25,7 @@
                    class="item-select" aria-label="Apply this correction">
             <input type="hidden" name="quote_{{.ID}}" value="{{.Proposed}}">
             <div class="item-body">
-              <p class="proofread-was"><del>{{.Original}}</del></p>
-              <p class="proofread-now">{{.Proposed}}</p>
+              <p class="proofread-diff">{{.Diff}}</p>
             </div>
           </li>
         {{end}}

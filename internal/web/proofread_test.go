@@ -17,6 +17,42 @@ import (
 	"github.com/Tevqoon/increader/internal/store"
 )
 
+// TestWordDiffHighlightsOnlyTheChangedWords covers the review page's own
+// merged diff (see wordDiff): the dropcap example from the real book that
+// prompted this feature, where only the displaced "U" and the corrected
+// initial letter should be marked, not the whole passage.
+func TestWordDiffHighlightsOnlyTheChangedWords(t *testing.T) {
+	got := wordDiff(
+		"NDERSTAND, MY SON, that as long as a man U lacks accomplishments",
+		"UNDERSTAND, MY SON, that as long as a man lacks accomplishments",
+	)
+	want := `<del>NDERSTAND,</del> <ins>UNDERSTAND,</ins> MY SON, that as long as a man <del>U</del> lacks accomplishments`
+	if string(got) != want {
+		t.Errorf("wordDiff =\n%s\nwant\n%s", got, want)
+	}
+}
+
+// TestWordDiffEscapesHTML guards against a passage that happens to contain
+// something HTML-meaningful — a stray "<" an OCR pass produced, say — being
+// interpreted as markup instead of shown as the character it is.
+func TestWordDiffEscapesHTML(t *testing.T) {
+	got := wordDiff("a <script> tag", "a <b>tag</b>")
+	if strings.Contains(string(got), "<script>") || strings.Contains(string(got), "<b>tag</b>") {
+		t.Errorf("wordDiff did not escape passage content: %s", got)
+	}
+}
+
+// TestWordDiffIdenticalTextHasNoMarkup covers the case wordDiff is never
+// actually asked to render in practice — handleProofreadExtracts only calls
+// it when Proposed differs from Original — but should still degenerate to
+// plain, unmarked text rather than something misleadingly diff-shaped.
+func TestWordDiffIdenticalTextHasNoMarkup(t *testing.T) {
+	got := wordDiff("the same passage", "the same passage")
+	if strings.Contains(string(got), "<del>") || strings.Contains(string(got), "<ins>") {
+		t.Errorf("wordDiff marked up identical text: %s", got)
+	}
+}
+
 // newProofreadTestServer builds a server wired to a fake OpenAI-compatible
 // endpoint, so the "Fix typos" path can be exercised without a real API key.
 // respond decides what the fake model returns for a given request body.
