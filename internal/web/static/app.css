@@ -1174,9 +1174,37 @@ fieldset.field { border: 0; padding: 0; margin-inline: 0; }
 
 .chapter { margin-bottom: 2rem; }
 .chapter-title {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
   font-size: 1.05rem;
   padding-bottom: 0.3rem;
   border-bottom: 2px solid var(--rule);
+}
+
+/* The pencil that renames every annotation in one chapter at once (see
+   document.go's handleSetChapters, reused here with the group's own
+   membership standing in for a checkbox selection) — a CSS glyph on the
+   summary rather than a real character in it, so aria-label is the only
+   thing an accessible name is ever built from, not "aria-label plus the
+   pencil" concatenated. */
+.chapter-rename summary {
+  display: inline-block;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.85rem;
+  list-style: none;
+}
+.chapter-rename summary::-webkit-details-marker { display: none; }
+.chapter-rename summary::before { content: "✎"; }
+.chapter-rename summary:hover { color: var(--accent); }
+.chapter-rename form {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+  margin-top: 0.4rem;
+  font-size: 0.85rem;
+  font-family: system-ui, sans-serif;
 }
 .item-note,
 .item-subtitle {

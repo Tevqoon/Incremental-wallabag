@@ -716,6 +716,57 @@ func TestApplyChapterMarkersTurnsCheckedAnnotationsIntoHeadings(t *testing.T) {
 	}
 }
 
+// TestChapterRenameControlPrefillsAndRenamesTheWholeGroup covers the pencil
+// next to a chapter heading (document.html's own .chapter-rename disclosure):
+// it must pre-fill the group's current name, carry every one of that group's
+// own annotation ids as hidden fields, and — reusing handleSetChapters
+// unchanged — actually rename all of them from a single save, without the
+// reader ever checking a box.
+func TestChapterRenameControlPrefillsAndRenamesTheWholeGroup(t *testing.T) {
+	server, db, _ := newTestServer(t, false)
+	documentID := importedDocumentID(t, server, "queue")
+
+	body := get(t, server, "/documents/"+strconv.FormatInt(documentID, 10)).Body.String()
+	if !strings.Contains(body, `<input type="text" name="chapter" value="Las Meninas"`) {
+		t.Errorf("the rename control for \"Las Meninas\" is not pre-filled:\n%s", body)
+	}
+
+	annotations, err := db.DocumentAnnotations(documentID)
+	if err != nil {
+		t.Fatalf("DocumentAnnotations: %v", err)
+	}
+	var lasMeninasIDs []int64
+	for _, annotation := range annotations {
+		if annotation.Chapter == "Las Meninas" {
+			lasMeninasIDs = append(lasMeninasIDs, annotation.ID)
+		}
+	}
+	if len(lasMeninasIDs) != 2 {
+		t.Fatalf("got %d annotations in \"Las Meninas\", want 2 (uploadJSON's own fixture)", len(lasMeninasIDs))
+	}
+
+	// The same request the pencil's own form sends: every id in the group,
+	// no checkbox involved.
+	form := url.Values{"chapter": {"Las Meninas (renamed)"}}
+	for _, id := range lasMeninasIDs {
+		form.Add("ids", strconv.FormatInt(id, 10))
+	}
+	response := post(t, server, "/documents/"+strconv.FormatInt(documentID, 10)+"/chapters", form)
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303: %s", response.Code, response.Body.String())
+	}
+
+	for _, id := range lasMeninasIDs {
+		element, err := db.ElementByID(id)
+		if err != nil {
+			t.Fatalf("ElementByID(%d): %v", id, err)
+		}
+		if element.Chapter != "Las Meninas (renamed)" {
+			t.Errorf("element %d chapter = %q, want the whole group renamed", id, element.Chapter)
+		}
+	}
+}
+
 func TestImportRejectsAFileItCannotRead(t *testing.T) {
 	server, _, _ := newTestServer(t, false)
 

@@ -139,7 +139,23 @@
   {{range $index, $group := .Groups}}
     <section class="chapter" id="chapter-{{$index}}">
       <h2 class="chapter-title">
-        {{if $group.Chapter}}{{$group.Chapter}}{{else}}Without a chapter{{end}}
+        <span>{{if $group.Chapter}}{{$group.Chapter}}{{else}}Without a chapter{{end}}</span>
+        <!-- Renames every annotation in this group in one request, rather
+             than the reader having to check them all by hand first — the
+             group's own membership stands in for a selection. Same plain
+             <details> disclosure the "Rename" section and the per-annotation
+             edit forms already use, so it needs no JavaScript either; the
+             pencil is CSS content, not a real character, so it never shows
+             up if a screen reader reads the summary's text instead of its
+             accessible name. -->
+        <details class="chapter-rename">
+          <summary aria-label="Rename this chapter"></summary>
+          <form method="post" action="/documents/{{$.Document.ID}}/chapters">
+            {{range $group.Annotations}}<input type="hidden" name="ids" value="{{.ID}}">{{end}}
+            <input type="text" name="chapter" value="{{$group.Chapter}}" placeholder="chapter name" class="tiny">
+            <button type="submit" class="tiny">Save</button>
+          </form>
+        </details>
       </h2>
       <ol class="items">
         {{range $group.Annotations}}
