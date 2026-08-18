@@ -2676,6 +2676,35 @@ func TestExtractsBulkDelete(t *testing.T) {
 	}
 }
 
+// TestExtractsBulkSuspend covers the reversible bulk action document.html's
+// own "Suspend selected" button reuses this same endpoint for.
+func TestExtractsBulkSuspend(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	id, err := db.CreateExtract(store.NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "a passage", ContentHTML: "<p>a passage</p>",
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+
+	response := post(t, server, "/extracts/bulk", url.Values{
+		"action": {"suspend"},
+		"ids":    {itoa(id)},
+	})
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303: %s", response.Code, response.Body.String())
+	}
+
+	element, err := db.ElementByID(id)
+	if err != nil {
+		t.Fatalf("ElementByID: %v", err)
+	}
+	if element.Schedule.State != ir.StateSuspended {
+		t.Errorf("state = %q, want suspended", element.Schedule.State)
+	}
+}
+
 // TestExtractsBulkIgnoresRootElements guards the same tampering case
 // handleDeleteExtract already rejects for a single id: the selection bar
 // only ever lists extracts, and a whole article slipped into "ids" — a

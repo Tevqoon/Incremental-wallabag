@@ -71,6 +71,24 @@
       </ol>
     </nav>
 
+    {{if .Colors}}
+      <!-- One click to select every annotation in a given colour, for a book
+           whose colour convention (a heading colour, say) was decided after
+           it was already imported — the interactive counterpart to setting
+           chapter_marker_color on the upload form itself. Pure convenience:
+           it only ever changes which boxes below are checked, so it needs
+           no endpoint of its own — see app.js's data-select-color handling. -->
+      <div class="color-filters">
+        <span class="meta">select by colour:</span>
+        {{range .Colors}}
+          <button type="button" class="color-select" data-select-color="{{.Color}}"
+                  title="Select every annotation highlighted {{.Color}}">
+            <span class="swatch" style="--swatch: {{.Color}}"></span> {{.Count}}
+          </button>
+        {{end}}
+      </div>
+    {{end}}
+
     <!-- Mass chapter edit: a document with no outline of its own — most
          PDFs, and any KOReader export before an outline was added — needs
          some other way to get one, commonly a highlight colour standing in
@@ -82,16 +100,33 @@
          unchanged. The one difference from those pages' bulk bars is the
          text input travelling alongside the checkboxes: there is no fixed
          set of chapter names to offer as buttons. -->
-    <form id="chapter-form" method="post" action="/documents/{{.Document.ID}}/chapters"></form>
+    <form id="chapter-form" method="post" action="/documents/{{.Document.ID}}/chapters">
+      <input type="hidden" name="redirect" value="/documents/{{.Document.ID}}">
+    </form>
     <div class="bulk-bar">
       <label><input type="checkbox" id="select-all"> select all</label>
       <span id="bulk-count" class="bulk-count"></span>
       <input type="text" name="chapter" form="chapter-form" placeholder="chapter name" class="tiny">
       <button type="submit" form="chapter-form" class="tiny">Set chapter</button>
+      <!-- Same checkboxes, three different destinations below: a submit
+           button's own formaction (and, for the two reusing /extracts/bulk,
+           its own name="action" value) overrides the form it belongs to, so
+           none of this needs a second set of checkboxes or any JavaScript. -->
+      <button type="submit" form="chapter-form"
+              formaction="/documents/{{.Document.ID}}/chapter-markers" class="tiny"
+              title="Turn the checked highlights into chapter boundaries: each one's own text becomes the chapter applied to everything after it, up to the next one checked — and the marker itself is suspended rather than left as a passage to review again">
+        Make chapter markers
+      </button>
+      <button type="submit" form="chapter-form" formaction="/extracts/bulk"
+              name="action" value="suspend" class="tiny">
+        Suspend selected
+      </button>
+      <button type="submit" form="chapter-form" formaction="/extracts/bulk"
+              name="action" value="delete" class="tiny danger"
+              data-confirm="Delete the selected annotations? Imported ones are also removed from wallabag. This cannot be undone.">
+        Delete selected
+      </button>
       {{if .ProofreadEnabled}}
-        <!-- Same checkboxes, a different destination: a submit button's own
-             formaction overrides the form it belongs to, so this needs no
-             second set of checkboxes and no JavaScript. -->
         <button type="submit" form="chapter-form"
                 formaction="/documents/{{.Document.ID}}/proofread" class="tiny"
                 title="Send the checked passages to a cheap model and review what it proposes fixing — nothing is changed until you approve it">
@@ -110,7 +145,7 @@
         {{range $group.Annotations}}
           <li class="item item-selectable is-extract" id="element-{{.ID}}">
             <input type="checkbox" name="ids" value="{{.ID}}" form="chapter-form"
-                   class="item-select" aria-label="Select this annotation">
+                   class="item-select" data-color="{{.Color}}" aria-label="Select this annotation">
             <div class="item-body">
             <a class="item-title" href="/read/{{.ID}}">
               {{if .DisplayQuote}}{{.DisplayQuote}}{{else}}{{.Note}}{{end}}

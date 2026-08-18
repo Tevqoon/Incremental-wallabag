@@ -6,6 +6,7 @@ import (
 	"html/template"
 	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -25,6 +26,40 @@ type chapterGroup struct {
 	Annotations []store.ExtractRow
 }
 
+// colorGroup is one highlight colour found on a document, with how many
+// annotations carry it — the counts shown on the contents page's own
+// colour-select buttons (see handleDocument and document.html).
+type colorGroup struct {
+	Color string
+	Count int
+}
+
+// colorGroups collects every distinct colour among annotations, most
+// frequent first — the reading order a reader picking out "which colour did
+// I mark headings in" wants, since a heading colour is reliably the rarer
+// one against a book's own body-highlight colour.
+func colorGroups(annotations []store.ExtractRow) []colorGroup {
+	counts := make(map[string]int)
+	var order []string
+	for _, annotation := range annotations {
+		color := strings.TrimSpace(annotation.Color)
+		if color == "" {
+			continue
+		}
+		if counts[color] == 0 {
+			order = append(order, color)
+		}
+		counts[color]++
+	}
+	sort.Slice(order, func(i, j int) bool { return counts[order[i]] > counts[order[j]] })
+
+	groups := make([]colorGroup, len(order))
+	for i, color := range order {
+		groups[i] = colorGroup{Color: color, Count: counts[color]}
+	}
+	return groups
+}
+
 // documentData is the contents page for one work.
 type documentData struct {
 	Title    string
@@ -33,6 +68,13 @@ type documentData struct {
 
 	Groups []chapterGroup
 	Counts store.TriageCounts
+
+	// Colors lists every highlight colour found among the document's own
+	// annotations, for the contents page's colour-select buttons — a quick
+	// way to pick out, say, every heading highlighted in one colour on a
+	// book imported before that colour convention was decided, without
+	// checking each one by hand. See colorGroups.
+	Colors []colorGroup
 
 	// Readable reports whether there is an article behind this document to
 	// open. Uploaded annotation files have none.
@@ -88,6 +130,7 @@ func (s *Server) handleDocument(w http.ResponseWriter, r *http.Request) {
 		Document:         document,
 		RootID:           root.ID,
 		Groups:           groupByChapter(annotations),
+		Colors:           colorGroups(annotations),
 		Counts:           counts,
 		Readable:         s.readable(document),
 		ProofreadEnabled: s.proofreader != nil,
@@ -246,6 +289,84 @@ func (s *Server) handleSetChapters(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if err := s.store.SetAnnotationChapter(id, chapter, time.Now()); err != nil {
+			s.fail(w, err)
+			return
+		}
+	}
+
+	s.redirect(w, r, "/documents/"+strconv.FormatInt(documentID, 10))
+}
+
+// handleApplyChapterMarkers is the interactive counterpart to
+// ImportOptions.ChapterMarkerColor (see store.deriveChapterMarkers): for a
+// book already imported, or whose colour convention was only decided after
+// the fact, checking a set of heading highlights — the contents page's own
+// colour-select buttons make that a one click per colour — and pressing this
+// turns them into chapter boundaries retroactively.
+//
+// Each checked annotation's own passage becomes the Chapter of every
+// annotation after it, in the document's own reading order, up to the next
+// one checked; unlike deriveChapterMarkers's import-time default this
+// overwrites a chapter already set, because this is a direct, deliberate
+// action on one specific book rather than something applied blindly to
+// every upload. The marker annotations are suspended rather than deleted —
+// deriveChapterMarkers can afford to drop a marker outright because at
+// import time it never became a real element with review history; one
+// picked out here already might have, so this stays reversible with the
+// same "queue it" button any other suspended annotation already has.
+func (s *Server) handleApplyChapterMarkers(w http.ResponseWriter, r *http.Request) {
+	documentID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "bad document id", http.StatusBadRequest)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+
+	markers := make(map[int64]bool, len(r.Form["ids"]))
+	for _, raw := range r.Form["ids"] {
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			continue
+		}
+		markers[id] = true
+	}
+	if len(markers) == 0 {
+		s.redirect(w, r, "/documents/"+strconv.FormatInt(documentID, 10))
+		return
+	}
+
+	annotations, err := s.store.DocumentAnnotations(documentID)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+
+	now := time.Now()
+	chapter := ""
+	for _, annotation := range annotations {
+		if !markers[annotation.ID] {
+			if chapter != "" && annotation.Chapter != chapter {
+				if err := s.store.SetAnnotationChapter(annotation.ID, chapter, now); err != nil {
+					s.fail(w, err)
+					return
+				}
+			}
+			continue
+		}
+
+		if text := strings.TrimSpace(annotation.Quote); text != "" {
+			chapter = text
+		}
+		if annotation.Chapter != chapter {
+			if err := s.store.SetAnnotationChapter(annotation.ID, chapter, now); err != nil {
+				s.fail(w, err)
+				return
+			}
+		}
+		if err := s.store.Suspend(annotation.ID, now); err != nil {
 			s.fail(w, err)
 			return
 		}

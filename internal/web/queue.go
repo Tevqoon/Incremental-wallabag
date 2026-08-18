@@ -1134,17 +1134,25 @@ type extractBulkAction struct {
 	apply   func(*Server, store.Element) error
 }
 
-// extractBulkActions lists every bulk action the extracts page offers.
-// Deliberately just the one to start: delete is the gap a reader actually
-// hits browsing a large harvest (see deleteExtract), where rescheduling or
-// grading a handful at once is served well enough by the per-row controls
-// already there.
+// extractBulkActions lists every bulk action the extracts page offers, also
+// reused by document.html's own bulk bar (see handleApplyChapterMarkers's
+// neighbours "Suspend selected"/"Delete selected" there) rather than a
+// second implementation of either.
 var extractBulkActions = []extractBulkAction{
 	{
 		Value: "delete", Label: "Delete", Danger: true,
 		Confirm: "Delete the selected extracts? Imported ones are also removed from wallabag. This cannot be undone.",
 		apply: func(s *Server, element store.Element) error {
 			return s.deleteExtract(element)
+		},
+	},
+	{
+		// Reversible with the same "queue it" button any other suspended
+		// annotation already has, which is what makes this safe to offer
+		// without a confirmation prompt of its own.
+		Value: "suspend", Label: "Suspend",
+		apply: func(s *Server, element store.Element) error {
+			return s.store.Suspend(element.ID, time.Now())
 		},
 	},
 }

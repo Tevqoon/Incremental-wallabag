@@ -184,6 +184,31 @@ h1 { font-size: 1.5rem; line-height: 1.25; margin: 0 0 0.35rem; }
 }
 .bulk-count { color: var(--muted); }
 
+/* document.html's colour-select buttons, sitting just above the bulk bar
+   they feed — same swatch dot the per-row meta already uses. */
+.color-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 0.75rem;
+  font: 0.78rem/1 system-ui, sans-serif;
+  color: var(--muted);
+}
+.color-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.2rem 0.5rem;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.color-select:hover { border-color: var(--accent); color: var(--accent); }
+
 .item-meta {
   font-family: system-ui, sans-serif;
   font-size: 0.72rem;

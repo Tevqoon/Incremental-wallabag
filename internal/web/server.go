@@ -203,6 +203,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /documents/{id}", s.handleDocument)
 	mux.HandleFunc("POST /documents/{id}/titles", s.handleDocumentTitles)
 	mux.HandleFunc("POST /documents/{id}/chapters", s.handleSetChapters)
+	mux.HandleFunc("POST /documents/{id}/chapter-markers", s.handleApplyChapterMarkers)
 	mux.HandleFunc("POST /documents/{id}/proofread", s.handleProofreadExtracts)
 	mux.HandleFunc("POST /documents/{id}/proofread/apply", s.handleApplyProofread)
 	mux.HandleFunc("GET /documents/{id}/triage", s.handleTriage)

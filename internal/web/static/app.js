@@ -410,6 +410,21 @@
       if (!event.target.checked && selectAll) selectAll.checked = false;
       updateCount();
     });
+
+    // Document.html's own colour-select buttons (see colorGroups/document.go):
+    // a quick way to pick out every annotation in one highlight colour
+    // without checking each one by hand — replaces the current selection
+    // rather than adding to it, so pressing a second colour after the first
+    // reliably means "just this one now", not an accumulating multi-colour
+    // pick a reader would have to clear by hand first.
+    document.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-select-color]");
+      if (!button) return;
+      const color = button.dataset.selectColor;
+      boxes().forEach((box) => { box.checked = box.dataset.color === color; });
+      if (selectAll) selectAll.checked = false;
+      updateCount();
+    });
   }
 
   document.addEventListener("DOMContentLoaded", initBulkSelection);

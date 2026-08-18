@@ -634,6 +634,88 @@ func TestSetChaptersBulkAssignsAndScopesToTheDocument(t *testing.T) {
 	}
 }
 
+// TestApplyChapterMarkersTurnsCheckedAnnotationsIntoHeadings is the
+// interactive counterpart to ChapterMarkerColor at import time (see
+// store.deriveChapterMarkers): checking a set of heading highlights on a
+// book already imported and pressing "Make chapter markers" retroactively
+// gives it the same chapter structure, without a re-upload.
+func TestApplyChapterMarkersTurnsCheckedAnnotationsIntoHeadings(t *testing.T) {
+	server, db, _ := newTestServer(t, false)
+
+	response := postFile(t, server, "/import", "scanned.json", []byte(`{
+	  "title": "A Scanned Book",
+	  "entries": [
+	    {"quote": "Chapter One"},
+	    {"quote": "the first passage"},
+	    {"quote": "the second passage"},
+	    {"quote": "Chapter Two"},
+	    {"quote": "the third passage"}
+	  ]
+	}`), url.Values{"mode": {"queue"}})
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("upload: status %d, body %s", response.Code, response.Body.String())
+	}
+	documentID, err := strconv.ParseInt(strings.TrimPrefix(response.Header().Get("Location"), "/documents/"), 10, 64)
+	if err != nil {
+		t.Fatalf("upload redirected to %q, want a document page", response.Header().Get("Location"))
+	}
+
+	annotations, err := db.DocumentAnnotations(documentID)
+	if err != nil {
+		t.Fatalf("DocumentAnnotations: %v", err)
+	}
+	byQuote := make(map[string]int64, len(annotations))
+	for _, annotation := range annotations {
+		byQuote[annotation.Quote] = annotation.ID
+	}
+
+	apply := post(t, server, "/documents/"+strconv.FormatInt(documentID, 10)+"/chapter-markers", url.Values{
+		"ids": {strconv.FormatInt(byQuote["Chapter One"], 10), strconv.FormatInt(byQuote["Chapter Two"], 10)},
+	})
+	if apply.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303: %s", apply.Code, apply.Body.String())
+	}
+
+	want := map[string]string{
+		"Chapter One":        "Chapter One",
+		"the first passage":  "Chapter One",
+		"the second passage": "Chapter One",
+		"Chapter Two":        "Chapter Two",
+		"the third passage":  "Chapter Two",
+	}
+	for quote, wantChapter := range want {
+		element, err := db.ElementByID(byQuote[quote])
+		if err != nil {
+			t.Fatalf("ElementByID(%q): %v", quote, err)
+		}
+		if element.Chapter != wantChapter {
+			t.Errorf("chapter of %q = %q, want %q", quote, element.Chapter, wantChapter)
+		}
+	}
+
+	// The markers themselves are suspended, not deleted — reversible, unlike
+	// the import-time version which can afford to drop a marker outright
+	// because it never became a real element to begin with.
+	for _, quote := range []string{"Chapter One", "Chapter Two"} {
+		element, err := db.ElementByID(byQuote[quote])
+		if err != nil {
+			t.Fatalf("ElementByID(%q): %v", quote, err)
+		}
+		if element.Schedule.State != ir.StateSuspended {
+			t.Errorf("marker %q state = %q, want suspended", quote, element.Schedule.State)
+		}
+	}
+	for _, quote := range []string{"the first passage", "the second passage", "the third passage"} {
+		element, err := db.ElementByID(byQuote[quote])
+		if err != nil {
+			t.Fatalf("ElementByID(%q): %v", quote, err)
+		}
+		if element.Schedule.State == ir.StateSuspended {
+			t.Errorf("non-marker %q was suspended along with the markers", quote)
+		}
+	}
+}
+
 func TestImportRejectsAFileItCannotRead(t *testing.T) {
 	server, _, _ := newTestServer(t, false)
 

@@ -28,9 +28,11 @@ article source of record:
 - Second ingestion route: **KOReader and PDF annotations** via file upload
   (both the plugin and KOReader's built-in exporter), with a per-work triage
   pass. A scanned book with no outline can get chapter headings from a
-  highlight colour convention instead (one colour, chosen at upload, marks a
-  heading), and any passage can be sent through an optional cheap-LLM
-  proofreader that proposes OCR/typo fixes for review before they are saved.
+  highlight colour convention, either at upload (one colour marks a heading)
+  or afterward, retroactively, from the contents page's own per-colour
+  select buttons — the same convention applied to a book already imported.
+  Any passage can be sent through an optional cheap-LLM proofreader that
+  proposes OCR/typo fixes for review before they are saved.
 - Extra views: library with bulk actions, extracts browser, a dashboard led by
   articles-read (queue preview, streak, a 12-week bar chart) with extract
   activity folded into its own disclosure, a calendar of articles read (month

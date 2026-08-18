@@ -224,12 +224,21 @@ A scanned book has no outline for a chapter name to come from. If you
 highlighted every heading in one colour while marking it up, naming that
 **chapter marker colour** on the upload form turns each of those highlights
 into the chapter applied to everything after it, instead of a passage of its
-own — correct any the OCR mangled from the contents page afterward. The same
-page also offers **Fix typos** on any selection of passages, when
-`llm.api_key` is configured (see `config.yaml`): a cheap model proposes
+own. The same works after the fact, too: a book's own contents page shows
+every highlight colour it actually contains as a button, with a count —
+press one to select every annotation in that colour, then **Make chapter
+markers** to apply the same rule retroactively, for a colour convention only
+decided once the book was already imported. The markers themselves are
+suspended rather than deleted, so a bad pass is one "queue it" away from
+undone; the same selection also feeds **Suspend selected** and **Delete
+selected**, next to the existing per-annotation edit for correcting whatever
+the OCR mangled in a heading.
+
+The contents page also offers **Fix typos** on any selection of passages,
+when `llm.api_key` is configured (see `config.yaml`): a cheap model proposes
 mechanical OCR corrections — a dropcap's own letter turning up loose in the
 sentence, a swapped look-alike character — for review before anything is
-saved. Neither of these is specific to a scan; both are ordinary options for
+saved. None of this is specific to a scan; it is all ordinary tooling for
 any upload.
 
 Tags and the star toggle sit above the article and write straight through to
