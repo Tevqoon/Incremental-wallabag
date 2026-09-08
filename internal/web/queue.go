@@ -1,6 +1,7 @@
 package web
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -121,6 +122,11 @@ type queueData struct {
 	// never shown the other's list mixed in.
 	Combined     bool
 	ExtractItems []store.QueueItem
+
+	// Notice is a one-line message carried through a redirect's "notice"
+	// query parameter, the same mechanism the library page uses — see
+	// withNotice in prefetch.go.
+	Notice string
 }
 
 // IsExtracts reports which tab is active, for a template that cannot compare
@@ -196,6 +202,7 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 		ExtractsDue: extractsDue,
 		Total:       total,
 		Today:       today,
+		Notice:      r.URL.Query().Get("notice"),
 	})
 }
 
@@ -1283,4 +1290,61 @@ func (s *Server) handleExtractsBulk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.redirect(w, r, redirectTarget(r, "/extracts"))
+}
+
+// spreadWindowDays are the windows the extract queue's own reschedule control
+// offers. A month is the default because that is long enough for a backlog of
+// several hundred to open at a single-figure daily load, and short enough that
+// the tail is still material the reader remembers deciding to keep.
+var spreadWindowDays = []int{14, 30, 60}
+
+const defaultSpreadWindowDays = 30
+
+// handleSpreadExtracts rescheduies the whole due extract queue across a
+// window, lightest day first — the way back from having left the queue alone
+// for a while.
+//
+// Deliberately not one of the extract bulk actions above, which all operate on
+// a checked selection: this one is about the queue as a whole, and asking the
+// reader to tick four hundred boxes to say "all of it" would be a worse
+// interface for the only case it exists to serve. It reads no ids at all.
+//
+// Only due dates move; see store.SpreadDueExtracts for why nothing else does.
+func (s *Server) handleSpreadExtracts(w http.ResponseWriter, r *http.Request) {
+	days := defaultSpreadWindowDays
+	if requested, err := strconv.Atoi(r.FormValue("days")); err == nil {
+		// Only the offered windows, not any integer a form could carry: the
+		// value decides how far into the future several hundred rows are
+		// written, and "spread my queue over 30000 days" is not a request
+		// worth honouring because someone edited a select.
+		for _, allowed := range spreadWindowDays {
+			if requested == allowed {
+				days = requested
+				break
+			}
+		}
+	}
+
+	result, err := s.store.SpreadDueExtracts(s.today(), days, time.Now())
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+
+	var notice string
+	switch {
+	case result.Elements == 0:
+		notice = "Nothing to reschedule — no extracts are due."
+	default:
+		s.logger.Info("spread the due extract queue",
+			"extracts", result.Elements, "days", result.Days,
+			"first_day", result.PerDay[0], "last_day", result.PerDay[len(result.PerDay)-1])
+		notice = fmt.Sprintf(
+			"Spread %d extracts over the next %d days — %d today, rising to %d by %s.",
+			result.Elements, result.Days, result.PerDay[0],
+			result.PerDay[len(result.PerDay)-1],
+			s.today().AddDate(0, 0, result.Days-1).Format("2 Jan"))
+	}
+
+	s.redirect(w, r, withNotice("/queue?kind=extracts", notice))
 }

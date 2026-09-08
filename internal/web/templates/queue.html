@@ -1,5 +1,9 @@
 {{define "content"}}
 <section class="queue">
+  {{if .Notice}}
+    <div class="notice">{{.Notice}}</div>
+  {{end}}
+
   {{if .Combined}}
     <div class="queue-head">
       <h1>Queue</h1>
@@ -87,6 +91,25 @@
         most important one. Raise <code>queue_page_limit</code> (or set it to 0)
         to list them all.
       </p>
+    {{end}}
+
+    <!-- Only on the extracts tab, and only when there is a backlog worth
+         spreading. Coming back to a few hundred extracts all due at once is
+         the situation this exists for; offering it over a queue of nine would
+         be noise. -->
+    {{if and .IsExtracts (gt .Due 20)}}
+      <form class="spread" method="post" action="/queue/spread">
+        <label for="spread-days">Behind? Spread the backlog over</label>
+        <select id="spread-days" name="days">
+          <option value="14">2 weeks</option>
+          <option value="30" selected>a month</option>
+          <option value="60">2 months</option>
+        </select>
+        <button type="submit"
+                data-confirm="Reschedule all {{.Due}} due extracts across the window, lightest days first? Only the due dates change — intervals, priorities and repetition counts are kept.">
+          Reschedule
+        </button>
+      </form>
     {{end}}
 
     {{if .Items}}

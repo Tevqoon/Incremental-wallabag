@@ -1274,3 +1274,19 @@ fieldset.field { border: 0; padding: 0; margin-inline: 0; }
   letter-spacing: 0.05em;
   margin-bottom: 0.2rem;
 }
+
+/* The extract queue's "spread the backlog" control. Sits between the counts
+   and the list, reading as one sentence with its own controls inline, so it
+   is offered rather than advertised — it matters on the day you come back to
+   four hundred due extracts and is noise on every other day. */
+.spread {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin: 0 0 1.25rem;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.spread label { color: inherit; }

@@ -472,3 +472,90 @@ func Previews(schedule Schedule, today time.Time, elementID int64) map[Grade]Pre
 	}
 	return previews
 }
+
+// spreadRamp is how much heavier the last day of a spread window is than its
+// first. A backlog is being cleared after a break, so the first days back
+// should be the lightest and the load should climb to a normal one by the end
+// of the window — that is the whole point of spreading rather than simply
+// dividing by the number of days.
+//
+// Four rather than something steeper because the ramp buys nothing once it is
+// severe enough that the tail days are worse than the flat average would have
+// been. Over a month at this ratio a 450-item backlog opens at about eight a
+// day and ends near thirty, which is a gradient a reader notices as "easing
+// back in" rather than as "nothing to do, then a wall".
+const spreadRamp = 4.0
+
+// SpreadDay returns how many days ahead of today the index-th of total
+// elements should fall when a backlog is spread across windowDays, counting
+// from 0 for today.
+//
+// Callers pass index in the order the queue itself would have shown the
+// elements, which is priority order, so the most important material comes
+// back first and the long tail lands last. That ordering is the reason this
+// takes an index rather than fuzzing per element the way FuzzedAnnotationDelay
+// does: a bulk import has no meaningful order to preserve and wants
+// serendipity, whereas a deliberate reset of a queue the reader has already
+// prioritised wants exactly the opposite.
+//
+// Daily volume grows geometrically across the window (see spreadRamp). The
+// arithmetic is the closed form of that: with a per-day growth factor g, the
+// share of the backlog falling on or before day d is (g^(d+1)-1)/(g^W-1), so
+// the day for an element is the first d whose cumulative share reaches it.
+func SpreadDay(index, total, windowDays int) int {
+	if windowDays <= 1 || total <= 1 {
+		return 0
+	}
+	if index < 0 {
+		index = 0
+	}
+	if index >= total {
+		index = total - 1
+	}
+
+	growth := math.Pow(spreadRamp, 1/float64(windowDays-1))
+	// A ramp of exactly 1 would make every weight equal and the denominator
+	// below zero. Nothing sets spreadRamp to 1 today, but a flat spread is a
+	// reasonable thing for someone to want later, and dividing by zero is a
+	// poor way to find out.
+	if growth == 1 {
+		return index * windowDays / total
+	}
+
+	denominator := math.Pow(growth, float64(windowDays)) - 1
+	target := float64(index+1) / float64(total)
+	for day := 0; day < windowDays; day++ {
+		cumulative := (math.Pow(growth, float64(day+1)) - 1) / denominator
+		if target <= cumulative {
+			return day
+		}
+	}
+	return windowDays - 1
+}
+
+// SpreadWindow narrows a requested spread window to one the backlog can
+// actually fill.
+//
+// The ramp's early days are its lightest, so a window much wider than the
+// backlog does not merely spread thin — it leaves the first days holding
+// nothing at all, and a reset whose visible result is an empty queue today
+// reads as a reset that did nothing. Shrinking until the first day is
+// occupied is the smallest rule that rules that out, and it leaves a real
+// backlog untouched: several hundred extracts fill a month's opening day many
+// times over.
+func SpreadWindow(total, windowDays int) int {
+	if total < 1 {
+		return 0
+	}
+	days := windowDays
+	if days > total {
+		days = total
+	}
+	for days > 1 && SpreadDay(0, total, days) != 0 {
+		days--
+	}
+	if days < 1 {
+		days = 1
+	}
+	return days
+}

@@ -838,3 +838,113 @@ func TestFuzzedAnnotationDelayIsDeterministic(t *testing.T) {
 		}
 	}
 }
+
+// TestSpreadDayRampsUpAcrossTheWindow pins the shape a returning reader is
+// promised: every element placed, the first day the lightest, the last the
+// heaviest, and nothing landing outside the window.
+func TestSpreadDayRampsUpAcrossTheWindow(t *testing.T) {
+	const total, window = 450, 30
+
+	counts := make([]int, window)
+	for index := 0; index < total; index++ {
+		day := SpreadDay(index, total, window)
+		if day < 0 || day >= window {
+			t.Fatalf("index %d landed on day %d, outside a %d-day window", index, day, window)
+		}
+		counts[day]++
+	}
+
+	placed := 0
+	for _, count := range counts {
+		placed += count
+	}
+	if placed != total {
+		t.Errorf("placed %d of %d elements", placed, total)
+	}
+	if counts[0] == 0 {
+		t.Error("the first day of the window got nothing, so the queue looks empty on the day of the reset")
+	}
+	if counts[len(counts)-1] <= counts[0] {
+		t.Errorf("load does not ramp up: first day %d, last day %d", counts[0], counts[len(counts)-1])
+	}
+
+	// Monotonic in the large: comparing adjacent days would fail on integer
+	// rounding alone, so this compares the two halves of the window instead.
+	var firstHalf, secondHalf int
+	for day, count := range counts {
+		if day < window/2 {
+			firstHalf += count
+		} else {
+			secondHalf += count
+		}
+	}
+	if secondHalf <= firstHalf {
+		t.Errorf("second half of the window (%d) is no heavier than the first (%d)", secondHalf, firstHalf)
+	}
+}
+
+// TestSpreadDayOrdersByIndex is what makes priority order survive a reset:
+// an element earlier in the queue can never be scheduled after a later one.
+func TestSpreadDayOrdersByIndex(t *testing.T) {
+	const total, window = 200, 21
+
+	previous := 0
+	for index := 0; index < total; index++ {
+		day := SpreadDay(index, total, window)
+		if day < previous {
+			t.Fatalf("index %d landed on day %d, before index %d's day %d",
+				index, day, index-1, previous)
+		}
+		previous = day
+	}
+}
+
+func TestSpreadDayHandlesDegenerateWindows(t *testing.T) {
+	for _, c := range []struct{ index, total, window, want int }{
+		{0, 1, 30, 0},    // a single element has nowhere to spread to
+		{5, 10, 1, 0},    // a one-day window is "everything today"
+		{5, 10, 0, 0},    // and so is a nonsensical one
+		{99, 10, 30, 29}, // an index past the end clamps to the last element
+	} {
+		if got := SpreadDay(c.index, c.total, c.window); got != c.want {
+			t.Errorf("SpreadDay(%d, %d, %d) = %d, want %d",
+				c.index, c.total, c.window, got, c.want)
+		}
+	}
+
+	// A negative index clamps to the first element rather than panicking or
+	// reaching past the front of the ramp. Asserted against index 0's own
+	// answer rather than a literal, because that answer is not day 0 whenever
+	// there are fewer elements than days: the early days of a ramp are the
+	// light ones, so ten elements over thirty days start partway in. The
+	// caller in store.SpreadDueExtracts narrows the window to the number of
+	// elements for exactly that reason.
+	if got, want := SpreadDay(-1, 10, 30), SpreadDay(0, 10, 30); got != want {
+		t.Errorf("SpreadDay(-1, ...) = %d, want the same as index 0, %d", got, want)
+	}
+}
+
+func TestSpreadWindowNeverLeavesTheFirstDayEmpty(t *testing.T) {
+	for _, total := range []int{1, 2, 3, 7, 25, 120, 450} {
+		window := SpreadWindow(total, 30)
+		if window < 1 {
+			t.Fatalf("total %d: window %d", total, window)
+		}
+		if day := SpreadDay(0, total, window); day != 0 {
+			t.Errorf("total %d: window %d leaves day 0 empty (first element lands on day %d)",
+				total, window, day)
+		}
+		if window > total {
+			t.Errorf("total %d: window %d is wider than the backlog", total, window)
+		}
+	}
+
+	// A real backlog is left exactly as asked for — the narrowing is for
+	// small ones and must not quietly shorten the case this exists to serve.
+	if got := SpreadWindow(450, 30); got != 30 {
+		t.Errorf("SpreadWindow(450, 30) = %d, want 30", got)
+	}
+	if got := SpreadWindow(0, 30); got != 0 {
+		t.Errorf("SpreadWindow(0, 30) = %d, want 0", got)
+	}
+}

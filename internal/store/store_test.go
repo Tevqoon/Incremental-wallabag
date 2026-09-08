@@ -2979,3 +2979,146 @@ func TestRequeueDocumentRootMissingReturnsFalse(t *testing.T) {
 		t.Error("changed = true for a document with no root element, want false")
 	}
 }
+
+// TestSpreadDueExtractsMovesOnlyTheDueDate is the guarantee the reset button
+// makes: coming back to a queue left alone for months reschedules when each
+// passage is next seen and changes nothing about what it has learned.
+func TestSpreadDueExtractsMovesOnlyTheDueDate(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+	today := ir.Day(now)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "1", Title: "An article", UpdatedAt: now},
+	}, 0, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	const extracts = 40
+	for i := 0; i < extracts; i++ {
+		id, err := db.CreateExtract(NewExtract{
+			ParentID: 1, DocumentID: 1,
+			Quote:    "passage " + strconv.Itoa(i),
+			Priority: float64(i) / float64(extracts),
+		}, now)
+		if err != nil {
+			t.Fatalf("CreateExtract: %v", err)
+		}
+		// Overdue, and carrying learning history worth not losing.
+		if err := db.SaveSchedule(id, ir.Schedule{
+			State: ir.StateReading, DueOn: today.AddDate(0, 0, -30),
+			IntervalDays: 90, AFactor: 2.6, Reps: 4,
+			Priority: float64(i) / float64(extracts),
+		}, now); err != nil {
+			t.Fatalf("SaveSchedule: %v", err)
+		}
+	}
+
+	before, err := db.Queue(today, QueueExtracts, 0)
+	if err != nil {
+		t.Fatalf("Queue: %v", err)
+	}
+	if len(before) != extracts {
+		t.Fatalf("test premise is wrong: %d due, want %d", len(before), extracts)
+	}
+
+	result, err := db.SpreadDueExtracts(today, 10, now)
+	if err != nil {
+		t.Fatalf("SpreadDueExtracts: %v", err)
+	}
+	if result.Elements != extracts || result.Days != 10 {
+		t.Errorf("result = %+v, want %d elements over 10 days", result, extracts)
+	}
+	placed := 0
+	for _, count := range result.PerDay {
+		placed += count
+	}
+	if placed != extracts {
+		t.Errorf("PerDay accounts for %d of %d extracts", placed, extracts)
+	}
+
+	// Nothing is due today any more beyond the first day's share, and every
+	// extract's learning state survived untouched.
+	all, err := db.ChildrenOf(1)
+	if err != nil {
+		t.Fatalf("ChildrenOf: %v", err)
+	}
+	last := today.AddDate(0, 0, 9)
+	for _, extract := range all {
+		if extract.Schedule.IntervalDays != 90 {
+			t.Errorf("element %d: interval became %v, want 90 — a reset must not reset the spacing",
+				extract.ID, extract.Schedule.IntervalDays)
+		}
+		if extract.Schedule.AFactor != 2.6 {
+			t.Errorf("element %d: afactor became %v, want 2.6", extract.ID, extract.Schedule.AFactor)
+		}
+		if extract.Schedule.Reps != 4 {
+			t.Errorf("element %d: reps became %d, want 4", extract.ID, extract.Schedule.Reps)
+		}
+		if extract.Schedule.State != ir.StateReading {
+			t.Errorf("element %d: state became %q, want reading", extract.ID, extract.Schedule.State)
+		}
+		if extract.Schedule.DueOn.Before(today) || extract.Schedule.DueOn.After(last) {
+			t.Errorf("element %d: due %s, outside the window %s..%s",
+				extract.ID, extract.Schedule.DueOn.Format(dateFormat),
+				today.Format(dateFormat), last.Format(dateFormat))
+		}
+	}
+
+	due, err := db.CountDue(today, QueueExtracts)
+	if err != nil {
+		t.Fatalf("CountDue: %v", err)
+	}
+	if due >= extracts {
+		t.Errorf("%d extracts still due today, want far fewer than %d", due, extracts)
+	}
+}
+
+// TestSpreadDueExtractsNarrowsTheWindowToWhatIsThere stops a handful of
+// extracts being scattered across a month with empty days between them: the
+// ramp's early days are the light ones, so a window wider than the backlog
+// would leave the first days of it holding nothing at all.
+func TestSpreadDueExtractsNarrowsTheWindowToWhatIsThere(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+	today := ir.Day(now)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "1", Title: "An article", UpdatedAt: now},
+	}, 0, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		id, err := db.CreateExtract(NewExtract{
+			ParentID: 1, DocumentID: 1, Quote: "passage " + strconv.Itoa(i),
+		}, now)
+		if err != nil {
+			t.Fatalf("CreateExtract: %v", err)
+		}
+		if err := db.SaveSchedule(id, ir.Schedule{
+			State: ir.StateReading, DueOn: today, IntervalDays: 1, AFactor: 2, Reps: 1,
+		}, now); err != nil {
+			t.Fatalf("SaveSchedule: %v", err)
+		}
+	}
+
+	result, err := db.SpreadDueExtracts(today, 30, now)
+	if err != nil {
+		t.Fatalf("SpreadDueExtracts: %v", err)
+	}
+	if result.Days > 3 {
+		t.Errorf("Days = %d, want at most 3 — the window should shrink to the backlog", result.Days)
+	}
+	for day, count := range result.PerDay {
+		if count == 0 {
+			t.Errorf("day %d of the window is empty", day)
+		}
+	}
+}
+
+func TestSpreadDueExtractsRejectsAnEmptyWindow(t *testing.T) {
+	db := testStore(t)
+	if _, err := db.SpreadDueExtracts(ir.Day(time.Now()), 0, time.Now()); err == nil {
+		t.Error("a zero-day window was accepted")
+	}
+}

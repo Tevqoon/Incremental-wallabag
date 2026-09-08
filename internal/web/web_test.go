@@ -3905,3 +3905,96 @@ func TestLibraryBulkFetchBodiesGuardsAgainstOverlap(t *testing.T) {
 		t.Errorf("provider.Content called %d times, want exactly 1 — the second request must not have started its own run", provider.contentCalls)
 	}
 }
+
+// TestSpreadExtractsReschedulesTheWholeDueQueue covers the reset control end
+// to end: it takes no ids, acts on everything due, and reports what it did.
+func TestSpreadExtractsReschedulesTheWholeDueQueue(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+	now := time.Now()
+	today := ir.Day(now)
+
+	const extracts = 60
+	for i := 0; i < extracts; i++ {
+		id, err := db.CreateExtract(store.NewExtract{
+			ParentID: 1, DocumentID: 1, Quote: "passage " + itoa(int64(i)),
+		}, now)
+		if err != nil {
+			t.Fatalf("CreateExtract: %v", err)
+		}
+		if err := db.SaveSchedule(id, ir.Schedule{
+			State: ir.StateReading, DueOn: today.AddDate(0, 0, -60),
+			IntervalDays: 45, AFactor: 2.5, Reps: 3,
+		}, now); err != nil {
+			t.Fatalf("SaveSchedule: %v", err)
+		}
+	}
+
+	before, err := db.CountDue(today, store.QueueExtracts)
+	if err != nil {
+		t.Fatalf("CountDue: %v", err)
+	}
+	if before < extracts {
+		t.Fatalf("test premise is wrong: %d due, want at least %d", before, extracts)
+	}
+
+	response := post(t, server, "/queue/spread", url.Values{"days": {"14"}})
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303: %s", response.Code, response.Body.String())
+	}
+	if location := response.Header().Get("Location"); !strings.Contains(location, "notice=") {
+		t.Errorf("no notice carried back to the reader: %q", location)
+	}
+
+	after, err := db.CountDue(today, store.QueueExtracts)
+	if err != nil {
+		t.Fatalf("CountDue: %v", err)
+	}
+	if after >= before {
+		t.Errorf("still %d extracts due today, was %d — nothing was spread", after, before)
+	}
+	if after == 0 {
+		t.Error("nothing is due today at all; the lightest day of the ramp should still hold something")
+	}
+
+	// The learning history is the thing a reset must not touch.
+	children, _ := db.ChildrenOf(1)
+	for _, extract := range children {
+		if extract.Schedule.IntervalDays != 45 || extract.Schedule.Reps != 3 {
+			t.Fatalf("element %d lost its spacing: interval %v, reps %d",
+				extract.ID, extract.Schedule.IntervalDays, extract.Schedule.Reps)
+		}
+	}
+}
+
+// TestSpreadExtractsRejectsAWindowItDoesNotOffer stops a hand-edited form
+// writing due dates years out.
+func TestSpreadExtractsRejectsAWindowItDoesNotOffer(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+	now := time.Now()
+	today := ir.Day(now)
+
+	id, err := db.CreateExtract(store.NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "a passage",
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+	if err := db.SaveSchedule(id, ir.Schedule{
+		State: ir.StateReading, DueOn: today, IntervalDays: 1, AFactor: 2, Reps: 1,
+	}, now); err != nil {
+		t.Fatalf("SaveSchedule: %v", err)
+	}
+
+	if code := post(t, server, "/queue/spread", url.Values{"days": {"30000"}}).Code; code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", code)
+	}
+
+	children, _ := db.ChildrenOf(1)
+	limit := today.AddDate(0, 0, 60)
+	for _, extract := range children {
+		if extract.Schedule.DueOn.After(limit) {
+			t.Errorf("element %d was scheduled %s, past every window the page offers",
+				extract.ID, extract.Schedule.DueOn.Format("2006-01-02"))
+		}
+	}
+}

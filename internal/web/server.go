@@ -193,6 +193,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /{$}", s.handleDashboard)
 	mux.HandleFunc("GET /queue", s.handleQueue)
 	mux.HandleFunc("POST /sync", s.handleSyncNow)
+
+	// Rescheduling the whole extract queue lives beside the queue it acts on
+	// rather than among the bulk actions, which all work on a checked
+	// selection; see handleSpreadExtracts.
+	mux.HandleFunc("POST /queue/spread", s.handleSpreadExtracts)
 	mux.HandleFunc("GET /next", s.handleNext)
 	mux.HandleFunc("GET /library", s.handleLibrary)
 	mux.HandleFunc("POST /library/bulk", s.handleLibraryBulk)

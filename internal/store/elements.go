@@ -2061,3 +2061,77 @@ func (s *Store) CountMissingHighlights() (int, error) {
 	}
 	return count, nil
 }
+
+// SpreadResult reports what SpreadDueExtracts did, so the caller can tell the
+// reader what just happened to their queue rather than only that something
+// did.
+type SpreadResult struct {
+	// Elements is how many extracts were moved.
+	Elements int
+
+	// Days is the window actually used: the one asked for, or a narrower one
+	// when there were not enough extracts to fill its opening days. See
+	// ir.SpreadWindow.
+	Days int
+
+	// PerDay counts the extracts landing on each day of the window, index 0
+	// being today. Its length is Days.
+	PerDay []int
+}
+
+// SpreadDueExtracts moves every extract that is due today or overdue onto a
+// ramp across the next windowDays, lightest first — see ir.SpreadDay.
+//
+// For coming back to a queue that has been left alone for a while. Several
+// hundred extracts all due at once is not a reading session anyone starts,
+// and the alternative to spreading them is the reader grading a few hundred
+// items in one sitting purely to clear the backlog, which is exactly the
+// review that teaches nothing.
+//
+// Only the due date moves. Interval, A-Factor, repetition count, priority and
+// state are written back exactly as they were read, because this defers when
+// a passage is next seen and says nothing about how well it was known — the
+// distinction ir.Backlog does not make, since it overwrites the interval too
+// and would silently reset the learned spacing of every extract it touched.
+//
+// Extracts are taken in queue order, so the ordering the reader's own
+// priorities already imply is preserved across the window rather than
+// scrambled.
+func (s *Store) SpreadDueExtracts(today time.Time, windowDays int, now time.Time) (SpreadResult, error) {
+	if windowDays < 1 {
+		return SpreadResult{}, fmt.Errorf("store: spread window must be at least one day, got %d", windowDays)
+	}
+
+	// The listing is fully drained before a single write is issued. The pool
+	// is capped at one connection, so a write attempted while these rows were
+	// still open would wait for a connection this loop is itself holding —
+	// a deadlock rather than an error. See the README.
+	items, err := s.Queue(today, QueueExtracts, 0)
+	if err != nil {
+		return SpreadResult{}, err
+	}
+	if len(items) == 0 {
+		return SpreadResult{}, nil
+	}
+
+	days := ir.SpreadWindow(len(items), windowDays)
+	result := SpreadResult{Elements: len(items), Days: days, PerDay: make([]int, days)}
+
+	start := ir.Day(today)
+	err = s.inTransaction(func(tx *sql.Tx) error {
+		for index, item := range items {
+			offset := ir.SpreadDay(index, len(items), days)
+			schedule := item.Schedule
+			schedule.DueOn = start.AddDate(0, 0, offset)
+			if err := saveSchedule(tx, item.ID, schedule, now); err != nil {
+				return err
+			}
+			result.PerDay[offset]++
+		}
+		return nil
+	})
+	if err != nil {
+		return SpreadResult{}, err
+	}
+	return result, nil
+}
