@@ -3998,3 +3998,69 @@ func TestSpreadExtractsRejectsAWindowItDoesNotOffer(t *testing.T) {
 		}
 	}
 }
+
+// TestSpreadControlAppearsOnBothQueueViews is a regression test for shipping
+// the control where nobody would find it. The toolbar's own "Queue" link
+// names no kind, which lands on the combined view with extracts behind a
+// drawer; the first version of this rendered the control only on the tabbed
+// extracts view, so unless you knew to click through to the Extracts tab it
+// did not appear to exist.
+func TestSpreadControlAppearsOnBothQueueViews(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+	now := time.Now()
+	today := ir.Day(now)
+
+	// Comfortably past the threshold the control hides below.
+	for i := 0; i < 40; i++ {
+		id, err := db.CreateExtract(store.NewExtract{
+			ParentID: 1, DocumentID: 1, Quote: "passage " + itoa(int64(i)),
+		}, now)
+		if err != nil {
+			t.Fatalf("CreateExtract: %v", err)
+		}
+		if err := db.SaveSchedule(id, ir.Schedule{
+			State: ir.StateReading, DueOn: today, IntervalDays: 30, AFactor: 2, Reps: 2,
+		}, now); err != nil {
+			t.Fatalf("SaveSchedule: %v", err)
+		}
+	}
+
+	for _, path := range []string{"/queue", "/queue?kind=extracts"} {
+		body := get(t, server, path).Body.String()
+		if !strings.Contains(body, `action="/queue/spread"`) {
+			t.Errorf("%s does not offer the reschedule control", path)
+		}
+	}
+
+	// The articles tab is not where a pile of extracts is dealt with, and a
+	// control that reschedules a different queue than the one on screen would
+	// be a trap.
+	if body := get(t, server, "/queue?kind=articles").Body.String(); strings.Contains(body, `action="/queue/spread"`) {
+		t.Error("the articles tab offers a control that acts on the extract queue")
+	}
+}
+
+// TestSpreadControlHidesOverASmallQueue keeps it out of the way on an
+// ordinary day.
+func TestSpreadControlHidesOverASmallQueue(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+	now := time.Now()
+
+	id, err := db.CreateExtract(store.NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "a passage",
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+	if err := db.SaveSchedule(id, ir.Schedule{
+		State: ir.StateReading, DueOn: ir.Day(now), IntervalDays: 1, AFactor: 2, Reps: 1,
+	}, now); err != nil {
+		t.Fatalf("SaveSchedule: %v", err)
+	}
+
+	for _, path := range []string{"/queue", "/queue?kind=extracts"} {
+		if body := get(t, server, path).Body.String(); strings.Contains(body, `action="/queue/spread"`) {
+			t.Errorf("%s offers the reschedule control over a queue of one", path)
+		}
+	}
+}

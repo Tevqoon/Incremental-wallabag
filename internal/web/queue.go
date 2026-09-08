@@ -252,6 +252,7 @@ func (s *Server) handleQueueCombined(w http.ResponseWriter, r *http.Request) {
 		Today:        today,
 		Combined:     true,
 		ExtractItems: extracts,
+		Notice:       r.URL.Query().Get("notice"),
 	})
 }
 

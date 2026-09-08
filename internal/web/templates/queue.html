@@ -47,6 +47,8 @@
       </summary>
 
       <div class="drawer-body">
+        {{template "spread-control" .ExtractsDue}}
+
         {{if .ExtractItems}}
           <ol class="items">
             {{range .ExtractItems}}{{template "queue-item" .}}{{end}}
@@ -93,24 +95,7 @@
       </p>
     {{end}}
 
-    <!-- Only on the extracts tab, and only when there is a backlog worth
-         spreading. Coming back to a few hundred extracts all due at once is
-         the situation this exists for; offering it over a queue of nine would
-         be noise. -->
-    {{if and .IsExtracts (gt .Due 20)}}
-      <form class="spread" method="post" action="/queue/spread">
-        <label for="spread-days">Behind? Spread the backlog over</label>
-        <select id="spread-days" name="days">
-          <option value="14">2 weeks</option>
-          <option value="30" selected>a month</option>
-          <option value="60">2 months</option>
-        </select>
-        <button type="submit"
-                data-confirm="Reschedule all {{.Due}} due extracts across the window, lightest days first? Only the due dates change — intervals, priorities and repetition counts are kept.">
-          Reschedule
-        </button>
-      </form>
-    {{end}}
+    {{if .IsExtracts}}{{template "spread-control" .ExtractsDue}}{{end}}
 
     {{if .Items}}
       <ol class="items">
@@ -176,4 +161,29 @@
       {{end}}
     </div>
   </li>
+{{end}}
+
+{{/* spread-control is the extract queue's "I have been away" button, given
+     the number of extracts due. Defined once and used from both the tabbed
+     extracts view and the combined view's drawer: the toolbar's own Queue
+     link lands on the latter, so a control that existed only on the former
+     was one most readers would never find.
+
+     Shown only over a backlog worth spreading — offering it above a queue of
+     nine would be noise. */}}
+{{define "spread-control"}}
+  {{if gt . 20}}
+    <form class="spread" method="post" action="/queue/spread">
+      <label for="spread-days">Behind? Spread the backlog over</label>
+      <select id="spread-days" name="days">
+        <option value="14">2 weeks</option>
+        <option value="30" selected>a month</option>
+        <option value="60">2 months</option>
+      </select>
+      <button type="submit"
+              data-confirm="Reschedule all {{.}} due extracts across the window, lightest days first? Only the due dates change — intervals, priorities and repetition counts are kept.">
+        Reschedule
+      </button>
+    </form>
+  {{end}}
 {{end}}
