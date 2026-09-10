@@ -551,4 +551,73 @@
       setTheme(next);
     });
   }
+
+  // ---- The grading bar gets out of the way while reading -----------------
+  //
+  // .grades is stuck to the bottom edge for the whole time an article is
+  // open. That is right at the moment a decision is being made and wrong for
+  // the twenty minutes of reading before it: a row of buttons held over the
+  // text is a row of buttons nobody is using.
+  //
+  // Reading is scrolling down and deciding is a pause, so the bar drops away
+  // on the way down and comes back on the first flick upward — the same
+  // gesture someone already makes when they mean to reach for it, so there is
+  // no new control to learn and nothing to toggle.
+  //
+  // Nothing here is load-bearing. The class only moves the bar; it stays in
+  // the page, stays focusable and stays submittable, so the worst outcome of
+  // this going wrong is a bar that never hides.
+  const grades = document.querySelector(".grades");
+  if (grades) {
+    // Under this, a scroll is a thumb resting on the glass or the browser's
+    // own scroll anchoring after an image loads, not an intention. Reacting
+    // to those makes the bar flicker while the reader holds still.
+    const INTENT = 12;
+
+    // Near either end the bar stays put. At the top nothing has been scrolled
+    // past yet, and at the bottom it has left its sticky position for its
+    // resting one at the end of the article (see layout.html) — hiding it
+    // there would drop it below content the reader has already reached, which
+    // is the one place the transform could push the page around.
+    const EDGE = 120;
+
+    // Where the reader was when the bar last changed state, rather than where
+    // they were on the previous event: a slow drag should accumulate into one
+    // decision instead of being swallowed a pixel at a time.
+    let anchor = window.scrollY;
+    let queued = false;
+
+    function settle() {
+      queued = false;
+      const y = window.scrollY;
+      const page = document.documentElement;
+
+      if (y < EDGE || y + window.innerHeight >= page.scrollHeight - EDGE) {
+        grades.classList.remove("is-tucked");
+        anchor = y;
+        return;
+      }
+
+      const moved = y - anchor;
+      if (Math.abs(moved) < INTENT) return;
+      grades.classList.toggle("is-tucked", moved > 0);
+      anchor = y;
+    }
+
+    // Coalesced onto a frame: a smooth scroll fires hundreds of events a
+    // second and every one of them would otherwise read scrollHeight, which
+    // forces layout.
+    window.addEventListener("scroll", () => {
+      if (queued) return;
+      queued = true;
+      requestAnimationFrame(settle);
+    }, { passive: true });
+
+    // Tabbing into a bar that is off-screen would move focus somewhere the
+    // reader cannot see, which is the one way this could make the page worse
+    // to use rather than merely quieter.
+    grades.addEventListener("focusin", () => {
+      grades.classList.remove("is-tucked");
+    });
+  }
 })();

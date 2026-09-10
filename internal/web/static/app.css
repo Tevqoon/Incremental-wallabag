@@ -465,6 +465,26 @@ mark.extract {
   border-top: 1px solid var(--rule);
 }
 
+/* Tucked away while the reader is scrolling down — see app.js. The extra
+   pixel carries the border-top off with it, which would otherwise sit exactly
+   on the viewport's bottom edge and read as a stray rule.
+
+   transform rather than moving `bottom`, because a transform is composited
+   and does not touch layout: the bar is only ever tucked while it is stuck
+   mid-article, so it slides over text that is already there and adds nothing
+   to the scrollable area. */
+.grades {
+  transition: transform 180ms ease;
+  will-change: transform;
+}
+
+.grades.is-tucked { transform: translateY(calc(100% + 1px)); }
+
+/* The bar still gets out of the way; it just stops sliding to do it. */
+@media (prefers-reduced-motion: reduce) {
+  .grades { transition: none; }
+}
+
 /* Three groups, because there are three decisions: finished with it, not now,
    or come back in N days. The gaps carry that structure; without them the
    buttons read as one undifferentiated row of verbs. */
