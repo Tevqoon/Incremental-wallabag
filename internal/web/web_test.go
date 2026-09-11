@@ -4064,3 +4064,98 @@ func TestSpreadControlHidesOverASmallQueue(t *testing.T) {
 		}
 	}
 }
+
+// TestContentsPageTakesABookOutOfTheQueue covers the gap that made a book
+// impossible to clear from the reading queue. A book's own entry circulates
+// in the article queue like any article, but opening it there lands on its
+// contents page — /read redirects anything with no text — and that page had
+// no way to act on the entry at all. So it came back every day with nothing
+// to do about it short of finding it again in the library's bulk bar.
+func TestContentsPageTakesABookOutOfTheQueue(t *testing.T) {
+	server, db, _ := newTestServer(t, false)
+	documentID := importedDocumentID(t, server, "queue")
+	page := "/documents/" + itoa(documentID)
+	now := time.Now()
+	today := ir.Day(now)
+
+	root, err := db.RootElement(documentID)
+	if err != nil {
+		t.Fatalf("RootElement: %v", err)
+	}
+	// Exactly the state the bug report is about: in circulation and due.
+	schedule := root.Schedule
+	schedule.State, schedule.DueOn, schedule.IntervalDays = ir.StateReading, today, 27
+	if err := db.SaveSchedule(root.ID, schedule, now); err != nil {
+		t.Fatalf("SaveSchedule: %v", err)
+	}
+
+	passagesBefore, err := db.DocumentAnnotations(documentID)
+	if err != nil {
+		t.Fatalf("DocumentAnnotations: %v", err)
+	}
+	statesBefore := map[int64]ir.State{}
+	for _, passage := range passagesBefore {
+		statesBefore[passage.ID] = passage.Schedule.State
+	}
+
+	body := get(t, server, page).Body.String()
+	if !strings.Contains(body, `action="/elements/`+itoa(root.ID)+`/grade"`) ||
+		!strings.Contains(body, "Take out of queue") {
+		t.Fatalf("a queued book's contents page offers no way to take it out of the queue")
+	}
+
+	response := post(t, server, "/elements/"+itoa(root.ID)+"/grade", url.Values{
+		"grade": {"suspend"}, "redirect": {page},
+	})
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303: %s", response.Code, response.Body.String())
+	}
+	if got := response.Header().Get("Location"); got != page {
+		t.Errorf("Location = %q, want the contents page it was pressed on", got)
+	}
+
+	suspended, err := db.ElementByID(root.ID)
+	if err != nil {
+		t.Fatalf("ElementByID: %v", err)
+	}
+	if suspended.Schedule.State != ir.StateSuspended {
+		t.Errorf("state = %q, want suspended", suspended.Schedule.State)
+	}
+	if suspended.Schedule.IntervalDays != 27 {
+		t.Errorf("interval = %v, want 27 kept, so it resumes where it left off",
+			suspended.Schedule.IntervalDays)
+	}
+	queue, err := db.Queue(today, store.QueueArticles, 0)
+	if err != nil {
+		t.Fatalf("Queue: %v", err)
+	}
+	for _, item := range queue {
+		if item.ID == root.ID {
+			t.Error("the book is still in the article queue after being taken out of it")
+		}
+	}
+
+	// The work's own entry only. Its passages are the reader's to deal with
+	// separately — that is the point of processing a book by hand.
+	passagesAfter, _ := db.DocumentAnnotations(documentID)
+	for _, passage := range passagesAfter {
+		if passage.Schedule.State != statesBefore[passage.ID] {
+			t.Errorf("passage %d went from %q to %q; taking the book out must not touch its annotations",
+				passage.ID, statesBefore[passage.ID], passage.Schedule.State)
+		}
+	}
+
+	// And back again, from the same page.
+	body = get(t, server, page).Body.String()
+	if strings.Contains(body, "Take out of queue") || !strings.Contains(body, "Back to queue") {
+		t.Fatal("a suspended book's contents page does not offer to put it back")
+	}
+	response = post(t, server, "/elements/"+itoa(root.ID)+"/unsuspend", url.Values{"redirect": {page}})
+	if response.Code != http.StatusSeeOther || response.Header().Get("Location") != page {
+		t.Fatalf("unsuspend: status %d, Location %q", response.Code, response.Header().Get("Location"))
+	}
+	restored, _ := db.ElementByID(root.ID)
+	if restored.Schedule.State == ir.StateSuspended {
+		t.Error("the book did not go back into the queue")
+	}
+}

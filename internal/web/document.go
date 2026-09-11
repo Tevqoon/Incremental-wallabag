@@ -66,6 +66,18 @@ type documentData struct {
 	Document store.Document
 	RootID   int64
 
+	// RootQueued and RootSuspended pick which of the contents page's two
+	// queue buttons to show, for the work itself rather than its passages.
+	//
+	// A book's own entry circulates in the article queue like any article,
+	// but opening one there lands here — /read redirects anything with no
+	// text to read — and until these existed this page had no way to act on
+	// that entry at all. So a book that came up in the queue could only be
+	// cleared by grading, which it cannot be, or by finding it again in the
+	// library's bulk bar.
+	RootQueued    bool
+	RootSuspended bool
+
 	Groups []chapterGroup
 	Counts store.TriageCounts
 
@@ -129,6 +141,8 @@ func (s *Server) handleDocument(w http.ResponseWriter, r *http.Request) {
 		Title:            document.Heading(),
 		Document:         document,
 		RootID:           root.ID,
+		RootQueued:       root.Schedule.State == ir.StateNew || root.Schedule.State == ir.StateReading,
+		RootSuspended:    root.Schedule.State == ir.StateSuspended,
 		Groups:           groupByChapter(annotations),
 		Colors:           colorGroups(annotations),
 		Counts:           counts,

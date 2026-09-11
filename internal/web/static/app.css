@@ -1310,3 +1310,8 @@ fieldset.field { border: 0; padding: 0; margin-inline: 0; }
 }
 
 .spread label { color: inherit; }
+
+/* A form in the contents page's action row contributes only its button to
+   the row's own flex layout, so "Take out of queue" lines up beside "Go
+   through it again" instead of sitting in a box of its own. */
+.doc-actions form { display: contents; }

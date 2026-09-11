@@ -28,6 +28,31 @@
           Go through it again
         </button>
       {{end}}
+
+      <!-- The work's own entry, as distinct from its passages: a book comes
+           up in the article queue like any article, and opening it lands
+           here rather than in the reader, so this is the only place it can
+           be taken out of circulation from. Plain forms rather than htmx so
+           the redirect re-renders this page with the other button showing.
+           Passages are left alone either way — "select all" and "Suspend
+           selected" below handle those. -->
+      {{if .RootQueued}}
+        <form method="post" action="/elements/{{.RootID}}/grade">
+          <input type="hidden" name="grade" value="suspend">
+          <input type="hidden" name="redirect" value="/documents/{{.Document.ID}}">
+          <button type="submit" class="tiny"
+                  title="Stop this work coming up in the reading queue. Keeps its interval, and its annotations are untouched.">
+            Take out of queue
+          </button>
+        </form>
+      {{else if .RootSuspended}}
+        <form method="post" action="/elements/{{.RootID}}/unsuspend">
+          <input type="hidden" name="redirect" value="/documents/{{.Document.ID}}">
+          <button type="submit" class="tiny" title="Put this work back in the reading queue, due today">
+            Back to queue
+          </button>
+        </form>
+      {{end}}
     </div>
   </header>
 
