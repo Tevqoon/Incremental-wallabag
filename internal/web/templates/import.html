@@ -117,6 +117,83 @@
     <button type="submit" class="primary">Import</button>
   </form>
 
+  {{if .PhotosEnabled}}
+    <h2>Photos of a paper book</h2>
+    <p class="meta">
+      Photograph only the pages you marked with a pencil bracket, underline
+      or margin note — a two-page spread in one photo is fine as long as the
+      page number is visible. A background worker reads each photo in turn,
+      and the passages it finds appear on the book's own page as they come
+      in, grouped by chapter.
+    </p>
+
+    {{if .PhotoError}}
+      <div class="notice notice-danger">{{.PhotoError}}</div>
+    {{end}}
+
+    <form class="import-form" method="post" action="/import/photos" enctype="multipart/form-data">
+      <label class="field">
+        <span>Photos</span>
+        <input type="file" name="photos" accept="image/*" multiple required>
+      </label>
+
+      <label class="field">
+        <span>Title</span>
+        <input type="text" name="title" placeholder="required for a new book">
+      </label>
+
+      <label class="field">
+        <span>Subtitle</span>
+        <input type="text" name="subtitle" placeholder="optional">
+      </label>
+
+      <label class="field">
+        <span>Author</span>
+        <input type="text" name="author" placeholder="optional">
+      </label>
+
+      <label class="field">
+        <span>Add to</span>
+        <select name="into">
+          <option value="">a new book</option>
+          {{range .Existing}}
+            <option value="{{.ID}}">{{.Heading}}{{if .Author}} — {{.Author}}{{end}}</option>
+          {{end}}
+        </select>
+        <small>
+          Pick an existing book to read it in further stages, rather than
+          starting a new one.
+        </small>
+      </label>
+
+      <fieldset class="field">
+        <legend>What to do with the passages</legend>
+        <label class="choice">
+          <input type="radio" name="mode" value="triage" checked>
+          <span>
+            <strong>Go through them first</strong>
+            <small>
+              They arrive suspended, and a triage pass over the book decides
+              which ones join the queue.
+            </small>
+          </span>
+        </label>
+        <label class="choice">
+          <input type="radio" name="mode" value="queue">
+          <span>
+            <strong>Queue them all now</strong>
+            <small>
+              They enter the reading queue straight away, spread over the
+              usual delay.
+            </small>
+          </span>
+        </label>
+      </fieldset>
+
+      <button type="submit" class="primary">Upload</button>
+    </form>
+  {{end}}
+
   {{if .SubstackEnabled}}
     <h2>Import from a URL</h2>
     <p class="meta">

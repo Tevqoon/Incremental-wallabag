@@ -74,6 +74,19 @@ type importData struct {
 	// shown attributed to the wrong one.
 	FeedRefreshReport string
 	FeedRefreshError  string
+
+	// PhotosEnabled shows or hides the "Photos of a paper book" section —
+	// see Server.wakeScanner. There is nothing that section's form can do
+	// without a vision model configured, so it does not render at all
+	// rather than rendering disabled.
+	PhotosEnabled bool
+
+	// PhotoError describes a photo batch that failed to upload — kept apart
+	// from Error for the same reason SubstackError is kept apart from it:
+	// either form can fail while leaving the other's own fields completely
+	// blank, and conflating them would make the two indistinguishable in the
+	// template.
+	PhotoError string
 }
 
 func (s *Server) handleImportForm(w http.ResponseWriter, r *http.Request) {
@@ -91,6 +104,7 @@ func (s *Server) renderImport(w http.ResponseWriter, data importData) {
 	data.Existing = existing
 	data.SubstackEnabled = s.importSubstackURL != nil
 	data.FeedRefreshEnabled = s.refreshSubstackFeed != nil
+	data.PhotosEnabled = s.wakeScanner != nil
 	if data.Title == "" {
 		data.Title = "Import annotations"
 	}

@@ -96,6 +96,12 @@ type documentData struct {
 	// existing chapter one — see Server.proofreader. False, hiding the
 	// button, when config.yaml has no llm.api_key.
 	ProofreadEnabled bool
+
+	// documentScanData carries everything about a photographed book's own
+	// pages — see scanDataForDocument. Embedded so its fields (HasScans,
+	// ScanCounts, FailedScans, ...) promote straight onto this page's own
+	// template data.
+	documentScanData
 }
 
 // handleDocument shows everything harvested from one work, in the order it
@@ -137,6 +143,12 @@ func (s *Server) handleDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	scanData, err := s.scanDataForDocument(id, annotations)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+
 	s.render(w, "document.html", documentData{
 		Title:            document.Heading(),
 		Document:         document,
@@ -148,6 +160,7 @@ func (s *Server) handleDocument(w http.ResponseWriter, r *http.Request) {
 		Counts:           counts,
 		Readable:         s.readable(document),
 		ProofreadEnabled: s.proofreader != nil,
+		documentScanData: scanData,
 	})
 }
 

@@ -1,3 +1,24 @@
+{{/* scanProgress is the small progress line a busy document's photos section
+     shows, and the whole of what GET /documents/{id}/scans/progress returns
+     when polled. Executed directly by name from handleScansProgress (see
+     photos.go), so this is the only place its markup is written — the
+     contents page's own copy and the polling fragment can never disagree
+     about what it says. Its own hx-trigger is present only while busy,
+     which is what makes the polling stop itself once there is nothing left
+     to report: the fragment that comes back on the last poll simply omits
+     it. */}}
+{{define "scanProgress"}}
+<p id="scan-progress" class="meta scan-progress"
+   {{if .ScanCounts.Busy}}hx-get="/documents/{{.DocumentID}}/scans/progress" hx-trigger="every 5s" hx-swap="outerHTML"{{end}}>
+  {{if .ScanCounts.Busy}}
+    Reading… ({{.ScanCounts.Done}} of {{.ScanCounts.Total}} so far{{if .ScanCounts.Failed}} · {{.ScanCounts.Failed}} failed{{end}})
+  {{else}}
+    {{.ScanCounts.Done}} of {{.ScanCounts.Total}} photos read{{if .ScanCounts.Failed}} · {{.ScanCounts.Failed}} failed{{end}}
+    — <a href="/documents/{{.DocumentID}}">reload to see the new passages</a>
+  {{end}}
+</p>
+{{end}}
+
 {{define "content"}}
 <section class="queue">
   <header class="doc-head">
@@ -82,6 +103,105 @@
       <button type="submit" class="tiny">Save</button>
     </form>
   </details>
+
+  {{if .HasScans}}
+    <section id="scans">
+      <h2>Photos</h2>
+      {{template "scanProgress" .}}
+
+      {{if .FailedScans}}
+        <ul class="scan-failed">
+          {{range .FailedScans}}
+            <li class="scan-failed-row">
+              <a href="/documents/{{$.Document.ID}}/scans/{{.ID}}/image" target="_blank" rel="noopener noreferrer">
+                <img class="scan-thumb" loading="lazy" alt="" src="/documents/{{$.Document.ID}}/scans/{{.ID}}/image">
+              </a>
+              <div class="item-body">
+                <p class="item-title">{{.Filename}}</p>
+                <p class="meta">{{.Error}}</p>
+                <form method="post" action="/documents/{{$.Document.ID}}/scans/{{.ID}}/retry">
+                  <button type="submit" class="tiny">Retry</button>
+                </form>
+              </div>
+            </li>
+          {{end}}
+        </ul>
+      {{end}}
+
+      {{if .UnnumberedPages}}
+        <p class="meta">The model could not read a page number on these — type it in by hand:</p>
+        <ul class="scan-unnumbered">
+          {{range .UnnumberedPages}}
+            <li class="scan-unnumbered-row">
+              <a href="/documents/{{$.Document.ID}}/scans/{{.ScanID}}/image" target="_blank" rel="noopener noreferrer">
+                <img class="scan-thumb" loading="lazy" alt="" src="/documents/{{$.Document.ID}}/scans/{{.ScanID}}/image">
+              </a>
+              <form method="post" action="/documents/{{$.Document.ID}}/scans/{{.ScanID}}/label">
+                <input type="hidden" name="page" value="{{.PageIndex}}">
+                <input type="text" name="label" placeholder="page number" class="tiny">
+                <button type="submit" class="tiny">Save</button>
+              </form>
+            </li>
+          {{end}}
+        </ul>
+      {{end}}
+
+      {{if .PhotosEnabled}}
+        <details class="scan-add">
+          <summary>Add more photos</summary>
+          <form class="import-form" method="post" action="/import/photos" enctype="multipart/form-data">
+            <input type="hidden" name="into" value="{{.Document.ID}}">
+            <label class="field">
+              <span>Photos</span>
+              <input type="file" name="photos" accept="image/*" multiple required>
+            </label>
+            <fieldset class="field">
+              <legend>What to do with the passages</legend>
+              <label class="choice">
+                <input type="radio" name="mode" value="triage" checked>
+                <span><strong>Go through them first</strong></span>
+              </label>
+              <label class="choice">
+                <input type="radio" name="mode" value="queue">
+                <span><strong>Queue them all now</strong></span>
+              </label>
+            </fieldset>
+            <button type="submit" class="tiny">Upload</button>
+          </form>
+        </details>
+      {{end}}
+    </section>
+  {{end}}
+
+  {{if .MarginNotes}}
+    <section id="notes">
+      <h2>Margin notes to type in</h2>
+      <ul class="items">
+        {{range .MarginNotes}}
+          <li class="item margin-note-row" id="element-{{.ID}}">
+            <div class="item-body">
+              <p class="item-title">{{.Summary}}</p>
+              <div class="item-meta">
+                {{if .Page}}<span class="badge">p. {{.Page}}</span>{{end}}
+              </div>
+              {{if .HasScan}}
+                <a href="/documents/{{$.Document.ID}}/scans/{{.ScanID}}/image" target="_blank" rel="noopener noreferrer">
+                  <img class="scan-thumb" loading="lazy" alt="" src="/documents/{{$.Document.ID}}/scans/{{.ScanID}}/image">
+                </a>
+              {{end}}
+              <form method="post" action="/elements/{{.ID}}/margin-note">
+                <textarea name="note" rows="2" placeholder="type the note from the margin">{{.Note}}</textarea>
+                <button type="submit" class="tiny">Save</button>
+              </form>
+              <form method="post" action="/elements/{{.ID}}/margin-note/dismiss">
+                <button type="submit" class="tiny">Nothing there</button>
+              </form>
+            </div>
+          </li>
+        {{end}}
+      </ul>
+    </section>
+  {{end}}
 
   {{if .Groups}}
     <nav class="toc">
@@ -206,6 +326,7 @@
               {{end}}
               {{if not .Triaged}}<span class="badge badge-item">new</span>{{end}}
               {{if .ClozeCount}}<span class="badge badge-item">{{.ClozeCount}} cloze</span>{{end}}
+              {{if .NotePending}}<span class="badge badge-item">margin note</span>{{end}}
               <span>p{{percent .Schedule.Priority}}</span>
               {{if eq .Schedule.State "suspended"}}
                 <button class="tiny" hx-post="/elements/{{.ID}}/unsuspend"

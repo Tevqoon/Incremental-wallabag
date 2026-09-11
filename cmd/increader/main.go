@@ -30,7 +30,9 @@ import (
 
 	"github.com/Tevqoon/increader/internal/config"
 	"github.com/Tevqoon/increader/internal/ingest"
+	"github.com/Tevqoon/increader/internal/pagescan"
 	"github.com/Tevqoon/increader/internal/proofread"
+	"github.com/Tevqoon/increader/internal/scanworker"
 	"github.com/Tevqoon/increader/internal/source"
 	"github.com/Tevqoon/increader/internal/store"
 	"github.com/Tevqoon/increader/internal/substack"
@@ -542,6 +544,37 @@ func serve(settings config.Config, logger *slog.Logger) error {
 		proofreader = proofread.NewClient(settings.LLM.APIKey, settings.LLM.BaseURL, settings.LLM.Model)
 	}
 
+	// The photo importer's background reader, on the same key as the
+	// proofreader: both go through OpenRouter, only the model differs. Left
+	// unconfigured, there is no worker and the importer is not offered.
+	//
+	// Go note: the two hooks are assigned inside this if rather than always
+	// passing scanner.Wake. A method value taken from a nil *Worker is itself
+	// a perfectly good non-nil func — Go only dereferences the receiver when
+	// it is called — so web, which hides the feature on a nil func, would
+	// offer the importer and then panic on the first upload.
+	var wakeScanner func()
+	var reassembleScans func(documentID, scanID int64) error
+	if settings.LLM.Enabled() {
+		scanner := scanworker.New(db,
+			pagescan.NewClient(settings.LLM.APIKey, settings.LLM.BaseURL,
+				settings.LLM.VisionModel, settings.LLM.VisionEffort),
+			logger,
+			scanworker.Options{
+				// A book's passages are scheduled the way any other
+				// imported annotation is when they skip triage.
+				FloorDays:  settings.AnnotationDelayDays,
+				SpreadDays: settings.AnnotationDelaySpreadDays,
+			})
+		go scanner.Run(ctx)
+
+		wakeScanner = scanner.Wake
+		reassembleScans = func(documentID, scanID int64) error {
+			_, err := scanner.Reassemble(documentID, scanID)
+			return err
+		}
+	}
+
 	reader, err := web.New(web.Options{
 		Store:                     db,
 		Sources:                   byName,
@@ -566,6 +599,8 @@ func serve(settings config.Config, logger *slog.Logger) error {
 		ImportSubstackURL:   importSubstackURLHandler(db, settings, logger),
 		RefreshSubstackFeed: refreshSubstackFeedHandler(db, settings, logger),
 		Proofreader:         proofreader,
+		WakeScanner:         wakeScanner,
+		ReassembleScans:     reassembleScans,
 	})
 	if err != nil {
 		return err

@@ -97,6 +97,17 @@ type Server struct {
 	// stateless leaf client with no account/credential assembly of its own
 	// for main.go to hide, unlike an actual content provider.
 	proofreader *proofread.Client
+
+	// wakeScanner nudges the background page reader after photos are added or
+	// a failed one is retried — see photos.go's handleImportPhotos and
+	// handleRetryScan. nil when no vision model is configured (no
+	// llm.api_key), which hides the photo importer entirely.
+	wakeScanner func()
+
+	// reassembleScans rebuilds a book's passages after a page number was
+	// corrected by hand — see scanworker.Worker.Reassemble and
+	// handleLabelScan. Set whenever wakeScanner is.
+	reassembleScans func(documentID, scanID int64) error
 }
 
 // Options configures a Server.
@@ -142,6 +153,16 @@ type Options struct {
 	// Proofreader backs the "Fix typos" bulk action on a document's contents
 	// page — see Server.proofreader. Leave nil to hide that action entirely.
 	Proofreader *proofread.Client
+
+	// WakeScanner nudges the background page reader after photos are added or
+	// a failed one is retried. nil when no vision model is configured (no
+	// llm.api_key), which hides the photo importer entirely.
+	WakeScanner func()
+
+	// ReassembleScans rebuilds a book's passages after a page number was
+	// corrected by hand — see scanworker.Worker.Reassemble. Set whenever
+	// WakeScanner is.
+	ReassembleScans func(documentID, scanID int64) error
 }
 
 // New builds a Server and parses its templates.
@@ -165,6 +186,8 @@ func New(options Options) (*Server, error) {
 		importSubstackURL:         options.ImportSubstackURL,
 		refreshSubstackFeed:       options.RefreshSubstackFeed,
 		proofreader:               options.Proofreader,
+		wakeScanner:               options.WakeScanner,
+		reassembleScans:           options.ReassembleScans,
 	}
 
 	for _, name := range pageNames {
@@ -205,6 +228,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /import", s.handleImport)
 	mux.HandleFunc("POST /import/substack", s.handleImportSubstackURL)
 	mux.HandleFunc("POST /import/substack/refresh", s.handleRefreshSubstackFeed)
+	mux.HandleFunc("POST /import/photos", s.handleImportPhotos)
 	mux.HandleFunc("GET /documents/{id}", s.handleDocument)
 	mux.HandleFunc("POST /documents/{id}/titles", s.handleDocumentTitles)
 	mux.HandleFunc("POST /documents/{id}/chapters", s.handleSetChapters)
@@ -215,6 +239,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /documents/{id}/triage/reset", s.handleTriageReset)
 	mux.HandleFunc("DELETE /documents/{id}", s.handleDeleteDocument)
 	mux.HandleFunc("GET /documents/{id}/images/{imageID}", s.handleDocumentImage)
+	mux.HandleFunc("GET /documents/{id}/scans/progress", s.handleScansProgress)
+	mux.HandleFunc("GET /documents/{id}/scans/{scanID}/image", s.handleScanImage)
+	mux.HandleFunc("POST /documents/{id}/scans/{scanID}/retry", s.handleRetryScan)
+	mux.HandleFunc("POST /documents/{id}/scans/{scanID}/label", s.handleLabelScan)
 	mux.HandleFunc("GET /extracts", s.handleExtracts)
 	mux.HandleFunc("POST /extracts/bulk", s.handleExtractsBulk)
 	mux.HandleFunc("GET /calendar", s.handleCalendar)
@@ -233,6 +261,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /elements/{id}/tags/remove", s.handleRemoveTag)
 	mux.HandleFunc("POST /elements/{id}/triage", s.handleTriageDecision)
 	mux.HandleFunc("POST /elements/{id}/annotation", s.handleEditAnnotation)
+	mux.HandleFunc("POST /elements/{id}/margin-note", s.handleMarginNote)
+	mux.HandleFunc("POST /elements/{id}/margin-note/dismiss", s.handleDismissMarginNote)
 	mux.HandleFunc("DELETE /elements/{id}", s.handleDeleteExtract)
 
 	// The JSON API for external consumers — see api.go for what it is for and

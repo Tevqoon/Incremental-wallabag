@@ -97,7 +97,7 @@ no image rebuild. `config.local.yaml` is gitignored.
 | **Review** | The same page's other tab: extracts due today, most important first. Passages you took, wallabag highlights and book annotations alike. |
 | **Extracts** | Everything harvested whether it is due or not, filterable by origin — your own extracts and the ones imported from wallabag highlights. |
 | **Library** | Everything synced or uploaded, searchable — for finding a specific work, or putting an archived one back in the queue. |
-| **Import** | Upload a book's annotations: a KOReader JSON export, the JSON an annotation extractor produced, or a PDF still carrying its own annotations. |
+| **Import** | Upload a book's annotations: a KOReader JSON export, the JSON an annotation extractor produced, a PDF still carrying its own annotations, or photos of a paper book's marked pages. |
 
 **Articles and extracts are two separate queues**, two tabs on the same page,
 each with its own due count and its own "start" button. Reading articles and
@@ -244,6 +244,35 @@ any upload.
 Tags and the star toggle sit above the article and write straight through to
 wallabag. The Library's filter tabs carry the same counts as wallabag's own
 sidebar — Unread, Starred, Archive, Annotated — plus per-tag filters.
+
+### Paper books
+
+A paper book has no export, so **Import** also takes **photos of the pages you
+marked**. Bracket passages in the margin as you read — a bracket is taken to
+mean whole sentences, from the start of one to the end of another — then
+photograph each marked page (a two-page spread in one photo is fine; the page
+number must be in frame) and upload the batch from your phone. A vision model
+reads each photo in the background, about half a cent a page (it needs
+`llm.api_key`, see `config.yaml`), and the passages appear on the book's
+contents page in page order as they are read.
+
+The model only transcribes the page and says which lines each mark spans.
+Everything after that is ordinary code: trimming a bracket to whole
+sentences, joining a passage that runs onto the next page — only when that
+page was photographed too and its mark starts at the top — and dropping
+line-break hyphens. Chapters come from the running heads: "CHAPTER 3" on the
+left-hand page and the title on the right become "Chapter 3: On the Uses of
+Art", and renaming a chapter on the contents page carries over to passages
+from later photos of it.
+
+Handwriting is deliberately **not** read; a misread margin note is worse than
+none. A passage with writing beside it is flagged instead, and the book's page
+lists those under **Margin notes to type in**, each next to its photo. The same
+page shows which photos are still being read, retries failed ones, asks for the
+page number where the model could not see one, and takes more photos for the
+same book, since a book is read in stages. Re-photographing a page replaces the
+earlier reading of it; a passage you deleted or corrected by hand is never
+brought back or overwritten by photos of other pages.
 
 ## JSON API
 

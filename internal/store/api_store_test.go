@@ -302,3 +302,67 @@ func TestEditAnnotationWithNothingSetIsANoOp(t *testing.T) {
 			before.UpdatedAt, after.UpdatedAt)
 	}
 }
+
+// TestEditAnnotationClearsNotePendingOnANonEmptyNote mirrors the guard
+// UpdateAnnotation already applies (see TestUpdateAnnotationClearsNotePending
+// in pagescans_test.go): typing a margin note in through this partial-edit
+// path — the one the web layer's margin-note form actually uses, since
+// UpdateAnnotation would also rewrite quote — is exactly what the
+// note_pending nudge was asking for, so it clears itself. But only once the
+// note actually lands non-empty; leaving it blank is not the same act as
+// dismissing the nudge outright.
+func TestEditAnnotationClearsNotePendingOnANonEmptyNote(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+	docID, err := db.CreateScannedBook("Margin Note Book", "", "", now)
+	if err != nil {
+		t.Fatalf("CreateScannedBook: %v", err)
+	}
+	scanID, err := db.AddPageScan(docID, "p1.jpg", "image/jpeg", []byte("img"), true, now)
+	if err != nil {
+		t.Fatalf("AddPageScan: %v", err)
+	}
+	passages := []ScanPassage{{
+		Ref: "scan:p1:0", Text: "handwriting nearby", NotePending: true, ScanIDs: []int64{scanID},
+	}}
+	if _, err := db.ApplyScanPassages(docID, scanID, passages, ScanApplyOptions{}, now); err != nil {
+		t.Fatalf("ApplyScanPassages: %v", err)
+	}
+	elem := findScanRef(t, db, docID, "scan:p1:0")
+	if !elem.NotePending {
+		t.Fatalf("setup: note_pending not set")
+	}
+
+	blank := ""
+	if err := db.EditAnnotation(elem.ID, AnnotationEdit{Note: &blank}, now); err != nil {
+		t.Fatalf("EditAnnotation (blank note): %v", err)
+	}
+	elem, err = db.ElementByID(elem.ID)
+	if err != nil {
+		t.Fatalf("ElementByID: %v", err)
+	}
+	if !elem.NotePending {
+		t.Errorf("note_pending cleared by an edit that left the note blank")
+	}
+
+	note := "here it is"
+	if err := db.EditAnnotation(elem.ID, AnnotationEdit{Note: &note}, now); err != nil {
+		t.Fatalf("EditAnnotation: %v", err)
+	}
+	elem, err = db.ElementByID(elem.ID)
+	if err != nil {
+		t.Fatalf("ElementByID: %v", err)
+	}
+	if elem.NotePending {
+		t.Errorf("note_pending still set after typing in a note")
+	}
+	if elem.Note != "here it is" {
+		t.Errorf("note = %q", elem.Note)
+	}
+	if elem.Quote != "handwriting nearby" {
+		t.Errorf("quote = %q, want it untouched — EditAnnotation never rewrites the passage", elem.Quote)
+	}
+	if elem.EditedQuote != "" {
+		t.Errorf("edited_quote = %q, want it untouched", elem.EditedQuote)
+	}
+}

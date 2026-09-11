@@ -1315,3 +1315,74 @@ fieldset.field { border: 0; padding: 0; margin-inline: 0; }
    the row's own flex layout, so "Take out of queue" lines up beside "Go
    through it again" instead of sitting in a box of its own. */
 .doc-actions form { display: contents; }
+
+/* ---- Page scans (photographed books) -------------------------------------
+   The "Photos of a paper book" import section and the contents page's own
+   #scans/#notes sections lean on .import-form, .field, .choice, .items,
+   .item and .badge wherever those already say what is needed; what follows
+   is only what those could not already say. */
+
+.scan-progress { margin-bottom: 1rem; }
+
+.scan-failed,
+.scan-unnumbered {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 1.5rem;
+}
+.scan-failed-row,
+.scan-unnumbered-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+/* Constrained to a fixed width rather than a percentage: these sit in a row
+   beside a form or a caption, not alone in a column, so a thumbnail must not
+   grow with an unusually tall or wide photo. */
+.scan-thumb {
+  width: 6rem;
+  height: auto;
+  flex: none;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+}
+
+.scan-unnumbered-row form {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+}
+.scan-unnumbered-row input[type="text"] {
+  width: 6rem;
+  padding: 0.3rem 0.4rem;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+
+.scan-add { margin: 1rem 0 1.5rem; }
+.scan-add summary { cursor: pointer; color: var(--muted); font-size: 0.9rem; }
+.scan-add form { margin-top: 0.8rem; max-width: var(--measure); }
+
+/* The margin-notes section's own rows: a passage, its photo, and the
+   textarea to type the note into — stacked, since a thumbnail and a
+   multi-line textarea side by side would fight for width on a phone, which
+   is exactly where this form gets used (photographing a book is a phone
+   task; typing the note in afterward usually still is). */
+.margin-note-row .scan-thumb { width: 10rem; margin: 0.4rem 0; }
+.margin-note-row form { margin-top: 0.5rem; max-width: var(--measure); }
+.margin-note-row textarea {
+  width: 100%;
+  padding: 0.45rem 0.5rem;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  resize: vertical;
+}

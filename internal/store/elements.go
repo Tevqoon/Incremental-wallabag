@@ -1418,6 +1418,14 @@ func (e AnnotationEdit) isEmpty() bool {
 // the override lives in its own column, and content_html remains the faithful
 // record of what arrived. Callers that want the correction render
 // DisplayQuote.
+//
+// A non-empty Note also clears note_pending, the same guard UpdateAnnotation
+// applies: typing a margin note in is exactly what the nudge (see migration
+// 019) was asking for, so it clears itself. Guarded on the note being
+// non-empty for the same reason UpdateAnnotation's own guard is — an edit
+// that leaves the note blank is not the same act as dismissing the nudge
+// outright (see DismissNotePending) and should not silently do its job for
+// it. A blank Note therefore only clears the text, same as any other field.
 func (s *Store) EditAnnotation(id int64, edit AnnotationEdit, now time.Time) error {
 	if edit.isEmpty() {
 		return nil
@@ -1428,7 +1436,7 @@ func (s *Store) EditAnnotation(id int64, edit AnnotationEdit, now time.Time) err
 	// with a COALESCE per column keeps "was this field in the request" out of
 	// the SQL, where expressing it needs a sentinel that some legitimate value
 	// could collide with.
-	assignments := make([]string, 0, 5)
+	assignments := make([]string, 0, 6)
 	args := make([]any, 0, 6)
 
 	if edit.Title != nil {
@@ -1438,6 +1446,9 @@ func (s *Store) EditAnnotation(id int64, edit AnnotationEdit, now time.Time) err
 	if edit.Note != nil {
 		assignments = append(assignments, "note = ?")
 		args = append(args, *edit.Note)
+		if *edit.Note != "" {
+			assignments = append(assignments, "note_pending = 0")
+		}
 	}
 	if edit.Chapter != nil {
 		assignments = append(assignments, "chapter = ?")

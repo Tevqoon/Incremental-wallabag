@@ -38,8 +38,9 @@
 -- On elements: note_pending marks a passage whose photo showed handwriting
 -- next to it that the model (deliberately) did not transcribe — a nudge to
 -- go look at the photo and type the note in, or dismiss it as nothing. It is
--- cleared the moment a note is typed in (UpdateAnnotation) or the reader
--- says there is nothing there (DismissNotePending). It lives on elements
+-- cleared the moment a note is typed in (UpdateAnnotation, or EditAnnotation
+-- — the note-only write the margin-note form and the JSON API both use) or
+-- the reader says there is nothing there (DismissNotePending). It lives on elements
 -- rather than page_scans because a single photo can seed more than one
 -- passage (a page turn splits a sentence across two photos) and the flag
 -- belongs to the passage the reader will actually look at, not the source
