@@ -106,6 +106,14 @@ type Element struct {
 	// one, with no passage at all.
 	Note string
 
+	// NotePending marks a passage whose source photo showed handwriting next
+	// to it that the vision model was deliberately never asked to read (see
+	// migration 019) — a nudge to look at the photo and either type the note
+	// in or dismiss it as nothing. Only ever true for a passage assembled
+	// from a page scan. Cleared by UpdateAnnotation once a note lands, or
+	// directly by DismissNotePending.
+	NotePending bool
+
 	// Chapter and Page are where in the work the passage came from. Both are
 	// empty for anything that did not arrive from a book — see
 	// source.Highlight for why Page is a string.
@@ -237,7 +245,7 @@ const elementColumns = `
 	e.read_block, e.origin, COALESCE(e.external_ref, ''), e.missing_upstream,
 	e.buried_on, COALESCE(e.ranges, ''), e.created_at, e.updated_at,
 	e.note, e.chapter, e.page, e.color, e.ordinal, e.triaged_at,
-	e.edited_quote`
+	e.edited_quote, e.note_pending`
 
 // nullableElement holds the columns that can be NULL, which cannot be scanned
 // straight into the Element fields they populate.
@@ -272,7 +280,7 @@ func scanTargets(element *Element, nullable *nullableElement) []any {
 		&nullable.buriedOn, &element.Ranges, &nullable.createdAt, &nullable.updatedAt,
 		&element.Note, &element.Chapter, &element.Page, &element.Color,
 		&element.Ordinal, &nullable.triagedAt,
-		&element.EditedQuote,
+		&element.EditedQuote, &element.NotePending,
 	}
 }
 
@@ -1335,13 +1343,19 @@ func (s *Store) AnchorExtract(id int64, position ir.Range, quote, contentHTML st
 // authoritative and destructive, the API's override is neither, so a write
 // here supersedes it. See migration 018 and EditAnnotation.
 func (s *Store) UpdateAnnotation(id int64, quote, note, chapter string, now time.Time) error {
+	// A note landing here is the reader having done exactly what note_pending
+	// was nudging them toward, so the nudge clears itself. Guarded on note
+	// being non-empty: saving an edit that leaves the note blank is not the
+	// same act as dismissing the nudge outright (see DismissNotePending), and
+	// should not silently do its job for it.
 	result, err := s.db.Exec(`
 		UPDATE elements SET
 		    quote = ?, note = ?, chapter = ?, edited_quote = '',
 		    content_html = CASE WHEN start_block IS NULL THEN ? ELSE content_html END,
+		    note_pending = CASE WHEN ? <> '' THEN 0 ELSE note_pending END,
 		    updated_at = ?
 		WHERE id = ? AND parent_id IS NOT NULL`,
-		quote, note, chapter, annotationHTML(quote, note), formatTime(now), id,
+		quote, note, chapter, annotationHTML(quote, note), note, formatTime(now), id,
 	)
 	if err != nil {
 		return fmt.Errorf("store: update annotation %d: %w", id, err)
