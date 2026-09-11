@@ -1,0 +1,64 @@
+[
+  {
+    "ref": "scan:p72:m0",
+    "absorbed_refs": [],
+    "page": "72",
+    "ordinal": 10072000,
+    "text": "Han Feizi (ca. 280-233 BCE) is the most renowned thinker of the Legalist school. He is the only major Warring States thinker from a noble family background, yet he argued for policies designed to destroy aristocratic families and other local centers of power that threatened to undermine unity at the top. Due to a serious stutter, he could not effectively communicate his proposals, so (luckily for us) he wrote his ideas in book form. Han Feizi was sent as an envoy from his native state of Han to the Qin state and may have tried to persuade the Qin ruler to adopt his ideas, but he was jailed by Prime Minister Li Si-another of Xunzi's students-and forced to drink poison rather than be subject to an excruciating death by torture.",
+    "note_pending": false,
+    "scan_ids": [
+      1
+    ],
+    "chapter": "Chapter 2"
+  },
+  {
+    "ref": "scan:p106:m0",
+    "absorbed_refs": [],
+    "page": "106",
+    "ordinal": 10106000,
+    "text": "They are, quite literally, the worst off of the worst off. Hence, those with power—the living—need to be trained by means of certain rituals to treat them with love and respect. It is important to adorn the corpse because, “if the corpse is not adorned, it becomes hideous, and if it is hideous, no grief will be felt.”",
+    "note_pending": true,
+    "scan_ids": [
+      2
+    ],
+    "chapter": "Chapter 2"
+  },
+  {
+    "ref": "scan:p140:m0",
+    "absorbed_refs": [
+      "scan:p141:m0"
+    ],
+    "page": "140–141",
+    "ordinal": 10140000,
+    "text": "“Humans certainly are different from the various kinds of birds, beasts, and bugs that one can find in the world today. The various birds, beasts, and bugs rely upon their feathers and fur for their clothing, their hoofs and claws for their leggings and shoes, and grass and water for their food and drink. And so even if [they] do not plow and cultivate the land and do not spin and weave, these creatures are still assured of having food and clothing. Humans differ in this respect. Those who labor upon the land survive, while those who do not, perish. If exemplary persons do not exert themselves in pursuing their duties at court, then the laws and administration will fall into chaos. If the commoners do not exert themselves in carrying out their work, there will not be enough material goods.”",
+    "note_pending": false,
+    "scan_ids": [
+      3
+    ],
+    "chapter": "Chapter 3: On the Uses of Art"
+  },
+  {
+    "ref": "scan:p157:m0",
+    "absorbed_refs": [],
+    "page": "157",
+    "ordinal": 10157000,
+    "text": "Mo: It sounds like you want to promote classical music on the supposed grounds it’s morally uplifting and to ban “vulgar and deviant” new music. In the West, archconservatives such as Allan Bloom and Roger Scruton similarly argued for more promotion of classical music and they denounced “decadent” rock music. So you want us to pay for a cultural center that promotes Bach and Mozart?\n\nYue: We need a Music Master with the ability and motivation to make fine-grained distinctions. Not all classical music from the West is good from a moral point of view: Think of Mozart’s Don Giovanni, which can be used to promote sexual exploitation of women. I’m reminded of a scene from the film Babette’s Feast: an older male French opera singer uses this music to seduce an innocent young farming woman in rural Denmark. The music may be beautiful, but the moral effects are perverse. Ideally, we should promote music that is beautiful—it brings joy to the performers and the audience—and also makes the people feel harmonious. Recall what Kongzi said about shao music: “The shao music is both superbly beautiful and superbly good. . . . Once I heard the shao music, I couldn’t appreciate the taste of meat for three months; after that, I had no idea music can reach such heights!”",
+    "note_pending": true,
+    "scan_ids": [
+      4
+    ],
+    "chapter": "Chapter 3: On the Uses of Art"
+  },
+  {
+    "ref": "scan:p169:m0",
+    "absorbed_refs": [],
+    "page": "169",
+    "ordinal": 10169000,
+    "text": "Shang Yang thought that people are selfish and naturally dislike hard agricultural work and fighting to the death on the battlefield, and they should be kept ignorant of other possibilities. The whole system should be designed so people come to see it's in their self-interest to farm and to fight: people can be molded into farmers and soldiers by means of laws backed with harsh punishments (hence the label \"Legalist\") and a reward system that provides incentives for effective farmers and soldiers.",
+    "note_pending": false,
+    "scan_ids": [
+      5
+    ],
+    "chapter": "On the Morality of Warfare"
+  }
+]

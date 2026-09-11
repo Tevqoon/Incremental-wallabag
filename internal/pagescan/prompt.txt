@@ -1,0 +1,51 @@
+You are transcribing a reader's markings from a photograph of a printed book.
+
+The photo may show one page, or an open two-page spread. It may also show the edge of a neighbouring page, the reader's fingers, or the table. Report every page that is fully (or almost fully) in frame, left to right. Ignore any page cut off by the photo's edge.
+
+Return strict JSON, no prose, in exactly this shape:
+{
+  "pages": [
+    {
+      "page_label": string or null,
+      "running_head": string or null,
+      "headings": [string],
+      "lines": [string],
+      "marks": [
+        {
+          "first_line": integer,
+          "last_line": integer,
+          "text": string,
+          "kind": "highlight" | "underline" | "bracket" | "margin_line" | "circle" | "other",
+          "has_handwriting": boolean,
+          "continues_from_previous_page": boolean,
+          "continues_to_next_page": boolean
+        }
+      ]
+    }
+  ]
+}
+
+Per page:
+- page_label: the page number printed on the page (header or footer), exactly as printed, e.g. "94" or "xii". null if none is visible. Never guess one.
+- running_head: the printed header/footer text other than the page number, exactly as printed, e.g. "CHAPTER 2" or "ON THE USES OF ART". null if none.
+- headings: every printed heading that begins on this page (a chapter title, or a numbered or bold section title), exactly as printed, top to bottom. [] if none.
+- lines: EVERY printed line of the page's main text block, top to bottom, one string per printed line, exactly as printed — including headings and speaker names, excluding the running head and page number, and excluding footnote reference numbers. Keep a hyphen that ends a line exactly as printed. Copy dashes and quotation marks exactly as printed, the same as in "text". Start a line that begins a new paragraph (indented, or a new speaker) with "¶ ". Line numbers below count from 1 in this list.
+- marks: every passage the reader marked with pen, pencil or highlighter, top to bottom. "text" is printed text only; never transcribe the reader's handwriting.
+
+first_line / last_line: the numbers (in "lines") of the first and last line the mark physically touches or spans in the margin. Look at where the mark's top and bottom ends are relative to the printed lines.
+
+Deciding what text a mark covers (this is "text"; it is built from lines first_line..last_line):
+- highlight / underline / circle: exactly the marked words, extended to whole words.
+- bracket / margin_line (a mark in the margin spanning several lines): this reader ALWAYS means whole sentences. The passage starts at the beginning of a sentence and ends at the end of a sentence. A bracket covers whole lines, so its first and last lines usually also contain a piece of a neighbouring sentence: drop a leading piece that belongs to a sentence which started ABOVE the bracket, so the passage begins with the first sentence that starts inside the bracket; drop a trailing piece of a sentence that continues BELOW the bracket, so the passage ends with the last sentence that ends inside it.
+- The one exception is a page edge: if the bracket reaches the very top of the page and the text there is the middle of a sentence from the previous page, keep it and set continues_from_previous_page true. If it reaches the very bottom and its last sentence runs onto the next page, keep it and set continues_to_next_page true.
+- Two separate marks are two entries. One mark is one entry even if it spans many lines.
+
+Transcribing "text":
+- Copy the printed words exactly: same spelling, capitalisation and punctuation, including curly quotation marks, apostrophes, brackets and ellipses. Copy dashes as printed: an em dash "—" is not a hyphen "-", and a number range uses an en dash "–". Do not paraphrase, summarise, correct or modernise.
+- Join words hyphenated only because of a line break ("educa-" + "tion" -> "education"). Keep hyphens that belong to the word itself ("long-" + "term" -> "long-term").
+- Remove footnote reference numbers (small superscript digits or symbols after words or punctuation).
+- Separate paragraphs, including each new speaker in a dialogue, with a blank line ("\\n\\n"). Otherwise single spaces, no line breaks, no markdown.
+
+"has_handwriting": true if the reader wrote words or symbols (a comment, "!", "?", a star) in the margin or between the lines next to this passage; false otherwise. The bracket, line or highlight itself does not count. Do not try to read the handwriting. Handwriting that is not next to any mark becomes its own entry with "text": "", kind "other" and has_handwriting true.
+
+A page with no reader markings still gets an entry, with "marks": [].

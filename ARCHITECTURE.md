@@ -79,6 +79,15 @@ Dependency direction is strictly downward — no leaf package reaches up into
   `internal/web/proofread.go` decides what to send and what to do with the
   answer, and nothing is written to the store until the reader approves a
   suggestion on the review page it renders.
+- `internal/pagescan` — dependency-free leaf: a vision-model client
+  (OpenRouter, `google/gemini-3.8-flash` at "low" reasoning effort, with a
+  hard `max_tokens` cap against a cheaper model's one observed 63k-token
+  thinking runaway) that sends a photo of a marked book page and gets back
+  every printed line, numbered, plus the line range each margin mark
+  covers. The model only transcribes and ranges; sentence-boundary
+  snapping, cross-page joining, retake de-duplication and chapter grouping
+  from running heads are pure Go in `Assemble`, golden-tested against real
+  scans and hand-read ground truth rather than trusted to the model.
 - `internal/web` — stdlib `http.ServeMux` (Go 1.22 method+path patterns, no
   router dependency), `html/template` parsed once from an `embed.FS`, htmx
   for partial swaps. Handlers split across `server.go`, `queue.go`
