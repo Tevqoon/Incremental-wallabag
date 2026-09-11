@@ -201,6 +201,14 @@ func (w *Worker) Drain(ctx context.Context) error {
 			return nil
 		}
 
+		// Pass the wake on. An upload calls Wake once, and the one-slot
+		// channel wakes exactly one idle goroutine — which would then read
+		// the whole batch alone while the others slept until the next poll.
+		// Each successful claim nudges the next idle goroutine, so a batch
+		// fans out to Concurrency readers; a goroutine woken with nothing
+		// left to claim simply goes back to waiting.
+		w.Wake()
+
 		if delay := w.processClaimedScan(ctx, scan, image); delay > 0 {
 			select {
 			case <-ctx.Done():

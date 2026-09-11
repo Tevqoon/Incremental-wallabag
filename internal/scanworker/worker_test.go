@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -621,5 +622,82 @@ func TestReassembleAfterHandCorrectedLabel(t *testing.T) {
 	}
 	if annotations[0].ExternalRef != "scan:p42:m0" {
 		t.Errorf("ExternalRef = %q, want %q", annotations[0].ExternalRef, "scan:p42:m0")
+	}
+}
+
+// TestRunFansOneWakeOutToSeveralReaders reproduces what an upload does in
+// production: every goroutine is already idle, the batch arrives, and Wake
+// is called exactly once. The one-slot wake channel only ever wakes one
+// goroutine, so without passing the wake on after each claim that goroutine
+// read the whole batch alone — found in a live run, where five photos were
+// read strictly one after another despite Concurrency 3.
+func TestRunFansOneWakeOutToSeveralReaders(t *testing.T) {
+	db := testStore(t)
+	canned := newFakeReader(loadCannedResponses(t))
+
+	var inFlight, maxInFlight atomic.Int32
+	reader := funcReader(func(ctx context.Context, image []byte, contentType string) (string, error) {
+		now := inFlight.Add(1)
+		defer inFlight.Add(-1)
+		for {
+			seen := maxInFlight.Load()
+			if now <= seen || maxInFlight.CompareAndSwap(seen, now) {
+				break
+			}
+		}
+		// Long enough for the other goroutines to be woken and claim
+		// their own scans while this read is still in progress.
+		time.Sleep(100 * time.Millisecond)
+		return canned.ReadPage(ctx, image, contentType)
+	})
+
+	w := New(db, reader, testLogger(), Options{
+		Concurrency: 3,
+		RetryDelay:  time.Millisecond,
+		// No poll during the test: only Wake may start work, as after an
+		// upload.
+		PollInterval: time.Hour,
+	})
+
+	documentID, err := db.CreateScannedBook("Test Book", "Test Author", "", time.Now())
+	if err != nil {
+		t.Fatalf("CreateScannedBook: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan struct{})
+	go func() {
+		w.Run(ctx)
+		close(runDone)
+	}()
+	defer func() {
+		cancel()
+		<-runDone
+	}()
+
+	// Let every goroutine finish its start-up drain of an empty queue and
+	// go idle before anything is uploaded.
+	time.Sleep(50 * time.Millisecond)
+
+	addAllTestdataScans(t, db, documentID)
+	w.Wake()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		counts, err := db.CountPageScans(documentID)
+		if err != nil {
+			t.Fatalf("CountPageScans: %v", err)
+		}
+		if counts.Done == 5 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for all scans to finish, last counts: %+v", counts)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if got := maxInFlight.Load(); got < 2 {
+		t.Errorf("at most %d read in flight at once; a single Wake should fan out to several readers", got)
 	}
 }
