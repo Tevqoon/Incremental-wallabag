@@ -88,6 +88,10 @@ Dependency direction is strictly downward — no leaf package reaches up into
   snapping, cross-page joining, retake de-duplication and chapter grouping
   from running heads are pure Go in `Assemble`, golden-tested against real
   scans and hand-read ground truth rather than trusted to the model.
+- `internal/scanworker` — the background reader above store + pagescan, run
+  as a goroutine from main.go next to the syncer; claims scans from the
+  page_scans table, N at a time, one mutex around assembly so split passages
+  always join; resumes after a restart by resetting in-flight scans.
 - `internal/web` — stdlib `http.ServeMux` (Go 1.22 method+path patterns, no
   router dependency), `html/template` parsed once from an `embed.FS`, htmx
   for partial swaps. Handlers split across `server.go`, `queue.go`

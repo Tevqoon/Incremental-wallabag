@@ -138,3 +138,12 @@ sources:
 #
 #   # base_url: https://openrouter.ai/api/v1
 #   # model: deepseek/deepseek-chat
+#
+#   # vision_model and vision_effort choose the model that drives the
+#   # "photos of a paper book" importer (internal/pagescan), offered
+#   # whenever api_key above is set. Left unset, low effort on the default
+#   # model is used — that combination matched the default's accuracy on
+#   # real scanned pages at under half the cost and time of the model's own
+#   # default reasoning effort.
+#   # vision_model: google/gemini-3.8-flash
+#   # vision_effort: low

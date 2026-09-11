@@ -114,6 +114,14 @@ type LLM struct {
 	// respectively when left empty — see proofread.NewClient.
 	BaseURL string `yaml:"base_url"`
 	Model   string `yaml:"model"`
+
+	// VisionModel and VisionEffort choose the model that reads photographed
+	// book pages (internal/pagescan). Empty uses pagescan's own defaults
+	// (google/gemini-3.8-flash at "low" reasoning effort). They share APIKey
+	// and BaseURL with the proofreading model above, since both go through
+	// OpenRouter.
+	VisionModel  string `yaml:"vision_model"`
+	VisionEffort string `yaml:"vision_effort"`
 }
 
 // Enabled reports whether enough is configured to call the LLM at all.
@@ -260,6 +268,13 @@ func Load(path string) (Config, error) {
 	}
 	if config.Database == "" {
 		return Config{}, fmt.Errorf("config: database path is required")
+	}
+	switch config.LLM.VisionEffort {
+	case "", "none", "minimal", "low", "medium", "high":
+	default:
+		return Config{}, fmt.Errorf(
+			"config: llm.vision_effort must be one of none, minimal, low, medium, high, got %q",
+			config.LLM.VisionEffort)
 	}
 
 	// A Host with no SessionCookie is not "not configured" — it is

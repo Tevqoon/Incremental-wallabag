@@ -188,3 +188,50 @@ func TestIngestSubstackNotConfiguredIsDisabled(t *testing.T) {
 		t.Error("Enabled() = true with no ingest.substack block at all")
 	}
 }
+
+// TestLLMVisionSettingsAreRead: vision_model and vision_effort are read
+// independently of the proofreading model/base_url, since scanworker (the
+// book-photo importer) and internal/proofread share only the account.
+func TestLLMVisionSettingsAreRead(t *testing.T) {
+	body := minimal + `
+llm:
+  api_key: test-key
+  vision_model: google/gemini-3.8-flash
+  vision_effort: medium
+`
+	config, err := Load(write(t, body))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if config.LLM.VisionModel != "google/gemini-3.8-flash" {
+		t.Errorf("VisionModel = %q, want %q", config.LLM.VisionModel, "google/gemini-3.8-flash")
+	}
+	if config.LLM.VisionEffort != "medium" {
+		t.Errorf("VisionEffort = %q, want %q", config.LLM.VisionEffort, "medium")
+	}
+}
+
+// TestLLMVisionEffortDefaultsToEmpty: an unset vision_effort must load
+// cleanly and stay empty, so pagescan.NewClient falls back to its own
+// default ("low") rather than this package inventing a second copy of it.
+func TestLLMVisionEffortDefaultsToEmpty(t *testing.T) {
+	config, err := Load(write(t, minimal))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if config.LLM.VisionEffort != "" {
+		t.Errorf("VisionEffort = %q, want \"\" (pagescan's own default applies)", config.LLM.VisionEffort)
+	}
+}
+
+// TestLLMVisionEffortRejectsUnknownValue: a typo here would otherwise reach
+// OpenRouter as a silently-ignored or rejected reasoning.effort value.
+func TestLLMVisionEffortRejectsUnknownValue(t *testing.T) {
+	_, err := Load(write(t, minimal+"llm:\n  vision_effort: extreme\n"))
+	if err == nil {
+		t.Fatal("Load accepted an unknown llm.vision_effort")
+	}
+	if !strings.Contains(err.Error(), "vision_effort") {
+		t.Errorf("error does not name the bad setting: %v", err)
+	}
+}
