@@ -194,3 +194,15 @@ func TestSniffImageTypeUnrecognisedAndUndeclaredRejected(t *testing.T) {
 		t.Error("expected ok=false for unrecognised bytes with no usable declared type")
 	}
 }
+
+func TestPagesCarriesTheFirstPrintedLine(t *testing.T) {
+	pages := Pages([]Scan{{ID: 3, Result: Result{Pages: []Page{{
+		Lines: []string{"  ", "¶ current anticorruption   campaign seems", "inspired by"},
+	}}}}})
+	if len(pages) != 1 {
+		t.Fatalf("got %d pages, want 1", len(pages))
+	}
+	if want := "current anticorruption campaign seems"; pages[0].FirstLine != want {
+		t.Errorf("FirstLine: got %q, want %q", pages[0].FirstLine, want)
+	}
+}

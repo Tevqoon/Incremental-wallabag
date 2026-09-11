@@ -103,6 +103,11 @@ type PageInfo struct {
 	RunningHead string
 	Headings    []string
 	MarkCount   int
+
+	// FirstLine is the page's first printed line, without the paragraph
+	// mark — how the reader finds, in the book in front of them, a page the
+	// model could not number. The photo itself is not kept.
+	FirstLine string
 }
 
 // codeFence strips a ```json ... ``` wrapper some models add despite being
@@ -187,7 +192,20 @@ func Pages(scans []Scan) []PageInfo {
 			RunningHead: p.page.RunningHead,
 			Headings:    p.page.Headings,
 			MarkCount:   len(p.page.Marks),
+			FirstLine:   firstPrintedLine(p.page.Lines),
 		}
 	}
 	return out
+}
+
+// firstPrintedLine is the first non-empty transcribed line of a page, with
+// the model's paragraph mark stripped and whitespace collapsed.
+func firstPrintedLine(lines []string) string {
+	for _, line := range lines {
+		text := collapseWhitespace(strings.TrimLeft(strings.TrimSpace(line), paragraphMark))
+		if text != "" {
+			return text
+		}
+	}
+	return ""
 }

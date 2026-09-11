@@ -295,7 +295,7 @@ func TestResetProcessingScans(t *testing.T) {
 	}
 }
 
-func TestRetryPageScanFromFailedAndDone(t *testing.T) {
+func TestRetryPageScanOnlyFromFailed(t *testing.T) {
 	db := testStore(t)
 	now := time.Now()
 	docID, err := db.CreateScannedBook("Retry Book", "", "", now)
@@ -325,21 +325,42 @@ func TestRetryPageScanFromFailedAndDone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddPageScan: %v", err)
 	}
-	if err := db.CompletePageScan(doneID, `{"page":"12"}`, now); err != nil {
+	if err := db.CompletePageScan(doneID, `{"pages":[]}`, now); err != nil {
 		t.Fatalf("CompletePageScan: %v", err)
 	}
-	// done is a legitimate source state too: a re-read is also how the
-	// reader asks the model to try again on a page it technically finished
-	// but misread.
-	if err := db.RetryPageScan(doneID, now); err != nil {
-		t.Fatalf("RetryPageScan (done): %v", err)
+	// A read photo has been discarded, so there is nothing left to send.
+	if err := db.RetryPageScan(doneID, now); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("RetryPageScan (done): err = %v, want ErrNotFound", err)
 	}
-	scan, err = db.PageScan(doneID)
+}
+
+func TestCompletePageScanDiscardsThePhoto(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+	docID, err := db.CreateScannedBook("Discard Book", "", "", now)
+	if err != nil {
+		t.Fatalf("CreateScannedBook: %v", err)
+	}
+	id, err := db.AddPageScan(docID, "a.jpg", "image/jpeg", []byte("several megabytes of photo"), true, now)
+	if err != nil {
+		t.Fatalf("AddPageScan: %v", err)
+	}
+	if err := db.CompletePageScan(id, `{"pages":[]}`, now); err != nil {
+		t.Fatalf("CompletePageScan: %v", err)
+	}
+	_, _, data, err := db.PageScanImage(id)
+	if err != nil {
+		t.Fatalf("PageScanImage: %v", err)
+	}
+	if len(data) != 0 {
+		t.Errorf("a read photo still holds %d bytes; it should be discarded", len(data))
+	}
+	scan, err := db.PageScan(id)
 	if err != nil {
 		t.Fatalf("PageScan: %v", err)
 	}
-	if scan.Status != ScanPending {
-		t.Errorf("after retry from done: status = %q, want pending", scan.Status)
+	if scan.Status != ScanDone || scan.Result != `{"pages":[]}` {
+		t.Errorf("the model's answer must survive the photo: %+v", scan)
 	}
 }
 

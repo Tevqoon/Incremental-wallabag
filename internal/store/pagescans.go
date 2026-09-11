@@ -262,10 +262,15 @@ func (s *Store) ClaimPageScan(now time.Time) (PageScan, []byte, bool, error) {
 	return scan, image, ok, nil
 }
 
-// CompletePageScan records the model's answer and clears any earlier error.
+// CompletePageScan records the model's answer, clears any earlier error, and
+// discards the photo. Once the model has answered nothing needs the image:
+// the reader types margin notes in with the book itself in front of them,
+// and a re-read would need a new photo anyway. Blanking the column rather
+// than keeping several megabytes per page is the point — a failed or
+// pending scan keeps its photo, because its retry is what needs it.
 func (s *Store) CompletePageScan(id int64, result string, now time.Time) error {
 	outcome, err := s.db.Exec(`
-		UPDATE page_scans SET status = ?, result = ?, error = '', updated_at = ?
+		UPDATE page_scans SET status = ?, result = ?, error = '', image = x'', updated_at = ?
 		WHERE id = ?`,
 		ScanDone, result, formatTime(now), id,
 	)
@@ -319,15 +324,16 @@ func (s *Store) ResetProcessingScans(now time.Time) (int, error) {
 	return int(n), nil
 }
 
-// RetryPageScan asks for a scan to be read again: failed or done, back to
-// pending, attempts and error cleared. done is allowed as a source state, not
-// just failed, because a re-read is also how the reader asks the model to
-// try again on a page it technically finished but misread.
+// RetryPageScan asks for a failed scan to be read again: back to pending,
+// attempts and error cleared. Only a failed scan qualifies — a done one has
+// had its photo discarded (see CompletePageScan), so there is nothing left to
+// send; a misread page is re-photographed instead, and the new photo replaces
+// the old one's reading. ErrNotFound for anything else.
 func (s *Store) RetryPageScan(id int64, now time.Time) error {
 	outcome, err := s.db.Exec(`
 		UPDATE page_scans SET status = ?, attempts = 0, error = '', updated_at = ?
-		WHERE id = ? AND status IN (?, ?)`,
-		ScanPending, formatTime(now), id, ScanFailed, ScanDone,
+		WHERE id = ? AND status = ? AND length(image) > 0`,
+		ScanPending, formatTime(now), id, ScanFailed,
 	)
 	if err != nil {
 		return fmt.Errorf("store: retry page scan %d: %w", id, err)
@@ -372,8 +378,9 @@ func (s *Store) PageScans(documentID int64) ([]PageScan, error) {
 }
 
 // PageScanImage reads back one photo's bytes — the one query in this file
-// allowed to select image, for the one caller that actually needs it (the
-// worker, and the reader's own review page).
+// allowed to select image, for the callers that actually need it (the
+// worker, and the thumbnail of a failed photo). A scan that has been read
+// has no photo left, and comes back with empty data.
 func (s *Store) PageScanImage(id int64) (documentID int64, contentType string, data []byte, err error) {
 	err = s.db.QueryRow(`SELECT document_id, content_type, image FROM page_scans WHERE id = ?`, id).
 		Scan(&documentID, &contentType, &data)

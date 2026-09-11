@@ -843,3 +843,24 @@ func TestScansProgressFragment(t *testing.T) {
 		t.Errorf("the finished fragment does not offer to reload:\n%s", done.Body.String())
 	}
 }
+
+func TestScanImageIsGoneOnceThePhotoHasBeenRead(t *testing.T) {
+	server, db, _ := newTestServerWithScans(t)
+
+	response := postPhotos(t, server, "/import/photos",
+		[]photoFile{{filename: "a.png", data: tinyPNG(t)}}, url.Values{"title": {"Read Book"}})
+	id := documentIDFromScansRedirect(t, response)
+	scans, err := db.PageScans(id)
+	if err != nil {
+		t.Fatalf("PageScans: %v", err)
+	}
+	scanID := scans[0].ID
+	if err := db.CompletePageScan(scanID, `{"pages":[]}`, time.Now()); err != nil {
+		t.Fatalf("CompletePageScan: %v", err)
+	}
+
+	img := get(t, server, "/documents/"+strconv.FormatInt(id, 10)+"/scans/"+strconv.FormatInt(scanID, 10)+"/image")
+	if img.Code != http.StatusNotFound {
+		t.Errorf("status %d, want 404: a read photo is discarded, not served empty", img.Code)
+	}
+}

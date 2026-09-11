@@ -192,6 +192,12 @@ func (s *Server) handleScanImage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
+	// A photo is discarded once the model has read it (see
+	// Store.CompletePageScan); only a pending or failed one still has bytes.
+	if len(data) == 0 {
+		http.Error(w, "that photo has been read and is no longer kept", http.StatusNotFound)
+		return
+	}
 
 	// The image never changes once uploaded, so a day's caching costs
 	// nothing and saves re-sending a multi-megabyte photo on every reload of
@@ -201,8 +207,8 @@ func (s *Server) handleScanImage(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
-// handleRetryScan asks the worker to read one photo again — a failed one,
-// or a done one the model misread.
+// handleRetryScan asks the worker to read a failed photo again. A photo that
+// was read has been discarded, so a misread page is re-photographed instead.
 func (s *Server) handleRetryScan(w http.ResponseWriter, r *http.Request) {
 	documentID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
@@ -436,21 +442,15 @@ type documentScanData struct {
 	PhotosEnabled bool
 }
 
-// marginNoteRow is one passage awaiting a hand-typed margin note, with the
-// photo it came from — see scanDataForDocument.
+// marginNoteRow is one passage awaiting a hand-typed margin note — see
+// scanDataForDocument. There is no photo to show beside it: a photo is
+// discarded once read, and the note is typed from the book itself, found by
+// the passage's page number.
 type marginNoteRow struct {
 	store.ExtractRow
 
 	// Summary is the passage, truncated for the list — see SummariseQuote.
 	Summary string
-
-	// ScanID is the photo this passage's own page came from, and HasScan
-	// reports whether one was actually found: an annotation's Page can, in
-	// principle, name a page no longer among the document's scans (one
-	// deleted after the passage was made), and the thumbnail is simply
-	// omitted rather than pointing at nothing.
-	ScanID  int64
-	HasScan bool
 }
 
 // scanDataForDocument gathers everything the contents page shows about a
@@ -493,12 +493,9 @@ func (s *Server) scanDataForDocument(documentID int64, annotations []store.Extra
 		if !annotation.NotePending {
 			continue
 		}
-		scanID, ok := scanForPage(pages, annotation.Page)
 		notes = append(notes, marginNoteRow{
 			ExtractRow: annotation,
 			Summary:    store.SummariseQuote(annotation.DisplayQuote()),
-			ScanID:     scanID,
-			HasScan:    ok,
 		})
 	}
 
@@ -513,22 +510,7 @@ func (s *Server) scanDataForDocument(documentID int64, annotations []store.Extra
 	}, nil
 }
 
-// scanForPage finds which photo holds a passage's own page. page is the
-// passage's own Page field, "140" or a joined "140–141" for one that
-// straddled two photos — split on the dash, since the margin note (if any)
-// was written on the photo of wherever the passage starts.
-func scanForPage(pages []pagescan.PageInfo, page string) (int64, bool) {
-	label, _, _ := strings.Cut(page, "–")
-	for _, p := range pages {
-		if p.Label == label {
-			return p.ScanID, true
-		}
-	}
-	return 0, false
-}
-
-// handleMarginNote saves a margin note typed in by hand while looking at a
-// passage's own photo.
+// handleMarginNote saves a margin note typed in by hand from the book.
 //
 // Goes through EditAnnotation rather than UpdateAnnotation deliberately:
 // UpdateAnnotation rewrites quote wholesale (and clears edited_quote), which

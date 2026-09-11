@@ -267,10 +267,13 @@ from later photos of it.
 
 Handwriting is deliberately **not** read; a misread margin note is worse than
 none. A passage with writing beside it is flagged instead, and the book's page
-lists those under **Margin notes to type in**, each next to its photo. The same
-page shows which photos are still being read, retries failed ones, asks for the
-page number where the model could not see one, and takes more photos for the
-same book, since a book is read in stages. Re-photographing a page replaces the
+lists those under **Margin notes to type in**, each with its page number and a
+box to type the note into from the book in front of you. Photos are not kept:
+each is discarded as soon as it has been read, and only a failed one waits
+around for its retry. The same page shows which photos are still being read,
+retries failed ones, asks for the page number where the model could not see
+one (showing that page's first line, so you can find it), and takes more
+photos for the same book, since a book is read in stages. Re-photographing a page replaces the
 earlier reading of it; a passage you deleted or corrected by hand is never
 brought back or overwritten by photos of other pages.
 

@@ -129,13 +129,14 @@
       {{end}}
 
       {{if .UnnumberedPages}}
-        <p class="meta">The model could not read a page number on these — type it in by hand:</p>
+        <p class="meta">The model could not read a page number on these — find the page by its first line and type the number in:</p>
         <ul class="scan-unnumbered">
           {{range .UnnumberedPages}}
             <li class="scan-unnumbered-row">
-              <a href="/documents/{{$.Document.ID}}/scans/{{.ScanID}}/image" target="_blank" rel="noopener noreferrer">
-                <img class="scan-thumb" loading="lazy" alt="" src="/documents/{{$.Document.ID}}/scans/{{.ScanID}}/image">
-              </a>
+              <div class="item-body">
+                {{if .FirstLine}}<p class="item-title">“{{.FirstLine}}…”</p>{{end}}
+                {{if .RunningHead}}<p class="meta">{{.RunningHead}}</p>{{end}}
+              </div>
               <form method="post" action="/documents/{{$.Document.ID}}/scans/{{.ScanID}}/label">
                 <input type="hidden" name="page" value="{{.PageIndex}}">
                 <input type="text" name="label" placeholder="page number" class="tiny">
@@ -184,11 +185,6 @@
               <div class="item-meta">
                 {{if .Page}}<span class="badge">p. {{.Page}}</span>{{end}}
               </div>
-              {{if .HasScan}}
-                <a href="/documents/{{$.Document.ID}}/scans/{{.ScanID}}/image" target="_blank" rel="noopener noreferrer">
-                  <img class="scan-thumb" loading="lazy" alt="" src="/documents/{{$.Document.ID}}/scans/{{.ScanID}}/image">
-                </a>
-              {{end}}
               <form method="post" action="/elements/{{.ID}}/margin-note">
                 <textarea name="note" rows="2" placeholder="type the note from the margin">{{.Note}}</textarea>
                 <button type="submit" class="tiny">Save</button>

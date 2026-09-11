@@ -1,13 +1,12 @@
 -- Page scans: photos of a paper book's marked pages, on their way to becoming
 -- imported annotations of that book's document.
 --
--- The photo itself is kept, not just whatever text a vision model recovers
--- from it. The reader writes margin notes by hand while looking at the
--- photo afterward — the model is deliberately never asked to read
--- handwriting, both because that is a much harder problem than reading
--- printed text and because a misread note is worse than no note at all. So
--- the photo has to survive the model's pass and stay around for the reader
--- to look at while they type.
+-- The photo is kept only until it has been read. A failed read needs it for
+-- the retry; once the model has answered it is discarded (image set to an
+-- empty blob by CompletePageScan). The reader types margin notes in with the
+-- book itself in front of them — the model is deliberately never asked to
+-- read handwriting, only to flag that there is some, because a misread note
+-- is worse than no note at all.
 --
 -- image lives on this table rather than in document_images: it is not an
 -- article image (nothing in the article body ever references it) and it is
