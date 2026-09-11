@@ -17,6 +17,7 @@ START = re.compile(TERMINAL + r'\s+(?=["“‘(\[]?[A-Z])')
 SMALL = {"a", "an", "and", "as", "at", "but", "by", "for", "from", "in", "nor",
          "of", "on", "or", "the", "to", "via", "vs", "with"}
 ROMAN = {"i": 1, "v": 5, "x": 10, "l": 50, "c": 100, "d": 500, "m": 1000}
+EXACT_KINDS = {"highlight", "underline", "circle"}
 CHAPTER_HEAD = re.compile(r'^chapter\s+(\S+)$', re.I)
 
 
@@ -90,10 +91,33 @@ def fragment(page, mark, index):
     l = max(1, min(int(mark["last_line"]), n)) - 1
     if l < f:
         f, l = l, f
+    # Heading lines are never part of a passage; a mark covering only
+    # headings (a bracket's tick beside a section title) is no passage.
+    headings = {" ".join(h.split()) for h in page.get("headings") or [] if h.strip()}
+    while f <= l and " ".join(lines[f].split()) in headings:
+        f += 1
+    while l >= f and " ".join(lines[l].split()) in headings:
+        l -= 1
+    if f > l:
+        return None
+    # Highlights, underlines and circles cover exactly their words: use the
+    # model's own text, with no sentence snapping and no page-turn joining.
+    if mark.get("kind") in EXACT_KINDS and (mark.get("text") or "").strip():
+        return {
+            "text": " ".join(mark["text"].split()),
+            "starts_mid": False,
+            "ends_mid": False,
+            "at_top": f == 0,
+            "at_bottom": l == n - 1,
+            "has_handwriting": bool(mark.get("has_handwriting")),
+            "model_text": mark.get("text") or "",
+            "index": index,
+        }
     text = lines[f]
     for i in range(f + 1, l + 1):
         text = text + "\n\n" + lines[i] if paras[i] else glue(text, lines[i], mark.get("text"))
-    starts_clean = paras[f] or (f > 0 and ends_sentence(lines[f - 1])) or (f == 0 and lines[0][:1].isupper())
+    starts_clean = (paras[f] or (f > 0 and (ends_sentence(lines[f - 1]) or " ".join(lines[f - 1].split()) in headings))
+                    or (f == 0 and lines[0][:1].isupper()))
     return {
         "text": text,
         "starts_mid": not starts_clean,
@@ -198,7 +222,9 @@ def assemble(paths, existing=None):
         for i, mark in enumerate(p["page"].get("marks") or []):
             if not isinstance(mark.get("first_line"), int) or not p["page"].get("lines"):
                 continue
-            frags.append((p, fragment(p["page"], mark, i)))
+            fr = fragment(p["page"], mark, i)
+            if fr is not None:
+                frags.append((p, fr))
 
     passages, consumed = [], set()
     for k, (p, fr) in enumerate(frags):

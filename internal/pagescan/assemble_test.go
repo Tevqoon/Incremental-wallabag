@@ -546,3 +546,85 @@ func TestPagesUnlabelledUsesScanPrefix(t *testing.T) {
 		t.Errorf("RefPrefix: got %q, want scan:s9.0", infos[0].RefPrefix)
 	}
 }
+
+func TestAssembleHeadingLinesAreNeverAPassage(t *testing.T) {
+	scans := []Scan{
+		{ID: 1, Result: Result{Pages: []Page{{
+			Label:    "72",
+			Headings: []string{"1. Han Feizi on Law"},
+			Lines: []string{
+				"corruption.",
+				"1. Han Feizi on Law",
+				"Han Feizi was a thinker. He wrote his ideas",
+				"in book form. Han Feizi argued",
+			},
+			Marks: []Mark{
+				// The bracket's top tick beside the heading, reported alone.
+				mark(2, 2, "1."),
+				// The bracket itself, with the heading counted into it.
+				mark(2, 4, "Han Feizi was a thinker. He wrote his ideas in book form."),
+			},
+		}}}},
+	}
+	got := Assemble(scans, nil)
+	if len(got) != 1 {
+		t.Fatalf("got %d passages, want 1 (a heading-only mark is not a passage)", len(got))
+	}
+	if got[0].Ref != "scan:p72:m1" {
+		t.Errorf("Ref: got %q, want scan:p72:m1", got[0].Ref)
+	}
+	want := "Han Feizi was a thinker. He wrote his ideas in book form."
+	if got[0].Text != want {
+		t.Errorf("Text: got %q, want %q (heading dropped, body after it starts a sentence)", got[0].Text, want)
+	}
+}
+
+func TestAssembleHighlightIsExactlyTheMarkedWords(t *testing.T) {
+	scans := []Scan{
+		{ID: 1, Result: Result{Pages: []Page{{
+			Label: "80",
+			Lines: []string{
+				"fear of harm, and the state should reward people for doing",
+				"what's good for the state and ruthlessly punish those who harm",
+			},
+			Marks: []Mark{{
+				FirstLine: 1, LastLine: 2, Kind: "underline",
+				Text: "reward people for doing  what's good for the state",
+			}},
+		}}}},
+	}
+	got := Assemble(scans, nil)
+	if len(got) != 1 {
+		t.Fatalf("got %d passages, want 1", len(got))
+	}
+	want := "reward people for doing what's good for the state"
+	if got[0].Text != want {
+		t.Errorf("Text: got %q, want %q (an underline is its words, not whole sentences)", got[0].Text, want)
+	}
+}
+
+// TestAssembleHeadingTickRegression replays a real model response in which
+// the bracket's top tick beside "1. Han Feizi on Law" came back as a mark of
+// its own. Before heading lines were excluded from a mark's range it was
+// imported as a passage reading "1.".
+func TestAssembleHeadingTickRegression(t *testing.T) {
+	raw, err := os.ReadFile("testdata/regress/IMG_6519_heading_tick.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := ParseResult(string(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := Assemble([]Scan{{ID: 1, Result: result}}, nil)
+	if len(got) != 1 {
+		for _, p := range got {
+			t.Logf("passage %s: %q", p.Ref, p.Text)
+		}
+		t.Fatalf("got %d passages, want 1", len(got))
+	}
+	const prefix = "Han Feizi (ca. 280"
+	if len(got[0].Text) < len(prefix) || got[0].Text[:len(prefix)] != prefix {
+		t.Errorf("Text: got %q, want it to start with %q", got[0].Text, prefix)
+	}
+}

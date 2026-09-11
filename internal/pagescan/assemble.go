@@ -560,7 +560,7 @@ type fragment struct {
 // actual line count (a model can report a range slightly off, or
 // back-to-front), plus whether the fragment's own first/last line already
 // reads as a clean sentence boundary.
-func buildFragment(pageIdx int, page Page, mark Mark, index int) fragment {
+func buildFragment(pageIdx int, page Page, mark Mark, index int) (fragment, bool) {
 	n := len(page.Lines)
 	isPara := make([]bool, n)
 	lines := make([]string, n)
@@ -576,6 +576,42 @@ func buildFragment(pageIdx int, page Page, mark Mark, index int) fragment {
 		f, l = l, f
 	}
 
+	// A bracket's top tick often sits level with a section heading, and the
+	// model then sometimes counts the heading into the range, or reports the
+	// tick as a mark of its own. A heading is never part of a passage, so
+	// heading lines are dropped from either end of the range, and a mark
+	// that covered nothing else is no passage at all. Left in, "1. Han Feizi
+	// on Law" was trimmed to its last "sentence end" and imported as "1.".
+	headings := headingSet(page.Headings)
+	for f <= l && headings[collapseWhitespace(lines[f])] {
+		f++
+	}
+	for l >= f && headings[collapseWhitespace(lines[l])] {
+		l--
+	}
+	if f > l {
+		return fragment{}, false
+	}
+
+	// A highlight, underline or circle covers exactly the words it covers,
+	// which only the model's own reading of the passage records — lines
+	// are whole lines. So for those the model's text is the passage, and
+	// the sentence snapping and page-turn joining below, which exist for a
+	// bracket's whole-sentence meaning, do not apply.
+	if exactKinds[mark.Kind] {
+		if text := collapseWhitespace(mark.Text); text != "" {
+			return fragment{
+				pageIdx:        pageIdx,
+				index:          index,
+				text:           text,
+				atTop:          f == 0,
+				atBottom:       l == n-1,
+				hasHandwriting: mark.HasHandwriting,
+				modelText:      mark.Text,
+			}, true
+		}
+	}
+
 	text := lines[f]
 	for i := f + 1; i <= l; i++ {
 		if isPara[i] {
@@ -585,7 +621,11 @@ func buildFragment(pageIdx int, page Page, mark Mark, index int) fragment {
 		}
 	}
 
-	startsClean := isPara[f] || (f > 0 && endsSentence(lines[f-1])) || (f == 0 && firstRuneUpper(lines[0]))
+	// A line straight after a heading begins a sentence even when the model
+	// did not mark it as a new paragraph.
+	startsClean := isPara[f] ||
+		(f > 0 && (endsSentence(lines[f-1]) || headings[collapseWhitespace(lines[f-1])])) ||
+		(f == 0 && firstRuneUpper(lines[0]))
 	return fragment{
 		pageIdx:        pageIdx,
 		index:          index,
@@ -596,7 +636,23 @@ func buildFragment(pageIdx int, page Page, mark Mark, index int) fragment {
 		atBottom:       l == n-1,
 		hasHandwriting: mark.HasHandwriting,
 		modelText:      mark.Text,
+	}, true
+}
+
+// exactKinds are the mark kinds that cover exactly the words they touch,
+// rather than whole sentences the way a margin bracket or line does.
+var exactKinds = map[string]bool{"highlight": true, "underline": true, "circle": true}
+
+// headingSet collects a page's headings, whitespace-collapsed, for comparing
+// against its lines.
+func headingSet(headings []string) map[string]bool {
+	set := make(map[string]bool, len(headings))
+	for _, heading := range headings {
+		if squashed := collapseWhitespace(heading); squashed != "" {
+			set[squashed] = true
+		}
 	}
+	return set
 }
 
 func clampLine(v, n int) int {
@@ -631,7 +687,11 @@ func gatherFragments(pages []orderedPage) []fragment {
 			if mark.FirstLine == 0 || mark.LastLine == 0 {
 				continue
 			}
-			frags = append(frags, buildFragment(i, p.page, mark, markIdx))
+			frag, ok := buildFragment(i, p.page, mark, markIdx)
+			if !ok {
+				continue
+			}
+			frags = append(frags, frag)
 		}
 	}
 	return frags

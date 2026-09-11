@@ -1,0 +1,63 @@
+{
+  "pages": [
+    {
+      "page_label": "72",
+      "running_head": "CHAPTER 2",
+      "headings": [
+        "1. Han Feizi on Law"
+      ],
+      "lines": [
+        "current anticorruption campaign seems to have been mainly",
+        "inspired by Legalist ideas, then move on to Xunzi's criticisms",
+        "of harsh Legalism and defense of ritual as a way of combatting",
+        "corruption.",
+        "1. Han Feizi on Law",
+        "¶ Han Feizi (ca. 280–233 BCE) is the most renowned thinker of",
+        "the Legalist school. He is the only major Warring States thinker",
+        "from a noble family background, yet he argued for policies de-",
+        "signed to destroy aristocratic families and other local centers of",
+        "power that threatened to undermine unity at the top. Due to a",
+        "serious stutter, he could not effectively communicate his pro-",
+        "posals, so (luckily for us) he wrote his ideas in book form. Han",
+        "Feizi was sent as an envoy from his native state of Han to the",
+        "Qin state and may have tried to persuade the Qin ruler to adopt",
+        "his ideas, but he was jailed by Prime Minister Li Si—another of",
+        "Xunzi's students—and forced to drink poison rather than be",
+        "subject to an excruciating death by torture. Han Feizi argued",
+        "that the end of politics is to make the state into a strong eco-",
+        "nomic and military power, particularly in a time of constant",
+        "warfare when states faced a choice between survival and de-",
+        "struction. Whatever works to strengthen the state is fine, and",
+        "morality is useless for this purpose. The legal system and the",
+        "bureaucratic apparatus should be aligned with people's selfish",
+        "nature: most people are motivated by the quest for pleasure and",
+        "fear of harm, and the state should reward people for doing",
+        "what's good for the state and ruthlessly punish those who harm",
+        "it. Any societal forces that conflict with the imperative to",
+        "strengthen the state should be exterminated.",
+        "¶ Han Feizi took various ideas of amoral realist thinkers and",
+        "built them up into a coherent political philosophy. From Shang"
+      ],
+      "marks": [
+        {
+          "first_line": 5,
+          "last_line": 5,
+          "text": "1. Han Feizi on Law",
+          "kind": "underline",
+          "has_handwriting": false,
+          "continues_from_previous_page": false,
+          "continues_to_next_page": false
+        },
+        {
+          "first_line": 6,
+          "last_line": 17,
+          "text": "Han Feizi (ca. 280–233 BCE) is the most renowned thinker of the Legalist school. He is the only major Warring States thinker from a noble family background, yet he argued for policies designed to destroy aristocratic families and other local centers of power that threatened to undermine unity at the top. Due to a serious stutter, he could not effectively communicate his proposals, so (luckily for us) he wrote his ideas in book form. Han Feizi was sent as an envoy from his native state of Han to the Qin state and may have tried to persuade the Qin ruler to adopt his ideas, but he was jailed by Prime Minister Li Si—another of Xunzi's students—and forced to drink poison rather than be subject to an excruciating death by torture.",
+          "kind": "bracket",
+          "has_handwriting": false,
+          "continues_from_previous_page": false,
+          "continues_to_next_page": false
+        }
+      ]
+    }
+  ]
+}
