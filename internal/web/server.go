@@ -697,18 +697,28 @@ var templateFuncs = template.FuncMap{
 	// show it without each handler having to remember to pass it.
 	"build": func() string { return version.Current().Short() },
 
+	// date renders a day in the configured timezone, not in whatever zone the
+	// time.Time happens to carry. The two kinds of time reaching a template
+	// differ there: schedule dates come out of the store as local midnight
+	// (store.parseDate), but stored timestamps such as a publication time come
+	// back in UTC (store.parseTime). Formatting a UTC timestamp as it stands
+	// names the UTC calendar day, which is the day before for anything
+	// published late in the evening here — wallabag records a date-only
+	// publication as local midnight, 22:00 UTC in summer, so every such
+	// article rendered a day early. Converting to time.Local first is a no-op
+	// for the local-midnight kind and fixes the other.
 	"date": func(t time.Time) string {
 		if t.IsZero() {
 			return "—"
 		}
-		return t.Format("2 Jan 2006")
+		return t.In(time.Local).Format("2 Jan 2006")
 	},
 
 	// isoDate renders a date the way it appears in a calendar URL —
 	// /calendar/day/{date} and the heatmap's own links use it, so both stay
 	// consistent with the store's own YYYY-MM-DD convention without every
 	// caller having to spell out the layout string itself.
-	"isoDate": func(t time.Time) string { return t.Format("2006-01-02") },
+	"isoDate": func(t time.Time) string { return t.In(time.Local).Format("2006-01-02") },
 
 	"days": func(interval float64) string {
 		if interval < 1 {

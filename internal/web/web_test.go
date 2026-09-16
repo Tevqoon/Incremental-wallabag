@@ -4159,3 +4159,40 @@ func TestContentsPageTakesABookOutOfTheQueue(t *testing.T) {
 		t.Error("the book did not go back into the queue")
 	}
 }
+
+// TestPublicationDateRendersInTheConfiguredTimezone pins the day a stored
+// timestamp is shown as. Stored timestamps come back from the store in UTC,
+// and formatting one as it stands names the UTC calendar day. wallabag records
+// a date-only publication as local midnight, which in summer here is 22:00 UTC
+// on the previous day — so every such article showed a day early until the
+// date helper converted to the configured timezone first.
+//
+// A fixed zone rather than a named one keeps the test independent of whether
+// the machine running it has a timezone database.
+func TestPublicationDateRendersInTheConfiguredTimezone(t *testing.T) {
+	previous := time.Local
+	time.Local = time.FixedZone("CEST", 2*60*60)
+	t.Cleanup(func() { time.Local = previous })
+
+	server, db, _ := newTestServer(t, true)
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
+		ExternalID: "1",
+		Title:      "A test article",
+		// Midnight on 2 July in CEST, stored as it would be: in UTC.
+		PublishedAt: time.Date(2023, 7, 1, 22, 0, 0, 0, time.UTC),
+		UpdatedAt:   time.Now(),
+	}}, 0, 0, time.Now()); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	body := get(t, server, "/read/1").Body.String()
+	if !strings.Contains(body, "2 Jul 2023") {
+		t.Error("the publication date is not rendered on its local day, 2 Jul 2023")
+	}
+	if strings.Contains(body, "1 Jul 2023") {
+		t.Error("the publication date is rendered on its UTC day, 1 Jul 2023")
+	}
+	if !strings.Contains(body, `title="published 2023-07-02"`) {
+		t.Error("the ISO form of the publication date is not on its local day either")
+	}
+}
