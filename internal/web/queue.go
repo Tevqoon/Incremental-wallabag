@@ -797,7 +797,10 @@ func (s *Server) handleBacklog(w http.ResponseWriter, r *http.Request) {
 // default rather than trusted as given.
 func redirectTarget(r *http.Request, def string) string {
 	target := r.FormValue("redirect")
-	if target == "" || !strings.HasPrefix(target, "/") || strings.HasPrefix(target, "//") {
+	// "/\host" counts as off-site too: browsers read a backslash there as a
+	// slash, making it "//host".
+	if target == "" || !strings.HasPrefix(target, "/") ||
+		strings.HasPrefix(target, "//") || strings.HasPrefix(target, `/\`) {
 		return def
 	}
 	return target

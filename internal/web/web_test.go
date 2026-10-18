@@ -1123,7 +1123,7 @@ func TestBacklogRedirectsToGivenTarget(t *testing.T) {
 func TestBacklogRejectsUnsafeRedirectTargets(t *testing.T) {
 	server, _, _ := newTestServer(t, true)
 
-	for _, bad := range []string{"https://evil.example/", "//evil.example/", "not-a-path"} {
+	for _, bad := range []string{"https://evil.example/", "//evil.example/", `/\evil.example/`, "not-a-path"} {
 		response := post(t, server, "/elements/1/backlog", url.Values{
 			"days": {"7"}, "redirect": {bad},
 		})
