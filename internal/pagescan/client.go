@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -163,7 +164,8 @@ func (c *Client) ReadPage(ctx context.Context, image []byte, contentType string)
 	}
 
 	response, err := c.post(ctx, request)
-	if err != nil && strings.Contains(err.Error(), "400") {
+	var status *statusError
+	if errors.As(err, &status) && status.code == http.StatusBadRequest {
 		// Some OpenAI-compatible providers reject response_format on
 		// models that don't support it — the same fallback proofread's
 		// own chatJSON applies.
@@ -211,7 +213,7 @@ func (c *Client) post(ctx context.Context, payload chatRequest) (chatResponse, e
 		return chatResponse{}, fmt.Errorf("pagescan: read response: %w", err)
 	}
 	if raw.StatusCode != http.StatusOK {
-		return chatResponse{}, fmt.Errorf("pagescan: HTTP %d: %s", raw.StatusCode, truncate(string(body), 400))
+		return chatResponse{}, &statusError{code: raw.StatusCode, body: truncate(string(body), 400)}
 	}
 
 	var decoded chatResponse
@@ -219,6 +221,18 @@ func (c *Client) post(ctx context.Context, payload chatRequest) (chatResponse, e
 		return chatResponse{}, fmt.Errorf("pagescan: decode response: %w", err)
 	}
 	return decoded, nil
+}
+
+// statusError is a non-200 answer from the endpoint. Typed so ReadPage can
+// tell a 400 apart by its code — matching "400" in the message would also
+// match a body that merely mentions, say, a 4000-token limit.
+type statusError struct {
+	code int
+	body string
+}
+
+func (e *statusError) Error() string {
+	return fmt.Sprintf("pagescan: HTTP %d: %s", e.code, e.body)
 }
 
 func truncate(s string, n int) string {

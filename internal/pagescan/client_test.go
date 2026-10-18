@@ -224,3 +224,23 @@ func TestClientConfigured(t *testing.T) {
 		t.Error("Client with an apiKey should be Configured")
 	}
 }
+
+// TestReadPageOnlyRetriesAGenuine400: the response_format fallback keys on
+// the status code, not on "400" turning up somewhere in an error body.
+func TestReadPageOnlyRetriesAGenuine400(t *testing.T) {
+	attempt := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt++
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"error":"limit of 400 requests per minute reached"}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("key", server.URL, "model", "low")
+	if _, err := client.ReadPage(context.Background(), []byte{1}, "image/png"); err == nil {
+		t.Fatal("expected an error")
+	}
+	if attempt != 1 {
+		t.Errorf("got %d attempts, want 1 (a 429 is not a response_format rejection)", attempt)
+	}
+}
