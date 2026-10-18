@@ -1123,7 +1123,13 @@ func TestBacklogRedirectsToGivenTarget(t *testing.T) {
 func TestBacklogRejectsUnsafeRedirectTargets(t *testing.T) {
 	server, _, _ := newTestServer(t, true)
 
-	for _, bad := range []string{"https://evil.example/", "//evil.example/", `/\evil.example/`, "not-a-path"} {
+	for _, bad := range []string{
+		"https://evil.example/", "//evil.example/", `/\evil.example/`, "not-a-path",
+		// Browsers strip tabs and newlines and read a backslash as a slash
+		// before resolving a URL, so each of these is "//evil.example" by
+		// the time it is followed.
+		"/\t/evil.example/", "/\n/evil.example/", "/\r/evil.example/", "/\t\\evil.example/",
+	} {
 		response := post(t, server, "/elements/1/backlog", url.Values{
 			"days": {"7"}, "redirect": {bad},
 		})

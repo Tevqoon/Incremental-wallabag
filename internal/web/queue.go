@@ -797,10 +797,16 @@ func (s *Server) handleBacklog(w http.ResponseWriter, r *http.Request) {
 // default rather than trusted as given.
 func redirectTarget(r *http.Request, def string) string {
 	target := r.FormValue("redirect")
-	// "/\host" counts as off-site too: browsers read a backslash there as a
-	// slash, making it "//host".
-	if target == "" || !strings.HasPrefix(target, "/") ||
-		strings.HasPrefix(target, "//") || strings.HasPrefix(target, `/\`) {
+	// Prefix checks alone are not enough, because a browser rewrites the URL
+	// before it reads it: a backslash becomes a slash, so "/\host" is
+	// "//host", and tabs and newlines are stripped outright, so "/<TAB>/host"
+	// is "//host" too — after this check had already passed it as a local
+	// path. htmx hands HX-Redirect straight to the browser, so whatever comes
+	// out of here is parsed exactly that way. No path on this site contains a
+	// backslash or a control character, so refusing either anywhere costs
+	// nothing and closes the whole class rather than its one known spelling.
+	if target == "" || !strings.HasPrefix(target, "/") || strings.HasPrefix(target, "//") ||
+		strings.ContainsFunc(target, func(r rune) bool { return r == '\\' || r < 0x20 || r == 0x7f }) {
 		return def
 	}
 	return target

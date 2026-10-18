@@ -1114,7 +1114,7 @@ func insertHighlights(tx *sql.Tx, documentID, parentID int64, highlights []sourc
 		var existingID int64
 		err = sql.ErrNoRows
 		if quote != "" {
-			existingID, err = adoptableByQuote(tx, documentID, parentID, quote, incoming)
+			existingID, err = adoptableByQuote(tx, documentID, parentID, quote, incoming, hasPosition(highlight))
 		}
 		switch {
 		case err == nil:
@@ -1201,16 +1201,25 @@ func insertHighlights(tx *sql.Tx, documentID, parentID int64, highlights []sourc
 }
 
 // adoptableByQuote finds a row insertHighlights may move a new ref onto: the
-// same passage under the same parent, whose own ref is not one this batch
-// still carries. sql.ErrNoRows when there is none.
+// same passage under the same parent. sql.ErrNoRows when there is none.
 //
-// The second condition is what lets one book hold the same words twice — a
-// single-word highlight made on two pages, say. Without it the second
+// For a positioned highlight (see hasPosition) a row whose own ref is still in
+// this batch is not adoptable. That is what lets one book hold the same words
+// twice — a single-word highlight made on two pages, say. Without it the second
 // highlight adopted the first's row instead of getting its own, and every
 // re-import after that moved the row's ref back and forth between the two
-// while the second passage was never stored at all. A row whose ref is still
-// in the batch is that highlight's own, not a stale copy of this one.
-func adoptableByQuote(tx *sql.Tx, documentID, parentID int64, quote string, incoming map[string]bool) (int64, error) {
+// while the second passage was never stored at all.
+//
+// An unpositioned highlight must still adopt such a row, because for wallabag
+// the same words arriving twice in one batch is the normal trace of a
+// highlight whose id changed, not two highlights: UpdateHighlightLocation
+// creates the replacement before deleting the original, and when that
+// best-effort delete fails the next listing carries both ids for the one
+// passage. Refusing to adopt there gave the new id a second local row with a
+// fresh schedule — the duplicate this adoption exists to prevent. A wallabag
+// highlight carries no page, chapter or ordinal, so it never takes the
+// positioned branch.
+func adoptableByQuote(tx *sql.Tx, documentID, parentID int64, quote string, incoming map[string]bool, positioned bool) (int64, error) {
 	rows, err := tx.Query(`
 		SELECT id, COALESCE(external_ref, '') FROM elements
 		WHERE document_id = ? AND parent_id = ? AND quote = ?
@@ -1230,7 +1239,7 @@ func adoptableByQuote(tx *sql.Tx, documentID, parentID int64, quote string, inco
 		if err := rows.Scan(&id, &ref); err != nil {
 			return 0, err
 		}
-		if ref == "" || !incoming[ref] {
+		if ref == "" || !positioned || !incoming[ref] {
 			return id, nil
 		}
 	}
@@ -1277,6 +1286,15 @@ func annotationHTML(quote, note string) string {
 
 // hasBookMetadata reports whether a highlight carries anything only a book
 // import produces — the signal that re-importing it is worth a write.
+// hasPosition reports whether a highlight says where in its work it sits, which
+// is what makes the same words twice two highlights rather than one — see
+// adoptableByQuote. Narrower than hasBookMetadata on purpose: that also counts
+// a note, and a wallabag annotation's comment arrives as a note while saying
+// nothing about position.
+func hasPosition(highlight source.Highlight) bool {
+	return highlight.Page != "" || highlight.Chapter != "" || highlight.Ordinal > 0
+}
+
 func hasBookMetadata(highlight source.Highlight) bool {
 	return highlight.Chapter != "" || highlight.Page != "" ||
 		highlight.Color != "" || highlight.Ordinal > 0 ||

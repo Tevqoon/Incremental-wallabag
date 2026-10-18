@@ -3204,3 +3204,41 @@ func TestUploadedBooksQueueNoWrites(t *testing.T) {
 		t.Errorf("%d writes queued for an uploaded book, want 0", queued)
 	}
 }
+
+// TestFailedRelocationDeleteDoesNotDuplicateTheHighlight pins the case the
+// adoption-by-quote path exists for. UpdateHighlightLocation creates a
+// replacement annotation before deleting the original; when that best-effort
+// delete fails, the next listing carries both ids for the one passage. Both
+// must land on the single row already there — a second row would be a
+// duplicate highlight with a fresh schedule of its own. Book highlights, which
+// carry a position, are allowed to repeat words as separate highlights (see
+// TestTheSameWordsTwiceAreTwoAnnotations); a wallabag highlight never does.
+func TestFailedRelocationDeleteDoesNotDuplicateTheHighlight(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+	article := source.Document{ExternalID: "1", Title: "An article", UpdatedAt: now,
+		Highlights: []source.Highlight{{ExternalID: "old", Quote: "the same passage", Note: "a comment"}}}
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{article}, 0, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	later := now.Add(time.Minute)
+	article.UpdatedAt = later
+	article.Highlights = []source.Highlight{
+		{ExternalID: "old", Quote: "the same passage", Note: "a comment"},
+		{ExternalID: "new", Quote: "the same passage", Note: "a comment"},
+	}
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{article}, 0, 0, later); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	var rows int
+	if err := db.db.QueryRow(
+		`SELECT count(*) FROM elements WHERE parent_id IS NOT NULL AND quote = 'the same passage'`,
+	).Scan(&rows); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if rows != 1 {
+		t.Errorf("%d local rows for one wallabag highlight, want 1", rows)
+	}
+}
