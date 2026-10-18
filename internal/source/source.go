@@ -29,6 +29,19 @@ var ErrGone = errors.New("source: document no longer exists")
 // with %w.
 var ErrUnavailable = errors.New("source: provider unavailable")
 
+// ErrUnlocatable reports that the provider could not place a highlight in its
+// own rendering of the document it belongs to: the quote does not occur in
+// the text the provider would draw it against, or only occurs with other
+// text interleaved. Replacing the highlight cannot help — the replacement
+// would be just as unplaced as the original — and the replacement is
+// itself what made Reconcile see a locationless highlight again on its next
+// pass, so treating this as an ordinary failure, or worse as success, turns
+// a single unplaceable passage into a loop that recreates it upstream
+// forever. The syncer records it and stops retrying until the document
+// changes. Providers wrap it with %w, and have changed nothing upstream when
+// they return it.
+var ErrUnlocatable = errors.New("source: highlight cannot be located in the document")
+
 // Source is a provider of readable documents.
 //
 // Go note: interface satisfaction in Go is structural and implicit. There is no
@@ -125,6 +138,11 @@ type Writer interface {
 	// sent turned out not to resolve, and Reconcile discovers that gap from
 	// the provider's own report of the annotation (Highlight.HasLocation)
 	// rather than from anything local.
+	//
+	// When the quote cannot be located in the document it returns "" and an
+	// error wrapping ErrUnlocatable, and nothing upstream has changed: the
+	// existing annotation is neither replaced nor deleted, because a
+	// replacement would be as unplaced as the original.
 	UpdateHighlightLocation(ctx context.Context, highlightExternalID, documentExternalID, quote string) (string, error)
 }
 

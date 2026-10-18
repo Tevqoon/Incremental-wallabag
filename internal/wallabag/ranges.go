@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf16"
+	"unicode/utf8"
 
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
@@ -82,7 +83,15 @@ func computeRanges(rawHTML, quote string) []serializedRange {
 	allText := collectTextNodes(root)
 	flat := flattenText(allText)
 
-	start, end, ok := locateQuote(flat, quote)
+	// Locate the quote without a truncation marker. A highlight read back
+	// from wallabag past ~900 bytes carries the "…" truncateQuote appended
+	// when it was pushed; the marker is not in the article, so matching it
+	// literally fails on every long highlight even though everything before
+	// it is a faithful prefix of the passage (confirmed on a real Financial
+	// Times highlight: it matched in full up to the final character). The
+	// range then ends where the prefix ends, which is as much of the
+	// passage as increader ever kept.
+	start, end, ok := locateQuote(flat, TrimTruncationMarker(quote))
 	if !ok {
 		return nil
 	}
@@ -237,7 +246,17 @@ var whitespaceRun = regexp.MustCompile(`\s+`)
 // substitution runs after escaping and has not been proven to always yield
 // something Compile accepts for arbitrary input).
 func quoteRegex(quote string) (*regexp.Regexp, bool) {
-	trimmed := strings.TrimSpace(quote)
+	// Invisible formatting is dropped from the quote because the text it is
+	// matched against has it dropped too (see locateStripped). It is a
+	// property of the typesetting, not of the passage: the same article read
+	// back from wallabag can carry soft hyphens inside words that the quote
+	// the reader selected does not, or the other way round (confirmed on real
+	// Financial Times articles — one stored 651 of them; another's quote
+	// carried them itself). Stripped before the emptiness check below so a
+	// quote that is only invisibles is rejected as the empty quote it
+	// effectively is, rather than compiling to an empty pattern that matches
+	// everywhere.
+	trimmed := strings.TrimSpace(stripInvisibleFormatting(quote))
 	if trimmed == "" {
 		return nil, false
 	}
@@ -250,10 +269,80 @@ func quoteRegex(quote string) (*regexp.Regexp, bool) {
 	return re, true
 }
 
+// locateStripped runs quoteRegex over flat with its invisible formatting
+// characters removed, and returns each match as a [start, end) byte range
+// into flat itself — the RAW text, not the stripped copy that was searched.
+//
+// The raw offsets are the whole point. computeRanges maps them onto text
+// nodes with nodeAtOffset and serialises UTF-16 offsets within those nodes,
+// which is what wallabag's own reader draws a highlight with; offsets into a
+// stripped copy would land a few characters early for every soft hyphen
+// before the match, silently highlighting the wrong words. So the stripped
+// copy is built together with a map from each of its bytes back to the byte
+// it came from in flat.
+//
+// A match is translated by taking the raw position of its first byte as the
+// start, and the raw position of its LAST byte plus one as the exclusive end,
+// rather than translating the exclusive end directly: the exclusive end of a
+// match that stops just before a removed character has no byte of its own to
+// look up. Last-byte-plus-one is correct because only whole runes are ever
+// removed, so each kept rune's bytes are contiguous in both strings, and the
+// last byte of the last matched rune is the last byte of that rune in flat
+// too. The consequence worth knowing is that invisibles at either edge of a
+// match fall outside it, which is what a highlight wants.
+//
+// n bounds how many matches are returned, as in regexp.FindAllStringIndex
+// (negative for all). Both locateQuote and locateQuoteAll go through here for
+// the same reason they share quoteRegex: a second copy of the stripping and
+// translation would be one more place for "first match" and "every match" to
+// disagree.
+func locateStripped(flat, quote string, n int) [][]int {
+	re, ok := quoteRegex(quote)
+	if !ok {
+		return nil
+	}
+
+	// Common case first: most articles have no invisibles at all, and then
+	// nothing needs copying or mapping.
+	if !strings.ContainsFunc(flat, func(r rune) bool { return invisibleFormatting[r] }) {
+		return re.FindAllStringIndex(flat, n)
+	}
+
+	var stripped strings.Builder
+	stripped.Grow(len(flat))
+	// rawAt[i] is the offset in flat of byte i of the stripped text.
+	rawAt := make([]int, 0, len(flat))
+	for offset := 0; offset < len(flat); {
+		// Decoded by hand rather than ranging over the string, so that the
+		// width is the number of bytes really consumed: an invalid byte
+		// decodes as a one-byte RuneError, which is not the same width as a
+		// genuine U+FFFD, and the map must stay aligned with the bytes the
+		// regexp will see.
+		r, width := utf8.DecodeRuneInString(flat[offset:])
+		if !invisibleFormatting[r] {
+			stripped.WriteString(flat[offset : offset+width])
+			for k := 0; k < width; k++ {
+				rawAt = append(rawAt, offset+k)
+			}
+		}
+		offset += width
+	}
+
+	matches := re.FindAllStringIndex(stripped.String(), n)
+	if matches == nil {
+		return nil
+	}
+	for i, match := range matches {
+		matches[i] = []int{rawAt[match[0]], rawAt[match[1]-1] + 1}
+	}
+	return matches
+}
+
 // locateQuote finds quote's [start, end) byte range within flat, the whole
 // article's text with no separators inserted between elements — matching
 // annotator's own concatenation, which inserts none either. See quoteRegex
-// for what "finds" tolerates.
+// for what "finds" tolerates, and locateStripped for how invisible
+// formatting is ignored without disturbing the offsets returned.
 //
 // Only the first match is returned: computeRanges, this function's only
 // caller, needs exactly one range to serialize, and taking the first is the
@@ -262,37 +351,30 @@ func quoteRegex(quote string) (*regexp.Regexp, bool) {
 // caller that instead needs to know about every match — whether the first
 // one was even the right choice — wants locateQuoteAll, not this.
 func locateQuote(flat, quote string) (start, end int, ok bool) {
-	re, ok := quoteRegex(quote)
-	if !ok {
+	matches := locateStripped(flat, quote, 1)
+	if len(matches) == 0 {
 		return 0, 0, false
 	}
-	loc := re.FindStringIndex(flat)
-	if loc == nil {
-		return 0, 0, false
-	}
-	return loc[0], loc[1], true
+	return matches[0][0], matches[0][1], true
 }
 
 // locateQuoteAll is locateQuote's every-match counterpart: every
 // non-overlapping [start, end) byte range within flat where quote matches,
 // in the same whitespace-tolerant sense locateQuote itself resolves against
-// — built from the identical quoteRegex, so the "first match" and "every
-// match" questions can never silently disagree about what counts as a match
-// for the same quote. That drift — one of the two getting its own,
-// independently-typed-out copy of the \s* substitution that later falls out
-// of sync with the other — is exactly the bug this shared helper exists to
-// make structurally impossible rather than merely unlikely.
+// — both go through locateStripped, which builds on the identical
+// quoteRegex, so the "first match" and "every match" questions can never
+// silently disagree about what counts as a match for the same quote. That
+// drift — one of the two getting its own, independently-typed-out copy of
+// the \s* substitution that later falls out of sync with the other — is
+// exactly the bug this shared helper exists to make structurally impossible
+// rather than merely unlikely.
 //
 // Returns nil, not an empty non-nil slice, when quote does not occur at all
 // or cannot be turned into a pattern — matching FindAllStringIndex's own
 // convention for "no matches", which QuoteOccurrences, this function's
 // caller outside this package, in turn also relies on.
 func locateQuoteAll(flat, quote string) [][]int {
-	re, ok := quoteRegex(quote)
-	if !ok {
-		return nil
-	}
-	return re.FindAllStringIndex(flat, -1)
+	return locateStripped(flat, quote, -1)
 }
 
 // nodeAtOffset finds the text node containing byte offset target, within the

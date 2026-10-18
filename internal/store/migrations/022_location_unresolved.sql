@@ -1,0 +1,16 @@
+-- location_unresolved_at is when the provider last reported that it could not
+-- place this highlight in its own rendering of the document (the quote is not
+-- in the text it draws against, or only with other text interleaved). NULL
+-- means it never failed.
+--
+-- Reconcile queues a relocation for every highlight the provider reports as
+-- locationless, and relocating wallabag's way means creating a replacement
+-- annotation and deleting the old one. For a quote that genuinely cannot be
+-- located, the replacement was locationless too, so every pass found it
+-- locationless again and replaced it again: 18 highlights on the production
+-- account were recreated under fresh ids on every reconcile, ~36 wasted API
+-- calls each time. The provider now refuses to replace what it cannot place
+-- (source.ErrUnlocatable), and this column is what stops the next reconcile
+-- from simply queueing the same attempt again — until the document changes
+-- upstream, which is the one thing that could make the quote locatable.
+ALTER TABLE elements ADD COLUMN location_unresolved_at TEXT;
