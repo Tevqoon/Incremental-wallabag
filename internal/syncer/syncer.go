@@ -532,8 +532,16 @@ func (s *Syncer) drainWrites(ctx context.Context, provider source.Source) int {
 	}
 
 	published := 0
-	for _, write := range writes {
+	// probing is set when the previous write in this drain found the provider
+	// unavailable; the write after it is then the probe that decides whether
+	// that was an outage or that one request's own failure. See the
+	// ErrUnavailable case below.
+	probing := false
+	for i, write := range writes {
 		ref, err := s.applyWrite(ctx, writer, write)
+		if !errors.Is(err, source.ErrUnavailable) {
+			probing = false
+		}
 
 		switch {
 		case err == nil:
@@ -564,22 +572,39 @@ func (s *Syncer) drainWrites(ctx context.Context, provider source.Source) int {
 			}
 
 		case errors.Is(err, source.ErrUnavailable):
-			// The provider is down or refusing everyone, not this entry: the
-			// rest of the batch would fail the same way. Only this write's
-			// attempt is counted — a write that alone keeps hitting a 500
-			// still reaches the cap and stops blocking the queue — and the
-			// rest wait. Carrying on used to charge every queued write an
-			// attempt per drain, and with a drain nudged by every grade, an
-			// outage in the middle of a reading session abandoned the whole
-			// queue after eight clicks.
-			s.logger.Warn("provider unavailable, leaving the queue for later",
+			// A 5xx, a 429 or a network error is either the provider being
+			// down or this one request being rejected, and the two need
+			// opposite handling. wallabag answers some single bad requests
+			// with a 500 (see maxHighlightQuoteLength), and the queue drains
+			// oldest first: stopping on every such failure would let one bad
+			// write at the head hold back everything behind it until it had
+			// spent its whole retry budget — hours, at one drain per sync.
+			//
+			// So the next write is tried as a probe. If it fails the same
+			// way, the provider is down: stop, cool down, and do not charge
+			// the probe, so an outage still costs the queue one attempt per
+			// drain rather than one per queued write. If it goes through, the
+			// failure was this write's alone, and the queue carries on.
+			if probing {
+				s.logger.Warn("provider unavailable, leaving the queue for later",
+					"source", write.Source, "error", err)
+				s.unavailableUntil = time.Now().Add(unavailableCooldown)
+				return published
+			}
+			s.logger.Warn("write failed with the provider unavailable",
 				"source", write.Source, "entry", write.ExternalID,
 				"operation", write.Operation, "attempts", write.Attempts+1, "error", err)
 			if err := s.store.FailWrite(write.ID, err); err != nil {
 				s.logger.Error("could not record a write failure", "id", write.ID, "error", err)
 			}
-			s.unavailableUntil = time.Now().Add(unavailableCooldown)
-			return published
+			// With nothing after it there is no probe to tell an outage from
+			// a bad request, so back off as though it were an outage; the
+			// next scheduled or manual sync tries again either way.
+			if i == len(writes)-1 {
+				s.unavailableUntil = time.Now().Add(unavailableCooldown)
+				return published
+			}
+			probing = true
 
 		default:
 			s.logger.Warn("write failed, will retry",

@@ -47,6 +47,10 @@ type writingSource struct {
 	listings [][]source.Document
 
 	failWith error
+
+	// failOnly, when non-zero, limits failWith to the first failOnly write
+	// calls; later ones succeed. Zero means every call fails.
+	failOnly int
 	calls    int
 
 	// fetchCalls counts calls to Fetch specifically, separate from calls
@@ -62,6 +66,15 @@ type writingSource struct {
 
 func newWritingSource() *writingSource {
 	return &writingSource{archived: map[string]bool{}, tags: map[string][]string{}}
+}
+
+// failure is what a write call returns: failWith, or nil once the first
+// failOnly calls have failed.
+func (w *writingSource) failure() error {
+	if w.failOnly > 0 && w.calls > w.failOnly {
+		return nil
+	}
+	return w.failWith
 }
 
 func (w *writingSource) Name() string { return "wallabag" }
@@ -84,8 +97,8 @@ func (w *writingSource) SetArchived(_ context.Context, id string, archived bool)
 		time.Sleep(w.delay)
 	}
 	w.calls++
-	if w.failWith != nil {
-		return w.failWith
+	if err := w.failure(); err != nil {
+		return err
 	}
 	w.archived[id] = archived
 	return nil
@@ -93,13 +106,13 @@ func (w *writingSource) SetArchived(_ context.Context, id string, archived bool)
 
 func (w *writingSource) SetStarred(context.Context, string, bool) error {
 	w.calls++
-	return w.failWith
+	return w.failure()
 }
 
 func (w *writingSource) AddTags(_ context.Context, id string, labels []string) error {
 	w.calls++
-	if w.failWith != nil {
-		return w.failWith
+	if err := w.failure(); err != nil {
+		return err
 	}
 	w.tags[id] = append(w.tags[id], labels...)
 	return nil
@@ -107,13 +120,13 @@ func (w *writingSource) AddTags(_ context.Context, id string, labels []string) e
 
 func (w *writingSource) RemoveTag(context.Context, string, string) error {
 	w.calls++
-	return w.failWith
+	return w.failure()
 }
 
 func (w *writingSource) DeleteEntry(_ context.Context, id string) error {
 	w.calls++
-	if w.failWith != nil {
-		return w.failWith
+	if err := w.failure(); err != nil {
+		return err
 	}
 	w.deletedEntries = append(w.deletedEntries, id)
 	return nil
@@ -121,8 +134,8 @@ func (w *writingSource) DeleteEntry(_ context.Context, id string) error {
 
 func (w *writingSource) DeleteHighlight(_ context.Context, id string) error {
 	w.calls++
-	if w.failWith != nil {
-		return w.failWith
+	if err := w.failure(); err != nil {
+		return err
 	}
 	w.deletedHighlights = append(w.deletedHighlights, id)
 	return nil
@@ -892,8 +905,8 @@ func TestUnavailableProviderStopsTheDrain(t *testing.T) {
 	if published := syncer.drainWrites(context.Background(), provider); published != 0 {
 		t.Errorf("published %d, want 0", published)
 	}
-	if provider.calls != 1 {
-		t.Errorf("provider called %d times, want 1 (the drain stops at the outage)", provider.calls)
+	if provider.calls != 2 {
+		t.Errorf("provider called %d times, want 2 (the failing write, then one probe)", provider.calls)
 	}
 
 	writes, err := db.PendingWrites("wallabag", 10)
@@ -905,5 +918,66 @@ func TestUnavailableProviderStopsTheDrain(t *testing.T) {
 	}
 	if !syncer.coolingDown() {
 		t.Error("not cooling down after finding the provider unavailable")
+	}
+}
+
+// TestOneFailingWriteDoesNotHoldBackTheQueue is the case an outage rule must
+// not catch. wallabag answers some single bad requests with a 500, and the
+// queue drains oldest first, so treating every 5xx as an outage let one such
+// write at the head stop every write behind it, drain after drain, until it
+// had spent its whole retry budget. The write after it is now a probe: it goes
+// through, so the failure was that write's own, and nothing cools down.
+func TestOneFailingWriteDoesNotHoldBackTheQueue(t *testing.T) {
+	db, logger := testSetup(t)
+	seed(t, db)
+
+	if err := db.SetArchived(1, "wallabag", "77", true, time.Now()); err != nil {
+		t.Fatalf("SetArchived: %v", err)
+	}
+	if err := db.AttachTag(1, "wallabag", "77", "philosophy"); err != nil {
+		t.Fatalf("AttachTag: %v", err)
+	}
+
+	provider := newWritingSource()
+	provider.failWith = fmt.Errorf("%w: 500 Internal Server Error", source.ErrUnavailable)
+	provider.failOnly = 1 // the archive write is bad; the tag write behind it is fine
+	syncer := New(db, logger, provider)
+
+	if published := syncer.drainWrites(context.Background(), provider); published != 1 {
+		t.Errorf("published %d, want 1: the write behind the failing one must go through", published)
+	}
+	writes, err := db.PendingWrites("wallabag", 10)
+	if err != nil {
+		t.Fatalf("PendingWrites: %v", err)
+	}
+	if len(writes) != 1 || writes[0].Operation != store.OpArchive || writes[0].Attempts != 1 {
+		t.Errorf("pending = %+v, want only the failing archive write, charged one attempt", writes)
+	}
+	if syncer.coolingDown() {
+		t.Error("cooling down after a failure the probe showed was not an outage")
+	}
+}
+
+// TestALoneUnavailableWriteStillBacksOff covers the one case with no probe to
+// decide by: the failing write is the last in the queue. It is treated as an
+// outage, as before, so nudged drains do not keep charging it.
+func TestALoneUnavailableWriteStillBacksOff(t *testing.T) {
+	db, logger := testSetup(t)
+	seed(t, db)
+	if err := db.SetArchived(1, "wallabag", "77", true, time.Now()); err != nil {
+		t.Fatalf("SetArchived: %v", err)
+	}
+
+	provider := newWritingSource()
+	provider.failWith = fmt.Errorf("%w: connection refused", source.ErrUnavailable)
+	syncer := New(db, logger, provider)
+	syncer.drainWrites(context.Background(), provider)
+
+	writes, _ := db.PendingWrites("wallabag", 10)
+	if len(writes) != 1 || writes[0].Attempts != 1 {
+		t.Errorf("pending = %+v, want the lone write charged once", writes)
+	}
+	if !syncer.coolingDown() {
+		t.Error("not cooling down after a lone write found the provider unavailable")
 	}
 }

@@ -706,7 +706,7 @@ func (s *Store) RenameScanRefs(documentID int64, oldPrefix, newPrefix string, no
 //     before: an imported passage under one of options.PagePrefixes that
 //     this assembly no longer produces — a retake read fewer marks than the
 //     blurry first shot did — is removed, unless the reader has made it
-//     their own since (a note, a corrected wording, or a child of its own).
+//     their own since in any way at all; see removeRetakenPassages.
 //
 // fromScan is marked applied (see UnappliedPageScans) in the same
 // transaction.
@@ -933,8 +933,25 @@ func absorbScanRef(tx *sql.Tx, documentID int64, ref, passageQuote, passageNote 
 
 // removeRetakenPassages runs rule 5 of ApplyScanPassages: an imported
 // passage under one of prefixes that passages (and their absorbed refs) no
-// longer account for is removed, unless the reader has given it a note, a
-// corrected wording, or a child.
+// longer account for is removed — but only if it is untouched since import.
+//
+// "Untouched" has to cover every way the reader can have made a passage their
+// own, because deleting an element cascades: cloze_ranges and activity_log
+// both reference it ON DELETE CASCADE. A first version checked only for a
+// note, a corrected wording and a child element, and so would have silently
+// taken a passage's cloze cards (which are rows on the passage itself, not
+// children) and its review history with it. The full list:
+//
+//   - no note, and no corrected wording (edited_quote);
+//   - no child element (an extract taken from it);
+//   - no cloze deletions;
+//   - never reviewed: no activity_log rows, and no repetitions;
+//   - no triage decision. An import queued outright stamps triaged_at and
+//     created_at from the same instant, so only a later triaged_at is the
+//     reader deciding; the two being equal (or triaged_at unset) is not.
+//
+// A misread passage the reader did act on stays, and is theirs to delete by
+// hand. Losing a retake's tidiness is the cheaper failure of the two.
 //
 // Matched with substr rather than LIKE for the same reason RenameScanRefs
 // is, and against prefix+":m" so that "scan:p94" never reaches into
@@ -956,7 +973,11 @@ func removeRetakenPassages(tx *sql.Tx, documentID int64, prefixes []string, pass
 			WHERE e.document_id = ? AND e.origin = ?
 			  AND substr(COALESCE(e.external_ref, ''), 1, ?) = ?
 			  AND e.note = '' AND e.edited_quote = ''
-			  AND NOT EXISTS (SELECT 1 FROM elements c WHERE c.parent_id = e.id)`,
+			  AND e.reps = 0
+			  AND (e.triaged_at IS NULL OR e.triaged_at = e.created_at)
+			  AND NOT EXISTS (SELECT 1 FROM elements c WHERE c.parent_id = e.id)
+			  AND NOT EXISTS (SELECT 1 FROM cloze_ranges z WHERE z.element_id = e.id)
+			  AND NOT EXISTS (SELECT 1 FROM activity_log a WHERE a.element_id = e.id)`,
 			documentID, OriginImport, len(head), head,
 		)
 		if err != nil {

@@ -1155,3 +1155,80 @@ func TestRenameScanRefsSkipsATakenRef(t *testing.T) {
 		t.Errorf("want m1 renamed and m0 left under its old ref")
 	}
 }
+
+// TestApplyScanPassagesRetakeKeepsPassagesTheReaderActedOn covers everything
+// besides a note that makes a passage the reader's own. Deleting an element
+// cascades into cloze_ranges and activity_log, so a retake guard that checked
+// only notes, corrected wording and children would have silently taken a
+// passage's cloze cards and review history with it, along with a passage the
+// reader had already decided to keep in triage.
+func TestApplyScanPassagesRetakeKeepsPassagesTheReaderActedOn(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+	docID, err := db.CreateScannedBook("Retake Book", "", "", now)
+	if err != nil {
+		t.Fatalf("CreateScannedBook: %v", err)
+	}
+	first, err := db.AddPageScan(docID, "blurry.jpg", "image/jpeg", []byte("img"), true, now)
+	if err != nil {
+		t.Fatalf("AddPageScan: %v", err)
+	}
+	retake, err := db.AddPageScan(docID, "sharp.jpg", "image/jpeg", []byte("img"), true, now)
+	if err != nil {
+		t.Fatalf("AddPageScan: %v", err)
+	}
+
+	blurry := []ScanPassage{
+		{Ref: "scan:p94:m0", Page: "94", Text: "First passage.", ScanIDs: []int64{first}},
+		{Ref: "scan:p94:m1", Page: "94", Text: "A passage with a cloze on it.", ScanIDs: []int64{first}},
+		{Ref: "scan:p94:m2", Page: "94", Text: "A passage already reviewed.", ScanIDs: []int64{first}},
+		{Ref: "scan:p94:m3", Page: "94", Text: "A passage kept in triage.", ScanIDs: []int64{first}},
+		{Ref: "scan:p94:m4", Page: "94", Text: "A smudge nobody touched.", ScanIDs: []int64{first}},
+	}
+	if _, err := db.ApplyScanPassages(docID, first, blurry, ScanApplyOptions{}, now); err != nil {
+		t.Fatalf("ApplyScanPassages (first shot): %v", err)
+	}
+
+	clozed := findScanRef(t, db, docID, "scan:p94:m1")
+	if _, err := db.AddCloze(clozed.ID, 2, 9, ""); err != nil {
+		t.Fatalf("AddCloze: %v", err)
+	}
+	reviewed := findScanRef(t, db, docID, "scan:p94:m2")
+	if err := db.SaveScheduleReviewed(reviewed.ID, reviewed.Schedule, now.Add(time.Minute)); err != nil {
+		t.Fatalf("SaveScheduleReviewed: %v", err)
+	}
+	// Later than the import, as a real decision always is: an import queued
+	// outright stamps triaged_at at the same instant as created_at, and that
+	// is not the reader deciding anything.
+	decided := findScanRef(t, db, docID, "scan:p94:m3")
+	if err := db.MarkTriaged(decided.ID, now.Add(time.Minute)); err != nil {
+		t.Fatalf("MarkTriaged: %v", err)
+	}
+
+	sharp := []ScanPassage{
+		{Ref: "scan:p94:m0", Page: "94", Text: "First passage.", ScanIDs: []int64{retake}},
+	}
+	result, err := db.ApplyScanPassages(docID, retake, sharp,
+		ScanApplyOptions{PagePrefixes: []string{"scan:p94"}}, now.Add(2*time.Minute))
+	if err != nil {
+		t.Fatalf("ApplyScanPassages (retake): %v", err)
+	}
+	if result.Removed != 1 {
+		t.Errorf("removed %d, want only the untouched smudge", result.Removed)
+	}
+	for ref, why := range map[string]string{
+		"scan:p94:m1": "it had a cloze on it",
+		"scan:p94:m2": "it had already been reviewed",
+		"scan:p94:m3": "the reader had kept it in triage",
+	} {
+		if !hasScanRef(t, db, docID, ref) {
+			t.Errorf("%s was removed by the retake though %s", ref, why)
+		}
+	}
+	if hasScanRef(t, db, docID, "scan:p94:m4") {
+		t.Error("an untouched passage the retake no longer reads survived it")
+	}
+	if clozes, err := db.ClozesOf(clozed.ID); err != nil || len(clozes) != 1 {
+		t.Errorf("the cloze did not survive the retake: %v, %v", clozes, err)
+	}
+}
