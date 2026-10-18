@@ -28,14 +28,6 @@ const maxPhotoBatchBytes = 1 << 30 // 1 GiB
 // than to pinch an ordinary phone photo.
 const maxPhotoBytes = 50 << 20 // 50 MB
 
-// uploadedPhoto is one file from the "photos" field, already read and
-// confirmed to be an image increader can send to the vision model.
-type uploadedPhoto struct {
-	filename    string
-	contentType string
-	data        []byte
-}
-
 // handleImportPhotos adds a batch of page photos to a book — a new one, or
 // an existing one being read in further stages — and wakes the background
 // worker to start reading them.
@@ -70,14 +62,18 @@ func (s *Server) handleImportPhotos(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var photos []uploadedPhoto
+	// Only each file's first bytes are read here, to sniff it: a whole
+	// book's batch can run to a gigabyte, and holding all of it in memory
+	// at once is what this pass avoids. AddPageScans reads each photo in
+	// full only as it stores it.
+	var photos []store.NewPageScan
 	var problems []string
 	for _, header := range headers {
 		if header.Size > maxPhotoBytes {
 			problems = append(problems, header.Filename+" (larger than the 50 MB per-photo limit)")
 			continue
 		}
-		data, contentType, ok, err := readUploadedPhoto(header)
+		contentType, ok, err := sniffUploadedPhoto(header)
 		if err != nil {
 			s.fail(w, err)
 			return
@@ -86,7 +82,11 @@ func (s *Server) handleImportPhotos(w http.ResponseWriter, r *http.Request) {
 			problems = append(problems, header.Filename)
 			continue
 		}
-		photos = append(photos, uploadedPhoto{filename: header.Filename, contentType: contentType, data: data})
+		photos = append(photos, store.NewPageScan{
+			Filename:    header.Filename,
+			ContentType: contentType,
+			Read:        func() ([]byte, error) { return readUploadedPhoto(header) },
+		})
 	}
 	// The whole batch is rejected together, and nothing is stored: a photo
 	// that turns out not to be a photo is worth naming and fixing, not
@@ -124,15 +124,13 @@ func (s *Server) handleImportPhotos(w http.ResponseWriter, r *http.Request) {
 	// straight into the queue — same default and same reasoning as the file
 	// importer's own mode radio.
 	triage := r.FormValue("mode") != "queue"
-	for _, photo := range photos {
-		if _, err := s.store.AddPageScan(documentID, photo.filename, photo.contentType, photo.data, triage, now); err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				http.Error(w, "no such document", http.StatusBadRequest)
-				return
-			}
-			s.fail(w, err)
+	if err := s.store.AddPageScans(documentID, photos, triage, now); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			http.Error(w, "no such document", http.StatusBadRequest)
 			return
 		}
+		s.fail(w, err)
+		return
 	}
 
 	s.wakeScanner()
@@ -140,27 +138,41 @@ func (s *Server) handleImportPhotos(w http.ResponseWriter, r *http.Request) {
 	s.redirect(w, r, "/documents/"+strconv.FormatInt(documentID, 10)+"#scans")
 }
 
-// readUploadedPhoto reads one multipart file part and sniffs it as an image.
-// ok is false, with no error, for a file that just isn't an image increader
-// recognises — that is the caller's problem to report, not this function's
-// to fail on.
-func readUploadedPhoto(header *multipart.FileHeader) (data []byte, contentType string, ok bool, err error) {
+// sniffUploadedPhoto reads the start of one multipart file part and sniffs
+// it as an image. ok is false, with no error, for a file that just isn't an
+// image increader recognises — that is the caller's problem to report, not
+// this function's to fail on.
+func sniffUploadedPhoto(header *multipart.FileHeader) (contentType string, ok bool, err error) {
 	file, err := header.Open()
 	if err != nil {
-		return nil, "", false, fmt.Errorf("web: open uploaded photo %s: %w", header.Filename, err)
+		return "", false, fmt.Errorf("web: open uploaded photo %s: %w", header.Filename, err)
 	}
 	defer file.Close()
 
-	data, err = io.ReadAll(file)
+	// 512 bytes is all http.DetectContentType ever looks at, and more than
+	// the 12 SniffImageType's own HEIF check needs.
+	head, err := io.ReadAll(io.LimitReader(file, 512))
 	if err != nil {
-		return nil, "", false, fmt.Errorf("web: read uploaded photo %s: %w", header.Filename, err)
+		return "", false, fmt.Errorf("web: read uploaded photo %s: %w", header.Filename, err)
 	}
 
-	mime, recognised := pagescan.SniffImageType(data, header.Header.Get("Content-Type"))
-	if !recognised {
-		return nil, "", false, nil
+	mime, recognised := pagescan.SniffImageType(head, header.Header.Get("Content-Type"))
+	return mime, recognised, nil
+}
+
+// readUploadedPhoto reads one multipart file part in full.
+func readUploadedPhoto(header *multipart.FileHeader) ([]byte, error) {
+	file, err := header.Open()
+	if err != nil {
+		return nil, fmt.Errorf("web: open uploaded photo %s: %w", header.Filename, err)
 	}
-	return data, mime, true, nil
+	defer file.Close()
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return nil, fmt.Errorf("web: read uploaded photo %s: %w", header.Filename, err)
+	}
+	return data, nil
 }
 
 // handleScanImage serves one photo's own bytes, exactly as uploaded — they
@@ -236,6 +248,27 @@ func (s *Server) handleRetryScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.store.RetryPageScan(scanID, time.Now()); err != nil {
+		s.fail(w, err)
+		return
+	}
+	s.wakeScanner()
+	s.redirect(w, r, "/documents/"+strconv.FormatInt(documentID, 10)+"#scans")
+}
+
+// handleRetryFailedScans is handleRetryScan for every failed photo of a book
+// at once — what an outage in the middle of a large batch leaves behind.
+func (s *Server) handleRetryFailedScans(w http.ResponseWriter, r *http.Request) {
+	documentID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "bad document id", http.StatusBadRequest)
+		return
+	}
+	if s.wakeScanner == nil {
+		http.Error(w, "photo import is not configured", http.StatusNotFound)
+		return
+	}
+
+	if _, err := s.store.RetryFailedPageScans(documentID, time.Now()); err != nil {
 		s.fail(w, err)
 		return
 	}

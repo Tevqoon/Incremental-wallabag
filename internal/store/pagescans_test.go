@@ -237,7 +237,7 @@ func TestFailPageScanRetryVsFailed(t *testing.T) {
 		t.Fatalf("AddPageScan: %v", err)
 	}
 
-	if err := db.FailPageScan(id, "model timed out", true, now); err != nil {
+	if err := db.FailPageScan(id, "model timed out", true, time.Time{}, now); err != nil {
 		t.Fatalf("FailPageScan (retry): %v", err)
 	}
 	scan, err := db.PageScan(id)
@@ -248,7 +248,7 @@ func TestFailPageScanRetryVsFailed(t *testing.T) {
 		t.Errorf("after retry-fail: status = %q, error = %q", scan.Status, scan.Error)
 	}
 
-	if err := db.FailPageScan(id, "unreadable page", false, now); err != nil {
+	if err := db.FailPageScan(id, "unreadable page", false, time.Time{}, now); err != nil {
 		t.Fatalf("FailPageScan (final): %v", err)
 	}
 	scan, err = db.PageScan(id)
@@ -307,7 +307,7 @@ func TestRetryPageScanOnlyFromFailed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddPageScan: %v", err)
 	}
-	if err := db.FailPageScan(failedID, "bad read", false, now); err != nil {
+	if err := db.FailPageScan(failedID, "bad read", false, time.Time{}, now); err != nil {
 		t.Fatalf("FailPageScan: %v", err)
 	}
 	if err := db.RetryPageScan(failedID, now); err != nil {
@@ -394,7 +394,7 @@ func TestCountPageScans(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddPageScan: %v", err)
 	}
-	if err := db.FailPageScan(failedID, "nope", false, now); err != nil {
+	if err := db.FailPageScan(failedID, "nope", false, time.Time{}, now); err != nil {
 		t.Fatalf("FailPageScan: %v", err)
 	}
 
@@ -891,5 +891,267 @@ func TestUpdateAnnotationClearsNotePending(t *testing.T) {
 	}
 	if elem.Note != "here it is" {
 		t.Errorf("note = %q", elem.Note)
+	}
+}
+
+// TestClaimPageScanHonoursRetryAfter: a scan put back to pending with a
+// retryAt in the future is not claimable until then, so a backoff holds
+// against every worker goroutine and not just the one that saw the failure.
+func TestClaimPageScanHonoursRetryAfter(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+	docID, err := db.CreateScannedBook("Backoff Book", "", "", now)
+	if err != nil {
+		t.Fatalf("CreateScannedBook: %v", err)
+	}
+	id, err := db.AddPageScan(docID, "a.jpg", "image/jpeg", []byte("img"), true, now)
+	if err != nil {
+		t.Fatalf("AddPageScan: %v", err)
+	}
+	if _, _, ok, err := db.ClaimPageScan(now); err != nil || !ok {
+		t.Fatalf("first claim: ok = %v, err = %v", ok, err)
+	}
+	if err := db.FailPageScan(id, "rate limited", true, now.Add(time.Minute), now); err != nil {
+		t.Fatalf("FailPageScan: %v", err)
+	}
+
+	if _, _, ok, err := db.ClaimPageScan(now.Add(30 * time.Second)); err != nil || ok {
+		t.Errorf("claim before retryAt: ok = %v, err = %v, want false, nil", ok, err)
+	}
+	scan, _, ok, err := db.ClaimPageScan(now.Add(2 * time.Minute))
+	if err != nil || !ok {
+		t.Fatalf("claim after retryAt: ok = %v, err = %v, want true, nil", ok, err)
+	}
+	if scan.ID != id || scan.Attempts != 2 {
+		t.Errorf("claimed %+v, want scan %d on its second attempt", scan, id)
+	}
+}
+
+func TestRetryFailedPageScans(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+	docID, err := db.CreateScannedBook("Retry All Book", "", "", now)
+	if err != nil {
+		t.Fatalf("CreateScannedBook: %v", err)
+	}
+	var ids []int64
+	for _, name := range []string{"a.jpg", "b.jpg", "c.jpg"} {
+		id, err := db.AddPageScan(docID, name, "image/jpeg", []byte("img"), true, now)
+		if err != nil {
+			t.Fatalf("AddPageScan: %v", err)
+		}
+		ids = append(ids, id)
+	}
+	for _, id := range ids[:2] {
+		if err := db.FailPageScan(id, "outage", false, time.Time{}, now); err != nil {
+			t.Fatalf("FailPageScan: %v", err)
+		}
+	}
+
+	n, err := db.RetryFailedPageScans(docID, now)
+	if err != nil {
+		t.Fatalf("RetryFailedPageScans: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("retried %d, want 2", n)
+	}
+	counts, err := db.CountPageScans(docID)
+	if err != nil {
+		t.Fatalf("CountPageScans: %v", err)
+	}
+	if counts.Pending != 3 || counts.Failed != 0 {
+		t.Errorf("counts = %+v, want all 3 pending", counts)
+	}
+}
+
+// TestUnappliedPageScans: a scan the model has read but whose passages were
+// never written is listed until ApplyScanPassages runs for it — the photo is
+// gone by then, so this is the only record that the page still needs doing.
+func TestUnappliedPageScans(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+	docID, err := db.CreateScannedBook("Unapplied Book", "", "", now)
+	if err != nil {
+		t.Fatalf("CreateScannedBook: %v", err)
+	}
+	id, err := db.AddPageScan(docID, "a.jpg", "image/jpeg", []byte("img"), true, now)
+	if err != nil {
+		t.Fatalf("AddPageScan: %v", err)
+	}
+
+	unapplied, err := db.UnappliedPageScans()
+	if err != nil {
+		t.Fatalf("UnappliedPageScans: %v", err)
+	}
+	if len(unapplied) != 0 {
+		t.Errorf("a pending scan is listed as unapplied: %+v", unapplied)
+	}
+
+	if err := db.CompletePageScan(id, `{"pages":[]}`, now); err != nil {
+		t.Fatalf("CompletePageScan: %v", err)
+	}
+	unapplied, err = db.UnappliedPageScans()
+	if err != nil {
+		t.Fatalf("UnappliedPageScans: %v", err)
+	}
+	if len(unapplied) != 1 || unapplied[0].ID != id || unapplied[0].DocumentID != docID {
+		t.Fatalf("unapplied = %+v, want just scan %d", unapplied, id)
+	}
+
+	if _, err := db.ApplyScanPassages(docID, id, nil, ScanApplyOptions{}, now); err != nil {
+		t.Fatalf("ApplyScanPassages: %v", err)
+	}
+	unapplied, err = db.UnappliedPageScans()
+	if err != nil {
+		t.Fatalf("UnappliedPageScans: %v", err)
+	}
+	if len(unapplied) != 0 {
+		t.Errorf("unapplied after ApplyScanPassages = %+v, want none", unapplied)
+	}
+}
+
+// TestApplyScanPassagesRetakeRemovesMarksItNoLongerSees: a retake of a page
+// replaces the earlier reading of it, so a passage only the earlier shot
+// produced goes — unless the reader has made it their own since.
+func TestApplyScanPassagesRetakeRemovesMarksItNoLongerSees(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+	docID, err := db.CreateScannedBook("Retake Book", "", "", now)
+	if err != nil {
+		t.Fatalf("CreateScannedBook: %v", err)
+	}
+	first, err := db.AddPageScan(docID, "blurry.jpg", "image/jpeg", []byte("img"), true, now)
+	if err != nil {
+		t.Fatalf("AddPageScan: %v", err)
+	}
+	retake, err := db.AddPageScan(docID, "sharp.jpg", "image/jpeg", []byte("img"), true, now)
+	if err != nil {
+		t.Fatalf("AddPageScan: %v", err)
+	}
+
+	blurry := []ScanPassage{
+		{Ref: "scan:p94:m0", Page: "94", Text: "First passage.", ScanIDs: []int64{first}},
+		{Ref: "scan:p94:m1", Page: "94", Text: "A smudge read as a mark.", ScanIDs: []int64{first}},
+		{Ref: "scan:p94:m2", Page: "94", Text: "Another smudge.", ScanIDs: []int64{first}},
+		{Ref: "scan:p940:m5", Page: "940", Text: "A different page.", ScanIDs: []int64{first}},
+	}
+	if _, err := db.ApplyScanPassages(docID, first, blurry, ScanApplyOptions{}, now); err != nil {
+		t.Fatalf("ApplyScanPassages (first shot): %v", err)
+	}
+	noted := findScanRef(t, db, docID, "scan:p94:m2")
+	note := "keep me"
+	if err := db.EditAnnotation(noted.ID, AnnotationEdit{Note: &note}, now); err != nil {
+		t.Fatalf("EditAnnotation: %v", err)
+	}
+
+	sharp := []ScanPassage{
+		{Ref: "scan:p94:m0", Page: "94", Text: "First passage.", ScanIDs: []int64{retake}},
+		{Ref: "scan:p940:m5", Page: "940", Text: "A different page.", ScanIDs: []int64{first}},
+	}
+	result, err := db.ApplyScanPassages(docID, retake, sharp,
+		ScanApplyOptions{PagePrefixes: []string{"scan:p94"}}, now)
+	if err != nil {
+		t.Fatalf("ApplyScanPassages (retake): %v", err)
+	}
+	if result.Removed != 1 {
+		t.Errorf("result = %+v, want exactly the un-noted stale mark removed", result)
+	}
+	if !hasScanRef(t, db, docID, "scan:p94:m0") {
+		t.Errorf("a passage the retake still reads was removed")
+	}
+	if hasScanRef(t, db, docID, "scan:p94:m1") {
+		t.Errorf("a mark only the blurry shot saw survived the retake")
+	}
+	if !hasScanRef(t, db, docID, "scan:p94:m2") {
+		t.Errorf("a passage the reader had written a note on was removed")
+	}
+	if !hasScanRef(t, db, docID, "scan:p940:m5") {
+		t.Errorf("a passage on page 940 was removed as though it were on page 94")
+	}
+}
+
+// TestApplyScanPassagesFlagsHandwritingOnTextThatGrew: the second half of a
+// page-turn sentence, read after the first half was saved, brings its
+// handwriting flag with it — but a re-run that changes nothing never
+// re-raises a flag the reader dismissed.
+func TestApplyScanPassagesFlagsHandwritingOnTextThatGrew(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+	docID, err := db.CreateScannedBook("Page Turn Book", "", "", now)
+	if err != nil {
+		t.Fatalf("CreateScannedBook: %v", err)
+	}
+	p140, err := db.AddPageScan(docID, "140.jpg", "image/jpeg", []byte("img"), true, now)
+	if err != nil {
+		t.Fatalf("AddPageScan: %v", err)
+	}
+	p141, err := db.AddPageScan(docID, "141.jpg", "image/jpeg", []byte("img"), true, now)
+	if err != nil {
+		t.Fatalf("AddPageScan: %v", err)
+	}
+
+	alone := []ScanPassage{{Ref: "scan:p140:m0", Page: "140", Text: "The first half.", ScanIDs: []int64{p140}}}
+	if _, err := db.ApplyScanPassages(docID, p140, alone, ScanApplyOptions{}, now); err != nil {
+		t.Fatalf("ApplyScanPassages (140): %v", err)
+	}
+	if findScanRef(t, db, docID, "scan:p140:m0").NotePending {
+		t.Fatalf("note_pending set with no handwriting yet")
+	}
+
+	joined := []ScanPassage{{
+		Ref: "scan:p140:m0", Page: "140–141", Text: "The first half and the second half.",
+		NotePending: true, ScanIDs: []int64{p140, p141},
+	}}
+	if _, err := db.ApplyScanPassages(docID, p141, joined, ScanApplyOptions{}, now); err != nil {
+		t.Fatalf("ApplyScanPassages (141): %v", err)
+	}
+	element := findScanRef(t, db, docID, "scan:p140:m0")
+	if !element.NotePending {
+		t.Fatalf("note_pending not raised for handwriting beside the second half")
+	}
+
+	if err := db.DismissNotePending(element.ID); err != nil {
+		t.Fatalf("DismissNotePending: %v", err)
+	}
+	if _, err := db.ApplyScanPassages(docID, p141, joined, ScanApplyOptions{}, now); err != nil {
+		t.Fatalf("ApplyScanPassages (re-run): %v", err)
+	}
+	if findScanRef(t, db, docID, "scan:p140:m0").NotePending {
+		t.Errorf("a re-run with unchanged text re-raised a dismissed flag")
+	}
+}
+
+// TestRenameScanRefsSkipsATakenRef: typing in a page number another photo
+// already supplied must not trip the unique index and fail the correction
+// halfway — the clashing row keeps its old ref.
+func TestRenameScanRefsSkipsATakenRef(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+	docID, err := db.CreateScannedBook("Clash Book", "", "", now)
+	if err != nil {
+		t.Fatalf("CreateScannedBook: %v", err)
+	}
+	scanID, err := db.AddPageScan(docID, "p1.jpg", "image/jpeg", []byte("img"), true, now)
+	if err != nil {
+		t.Fatalf("AddPageScan: %v", err)
+	}
+	passages := []ScanPassage{
+		{Ref: "scan:p94:m0", Text: "already page 94", ScanIDs: []int64{scanID}},
+		{Ref: "scan:s12.0:m0", Text: "unnumbered first", ScanIDs: []int64{scanID}},
+		{Ref: "scan:s12.0:m1", Text: "unnumbered second", ScanIDs: []int64{scanID}},
+	}
+	if _, err := db.ApplyScanPassages(docID, scanID, passages, ScanApplyOptions{}, now); err != nil {
+		t.Fatalf("ApplyScanPassages: %v", err)
+	}
+
+	n, err := db.RenameScanRefs(docID, "scan:s12.0:", "scan:p94:", now)
+	if err != nil {
+		t.Fatalf("RenameScanRefs: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("renamed %d, want 1 (m1; m0's new ref is taken)", n)
+	}
+	if !hasScanRef(t, db, docID, "scan:p94:m1") || !hasScanRef(t, db, docID, "scan:s12.0:m0") {
+		t.Errorf("want m1 renamed and m0 left under its old ref")
 	}
 }

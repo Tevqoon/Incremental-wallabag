@@ -701,3 +701,107 @@ func TestRunFansOneWakeOutToSeveralReaders(t *testing.T) {
 		t.Errorf("at most %d read in flight at once; a single Wake should fan out to several readers", got)
 	}
 }
+
+// TestDrainLeavesAFailedScanToItsBackoff: after a retryable failure the scan
+// waits out its RetryDelay on the row itself, so the pass moves on rather
+// than claiming it straight back — which another goroutine used to do while
+// the one that saw the failure slept, burning a batch's attempts in seconds.
+func TestDrainLeavesAFailedScanToItsBackoff(t *testing.T) {
+	db := testStore(t)
+	var calls atomic.Int32
+	reader := funcReader(func(ctx context.Context, image []byte, contentType string) (string, error) {
+		calls.Add(1)
+		return "", errors.New("HTTP 429: rate limited")
+	})
+	w := New(db, reader, testLogger(), Options{RetryDelay: time.Hour, MaxAttempts: 3})
+
+	documentID, err := db.CreateScannedBook("Test Book", "Test Author", "", time.Now())
+	if err != nil {
+		t.Fatalf("CreateScannedBook: %v", err)
+	}
+	scanID, err := db.AddPageScan(documentID, "a.jpg", "image/jpeg", scanImage("a"), true, time.Now())
+	if err != nil {
+		t.Fatalf("AddPageScan: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- w.Drain(context.Background()) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Drain: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Drain slept off the backoff instead of returning")
+	}
+
+	if n := calls.Load(); n != 1 {
+		t.Errorf("reader called %d times, want 1", n)
+	}
+	scan, err := db.PageScan(scanID)
+	if err != nil {
+		t.Fatalf("PageScan: %v", err)
+	}
+	if scan.Status != store.ScanPending || scan.Attempts != 1 {
+		t.Errorf("scan = %s after %d attempts, want pending after 1", scan.Status, scan.Attempts)
+	}
+	if _, _, ok, err := db.ClaimPageScan(time.Now()); err != nil || ok {
+		t.Errorf("claim inside the backoff: ok = %v, err = %v, want false, nil", ok, err)
+	}
+}
+
+// TestRunAppliesScansLeftUnapplied: a scan read by a previous run that
+// stopped before writing its passages gets them written at the next start,
+// from the stored result — its photo is already gone.
+func TestRunAppliesScansLeftUnapplied(t *testing.T) {
+	db := testStore(t)
+	responses := loadCannedResponses(t)
+	w := New(db, newFakeReader(responses), testLogger(), Options{PollInterval: time.Hour})
+
+	documentID, err := db.CreateScannedBook("Test Book", "Test Author", "", time.Now())
+	if err != nil {
+		t.Fatalf("CreateScannedBook: %v", err)
+	}
+	key := scanKey(testdataScanFiles(t)[0])
+	scanID, err := db.AddPageScan(documentID, key+".jpg", "image/jpeg", scanImage(key), true, time.Now())
+	if err != nil {
+		t.Fatalf("AddPageScan: %v", err)
+	}
+	// What the previous run got done before it stopped: the model answered
+	// and the photo was discarded, but nothing was applied.
+	if _, _, _, err := db.ClaimPageScan(time.Now()); err != nil {
+		t.Fatalf("ClaimPageScan: %v", err)
+	}
+	if err := db.CompletePageScan(scanID, responses[key], time.Now()); err != nil {
+		t.Fatalf("CompletePageScan: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
+	go func() { w.Run(ctx); close(stopped) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		unapplied, err := db.UnappliedPageScans()
+		if err != nil {
+			t.Fatalf("UnappliedPageScans: %v", err)
+		}
+		if len(unapplied) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the scan was never applied")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-stopped
+
+	annotations, err := db.DocumentAnnotations(documentID)
+	if err != nil {
+		t.Fatalf("DocumentAnnotations: %v", err)
+	}
+	if len(annotations) == 0 {
+		t.Error("no passages written for the unapplied scan")
+	}
+}
