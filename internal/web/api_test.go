@@ -515,3 +515,55 @@ func apiAnnotationPath(id int64) string {
 }
 
 func strptr(value string) *string { return &value }
+
+type deletionsResponse struct {
+	Deletions []apiDeletion `json:"deletions"`
+}
+
+// TestAPIReportsDeletions: a mirror polling with since learns that an
+// annotation went — its document shows up again, emptied — and, through
+// /api/deletions, which annotation and which document to forget.
+func TestAPIReportsDeletions(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+	id := seedAnnotation(t, db, "A harvested passage")
+
+	first := decodeJSON[documentsResponse](t, get(t, server, "/api/documents"))
+	watermark := first.Documents[0].AnnotationsUpdatedAt
+
+	// Second resolution again — see TestAPIDocumentsSince.
+	time.Sleep(1100 * time.Millisecond)
+	if err := db.DeleteExtract(id); err != nil {
+		t.Fatalf("DeleteExtract: %v", err)
+	}
+
+	moved := decodeJSON[documentsResponse](t, get(t, server, "/api/documents?since="+watermark))
+	if len(moved.Documents) != 1 || moved.Documents[0].AnnotationCount != 0 {
+		t.Fatalf("documents since the watermark = %+v, want the emptied document", moved.Documents)
+	}
+
+	gone := decodeJSON[deletionsResponse](t, get(t, server, "/api/deletions?since="+watermark))
+	if len(gone.Deletions) != 1 {
+		t.Fatalf("deletions = %+v, want the one annotation", gone.Deletions)
+	}
+	if got := gone.Deletions[0]; got.Kind != "annotation" || got.ID != id || got.DocumentID != 1 || got.DeletedAt == "" {
+		t.Errorf("deletion = %+v, want annotation %d of document 1", got, id)
+	}
+
+	if err := db.DeleteDocument(1); err != nil {
+		t.Fatalf("DeleteDocument: %v", err)
+	}
+	all := decodeJSON[deletionsResponse](t, get(t, server, "/api/deletions"))
+	var sawDocument bool
+	for _, deletion := range all.Deletions {
+		if deletion.Kind == "document" && deletion.ID == 1 {
+			sawDocument = true
+		}
+	}
+	if !sawDocument {
+		t.Errorf("deletions = %+v, want the deleted document among them", all.Deletions)
+	}
+
+	if bad := get(t, server, "/api/deletions?since="+url.QueryEscape("not a time")); bad.Code != http.StatusBadRequest {
+		t.Errorf("bad since: status = %d, want 400", bad.Code)
+	}
+}
