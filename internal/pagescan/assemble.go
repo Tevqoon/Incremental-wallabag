@@ -639,6 +639,23 @@ func buildFragment(pageIdx int, page Page, mark Mark, index int) (fragment, bool
 	}, true
 }
 
+// isMarginNoteOnly reports whether mark is the prompt's entry for handwriting
+// that is not next to any mark: kind "other", no printed text, handwriting.
+// Built into a fragment like any other mark it would become a passage of
+// whatever whole lines the note sat beside, sentence-trimmed as though it
+// were a bracket — text the reader never marked.
+func isMarginNoteOnly(mark Mark) bool {
+	return mark.Kind == "other" && mark.HasHandwriting && strings.TrimSpace(mark.Text) == ""
+}
+
+// linesOverlap reports whether two marks' line ranges share a line, either
+// range possibly given back to front.
+func linesOverlap(a, b Mark) bool {
+	aFirst, aLast := min(a.FirstLine, a.LastLine), max(a.FirstLine, a.LastLine)
+	bFirst, bLast := min(b.FirstLine, b.LastLine), max(b.FirstLine, b.LastLine)
+	return aFirst <= bLast && bFirst <= aLast
+}
+
 // exactKinds are the mark kinds that cover exactly the words they touch,
 // rather than whole sentences the way a margin bracket or line does.
 var exactKinds = map[string]bool{"highlight": true, "underline": true, "circle": true}
@@ -677,15 +694,30 @@ func clampLine(v, n int) int {
 // the page that the reader never marked. Out-of-range values that are
 // present (a model counting one line past the end) are still clamped, in
 // buildFragment.
+//
+// Handwriting with no mark beside it (see isMarginNoteOnly) is never a
+// passage of its own; it flags whichever mark on the page shares a line
+// with it, and is otherwise dropped.
 func gatherFragments(pages []orderedPage) []fragment {
 	var frags []fragment
 	for i, p := range pages {
 		if len(p.page.Lines) == 0 {
 			continue
 		}
+		var notes []Mark
+		for _, mark := range p.page.Marks {
+			if isMarginNoteOnly(mark) {
+				notes = append(notes, mark)
+			}
+		}
 		for markIdx, mark := range p.page.Marks {
-			if mark.FirstLine == 0 || mark.LastLine == 0 {
+			if mark.FirstLine == 0 || mark.LastLine == 0 || isMarginNoteOnly(mark) {
 				continue
+			}
+			for _, note := range notes {
+				if linesOverlap(mark, note) {
+					mark.HasHandwriting = true
+				}
 			}
 			frag, ok := buildFragment(i, p.page, mark, markIdx)
 			if !ok {
@@ -732,7 +764,10 @@ func Assemble(scans []Scan, existing map[string]string) []Passage {
 		// Join forward while the current last piece runs off the bottom of
 		// its page mid-sentence and the very next fragment in the list
 		// opens the very next page, at its top, also mid-sentence — a
-		// passage the reader bracketed across a page break.
+		// passage the reader bracketed across a page break. Being next in
+		// the list already makes it the first fragment of its page; its
+		// mark index need not be 0, since a heading tick or an unnumbered
+		// entry the model listed first contributes no fragment.
 		for {
 			last := frags[parts[len(parts)-1]]
 			lastPage := pages[last.pageIdx]
@@ -743,7 +778,7 @@ func Assemble(scans []Scan, existing map[string]string) []Passage {
 			next := frags[nextIdx]
 			nextPage := pages[next.pageIdx]
 			adjacent := lastPage.hasNumber && nextPage.number == lastPage.number+1 &&
-				!nextPage.half && next.index == 0
+				!nextPage.half
 			if !(adjacent && next.atTop && next.startsMid) {
 				break
 			}

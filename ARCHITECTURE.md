@@ -91,7 +91,10 @@ Dependency direction is strictly downward — no leaf package reaches up into
 - `internal/scanworker` — the background reader above store + pagescan, run
   as a goroutine from main.go next to the syncer; claims scans from the
   page_scans table, N at a time, one mutex around assembly so split passages
-  always join; resumes after a restart by resetting in-flight scans.
+  always join; resumes after a restart by resetting in-flight scans and
+  applying any scan that was read but whose passages were never written. A
+  failed read's backoff is stored on the scan, so no other goroutine can
+  claim it early.
 - `internal/web` — stdlib `http.ServeMux` (Go 1.22 method+path patterns, no
   router dependency), `html/template` parsed once from an `embed.FS`, htmx
   for partial swaps. Handlers split across `server.go`, `queue.go`

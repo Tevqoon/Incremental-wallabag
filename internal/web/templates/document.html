@@ -110,6 +110,11 @@
       {{template "scanProgress" .}}
 
       {{if .FailedScans}}
+        {{if gt (len .FailedScans) 1}}
+          <form method="post" action="/documents/{{$.Document.ID}}/scans/retry">
+            <button type="submit" class="tiny">Retry all {{len .FailedScans}} failed photos</button>
+          </form>
+        {{end}}
         <ul class="scan-failed">
           {{range .FailedScans}}
             <li class="scan-failed-row">

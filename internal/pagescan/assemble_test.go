@@ -628,3 +628,67 @@ func TestAssembleHeadingTickRegression(t *testing.T) {
 		t.Errorf("Text: got %q, want it to start with %q", got[0].Text, prefix)
 	}
 }
+
+// TestAssembleMarginNoteAloneIsNoPassage: handwriting with no mark beside it
+// (the prompt's kind "other", empty text) is not a passage of whatever lines
+// it sat next to; it flags a mark that shares a line with it, and is
+// otherwise dropped.
+func TestAssembleMarginNoteAloneIsNoPassage(t *testing.T) {
+	note := func(first, last int) Mark {
+		return Mark{FirstLine: first, LastLine: last, Kind: "other", HasHandwriting: true}
+	}
+	scans := []Scan{{ID: 1, Result: Result{Pages: []Page{{
+		Label: "30",
+		Lines: []string{
+			"An unmarked sentence the reader only scribbled beside.",
+			"A bracketed sentence. It runs on.",
+			"Still bracketed here.",
+		},
+		Marks: []Mark{
+			note(1, 1),
+			{FirstLine: 2, LastLine: 3, Kind: "bracket", Text: "A bracketed sentence. It runs on. Still bracketed here."},
+			note(3, 3),
+		},
+	}}}}}
+	got := Assemble(scans, nil)
+	if len(got) != 1 {
+		t.Fatalf("got %d passages, want 1 (the bracket only): %+v", len(got), got)
+	}
+	if got[0].Ref != "scan:p30:m1" {
+		t.Errorf("Ref: got %q, want scan:p30:m1", got[0].Ref)
+	}
+	if !got[0].NotePending {
+		t.Errorf("NotePending: got false, want true from the note beside the bracket's last line")
+	}
+}
+
+// TestAssembleJoinWhenTheNextPagesFirstMarkIsSkipped: the continuation is
+// the next page's first fragment even when the model listed something before
+// it that yields none.
+func TestAssembleJoinWhenTheNextPagesFirstMarkIsSkipped(t *testing.T) {
+	scans := []Scan{
+		{ID: 1, Result: Result{Pages: []Page{{
+			Label: "20",
+			Lines: []string{"Unmarked opening line.", "A sentence that runs over the"},
+			Marks: []Mark{mark(2, 2, "A sentence that runs over the")},
+		}}}},
+		{ID: 2, Result: Result{Pages: []Page{{
+			Label: "21",
+			Lines: []string{"page turn and ends here.", "More text."},
+			Marks: []Mark{
+				{FirstLine: 0, LastLine: 0, Kind: "other", HasHandwriting: true},
+				mark(1, 1, "page turn and ends here."),
+			},
+		}}}},
+	}
+	got := Assemble(scans, nil)
+	if len(got) != 1 {
+		t.Fatalf("got %d passages, want 1 joined across the page turn: %+v", len(got), got)
+	}
+	if want := "A sentence that runs over the page turn and ends here."; got[0].Text != want {
+		t.Errorf("Text: got %q, want %q", got[0].Text, want)
+	}
+	if len(got[0].AbsorbedRefs) != 1 || got[0].AbsorbedRefs[0] != "scan:p21:m1" {
+		t.Errorf("AbsorbedRefs: got %v, want [scan:p21:m1]", got[0].AbsorbedRefs)
+	}
+}

@@ -151,7 +151,7 @@ type requestBody struct {
 func (c *Client) doOnce(ctx context.Context, method, path string, body requestBody, query url.Values, out any) error {
 	token, err := c.accessToken(ctx)
 	if err != nil {
-		return err
+		return unavailable(err)
 	}
 
 	endpoint := c.baseURL + path
@@ -182,7 +182,7 @@ func (c *Client) doOnce(ctx context.Context, method, path string, body requestBo
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("wallabag: %s %s: %w", method, path, err)
+		return unavailable(fmt.Errorf("wallabag: %s %s: %w", method, path, err))
 	}
 	defer resp.Body.Close()
 
@@ -191,6 +191,8 @@ func (c *Client) doOnce(ctx context.Context, method, path string, body requestBo
 		return errUnauthorized
 	case resp.StatusCode == http.StatusNotFound:
 		return fmt.Errorf("wallabag: %s %s: %w", method, path, source.ErrGone)
+	case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500:
+		return unavailable(fmt.Errorf("wallabag: %s %s: %s: %s", method, path, resp.Status, errorBody(resp.Body)))
 	case resp.StatusCode != http.StatusOK:
 		return fmt.Errorf("wallabag: %s %s: %s: %s", method, path, resp.Status, errorBody(resp.Body))
 	}
@@ -204,6 +206,12 @@ func (c *Client) doOnce(ctx context.Context, method, path string, body requestBo
 		return fmt.Errorf("wallabag: decode response from %s: %w", path, err)
 	}
 	return nil
+}
+
+// unavailable marks err as the server being unreachable or failing as a
+// whole, rather than this one request being wrong — see source.ErrUnavailable.
+func unavailable(err error) error {
+	return fmt.Errorf("%w: %w", source.ErrUnavailable, err)
 }
 
 // errorBody reads a bounded prefix of an error response for the error message.

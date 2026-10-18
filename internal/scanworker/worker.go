@@ -42,9 +42,8 @@ const (
 	DefaultPollInterval = time.Minute
 	DefaultReadTimeout  = 3 * time.Minute
 
-	// maxRetryDelay caps how long a goroutine backs off after a retryable
-	// failure, regardless of how many attempts have piled up — see New's
-	// doc comment on RetryDelay.
+	// maxRetryDelay caps how long a scan waits after a retryable failure,
+	// regardless of how many attempts have piled up — see Options.RetryDelay.
 	maxRetryDelay = 5 * time.Minute
 )
 
@@ -58,10 +57,13 @@ type Options struct {
 	// ClaimPageScan) before it is left failed for good rather than retried.
 	MaxAttempts int
 
-	// RetryDelay is the base backoff a goroutine waits after a retryable
-	// failure before it claims again: min(RetryDelay*attempts, 5m). Growing
+	// RetryDelay is the base backoff a scan waits after a retryable failure
+	// before it can be claimed again: min(RetryDelay*attempts, 5m). Growing
 	// with the attempt count means a transient outage is retried quickly at
-	// first and only backs off hard once it looks sustained.
+	// first and only backs off hard once it looks sustained. The wait is
+	// stored on the scan (see store.FailPageScan), so it holds against every
+	// goroutine, and the one that saw the failure moves straight on to the
+	// next scan rather than sleeping.
 	RetryDelay time.Duration
 
 	// PollInterval is how often an idle goroutine re-checks for pending work
@@ -136,7 +138,9 @@ func (w *Worker) Wake() {
 //
 // On start it resets scans a previous process left "processing" — see
 // ResetProcessingScans — since nothing marks a scan processing except a
-// claim this run makes, and a fresh start has made none yet. It then runs
+// claim this run makes, and a fresh start has made none yet — and applies
+// any scan that was read but whose passages were never written (see
+// store.UnappliedPageScans). It then runs
 // Options.Concurrency goroutines; each drains pending scans until none are
 // left (see Drain), then waits for Wake, the poll ticker, or ctx before
 // draining again. Returns once every goroutine has stopped.
@@ -146,6 +150,7 @@ func (w *Worker) Run(ctx context.Context) {
 	} else if n > 0 {
 		w.logger.Info("scanworker: reset scans left processing by a previous run", "count", n)
 	}
+	w.applyUnapplied()
 	w.Wake()
 
 	var group sync.WaitGroup
@@ -157,6 +162,27 @@ func (w *Worker) Run(ctx context.Context) {
 		}()
 	}
 	group.Wait()
+}
+
+// applyUnapplied re-assembles every book with a scan that was read but never
+// applied, once per such scan, so its passages finally arrive.
+func (w *Worker) applyUnapplied() {
+	scans, err := w.db.UnappliedPageScans()
+	if err != nil {
+		w.logger.Error("scanworker: could not list unapplied scans", "error", err)
+		return
+	}
+	for _, scan := range scans {
+		result, err := w.Reassemble(scan.DocumentID, scan.ID)
+		if err != nil {
+			w.logger.Error("scanworker: could not apply a scan left unapplied",
+				"scan", scan.ID, "document", scan.DocumentID, "error", err)
+			continue
+		}
+		w.logger.Info("scanworker: applied a scan left unapplied by a previous run",
+			"document", scan.DocumentID, "scan", scan.ID,
+			"inserted", result.Inserted, "updated", result.Updated, "removed", result.Removed)
+	}
 }
 
 // runOne is the body of one of Run's goroutines.
@@ -185,8 +211,9 @@ func (w *Worker) runOne(ctx context.Context) {
 // stop the rest of the batch.
 //
 // Used by each of Run's goroutines, and directly by tests that want one
-// deterministic pass on a single goroutine (it honours RetryDelay, so a
-// retryable failure still pauses that pass before trying the next scan).
+// deterministic pass on a single goroutine. A scan that failed retryably is
+// not claimable again until its RetryDelay has passed, so a pass can return
+// with such scans still pending; the poll ticker picks them up later.
 func (w *Worker) Drain(ctx context.Context) error {
 	for {
 		if ctx.Err() != nil {
@@ -209,29 +236,22 @@ func (w *Worker) Drain(ctx context.Context) error {
 		// left to claim simply goes back to waiting.
 		w.Wake()
 
-		if delay := w.processClaimedScan(ctx, scan, image); delay > 0 {
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-time.After(delay):
-			}
-		}
+		w.processClaimedScan(ctx, scan, image)
 	}
 }
 
 // processClaimedScan runs one already-claimed scan through the model and
-// records the outcome, returning how long the caller should back off before
-// claiming again (zero unless this was a retryable failure).
-func (w *Worker) processClaimedScan(ctx context.Context, scan store.PageScan, image []byte) time.Duration {
+// records the outcome.
+func (w *Worker) processClaimedScan(ctx context.Context, scan store.PageScan, image []byte) {
 	now := time.Now()
 
 	contentType, ok := pagescan.SniffImageType(image, scan.ContentType)
 	if !ok {
 		message := fmt.Sprintf("not an image the model can read (declared content type %q)", scan.ContentType)
-		if err := w.db.FailPageScan(scan.ID, message, false, now); err != nil {
+		if err := w.db.FailPageScan(scan.ID, message, false, time.Time{}, now); err != nil {
 			w.logger.Error("scanworker: could not fail unreadable scan", "scan", scan.ID, "error", err)
 		}
-		return 0
+		return
 	}
 
 	readCtx, cancel := context.WithTimeout(ctx, w.options.ReadTimeout)
@@ -248,42 +268,38 @@ func (w *Worker) processClaimedScan(ctx context.Context, scan store.PageScan, im
 			// start, so the read is simply tried again in full rather than
 			// burning one of MaxAttempts on a shutdown that was never the
 			// scan's fault.
-			return 0
+			return
 		}
 
 		w.logger.Warn("scanworker: reading a page failed",
 			"scan", scan.ID, "document", scan.DocumentID, "attempts", scan.Attempts, "error", err)
 
 		retry := scan.Attempts < w.options.MaxAttempts
-		if failErr := w.db.FailPageScan(scan.ID, err.Error(), retry, now); failErr != nil {
-			w.logger.Error("scanworker: could not record scan failure", "scan", scan.ID, "error", failErr)
-		}
-		if !retry {
-			return 0
-		}
-
 		delay := w.options.RetryDelay * time.Duration(scan.Attempts)
 		if delay > maxRetryDelay {
 			delay = maxRetryDelay
 		}
-		return delay
+		if failErr := w.db.FailPageScan(scan.ID, err.Error(), retry, now.Add(delay), now); failErr != nil {
+			w.logger.Error("scanworker: could not record scan failure", "scan", scan.ID, "error", failErr)
+		}
+		return
 	}
 
 	if err := w.db.CompletePageScan(scan.ID, raw, now); err != nil {
 		w.logger.Error("scanworker: could not complete scan", "scan", scan.ID, "error", err)
-		return 0
+		return
 	}
 
+	// A failure here leaves the scan unapplied; the next start applies it.
 	result, err := w.Reassemble(scan.DocumentID, scan.ID)
 	if err != nil {
 		w.logger.Error("scanworker: could not reassemble after a completed scan",
 			"scan", scan.ID, "document", scan.DocumentID, "error", err)
-		return 0
+		return
 	}
 	w.logger.Info("scanworker: assembled passages",
 		"document", scan.DocumentID, "scan", scan.ID,
 		"inserted", result.Inserted, "updated", result.Updated, "removed", result.Removed)
-	return 0
 }
 
 // Reassemble rebuilds one book's passages from all of its finished scans and
@@ -347,7 +363,20 @@ func (w *Worker) Reassemble(documentID, fromScan int64) (store.ScanApplyResult, 
 		}
 	}
 
-	options := store.ScanApplyOptions{FloorDays: w.options.FloorDays, SpreadDays: w.options.SpreadDays}
+	// The pages fromScan now supplies, so a retake's reading replaces the
+	// earlier one's rather than leaving marks only the earlier shot saw.
+	var prefixes []string
+	for _, page := range pagescan.Pages(parsed) {
+		if page.ScanID == fromScan {
+			prefixes = append(prefixes, page.RefPrefix)
+		}
+	}
+
+	options := store.ScanApplyOptions{
+		FloorDays:    w.options.FloorDays,
+		SpreadDays:   w.options.SpreadDays,
+		PagePrefixes: prefixes,
+	}
 	result, err := w.db.ApplyScanPassages(documentID, fromScan, converted, options, time.Now())
 	if err != nil {
 		return store.ScanApplyResult{}, fmt.Errorf("scanworker: apply passages of document %d: %w", documentID, err)

@@ -167,29 +167,12 @@ func scanExternalID() (string, error) {
 func (s *Store) AddPageScan(documentID int64, filename, contentType string, image []byte, triage bool, now time.Time) (int64, error) {
 	var id int64
 	err := s.inTransaction(func(tx *sql.Tx) error {
-		var exists int
-		if err := tx.QueryRow(`SELECT COUNT(*) FROM documents WHERE id = ?`, documentID).Scan(&exists); err != nil {
-			return fmt.Errorf("store: look up document %d: %w", documentID, err)
+		if err := requireDocument(tx, documentID); err != nil {
+			return err
 		}
-		if exists == 0 {
-			return fmt.Errorf("store: document %d: %w", documentID, ErrNotFound)
-		}
-
-		outcome, err := tx.Exec(`
-			INSERT INTO page_scans
-			    (document_id, filename, content_type, image, status, triage, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			documentID, filename, contentType, image, ScanPending, triage,
-			formatTime(now), formatTime(now),
-		)
-		if err != nil {
-			return fmt.Errorf("store: add page scan to document %d: %w", documentID, err)
-		}
-		id, err = outcome.LastInsertId()
-		if err != nil {
-			return fmt.Errorf("store: read id of new page scan: %w", err)
-		}
-		return nil
+		var err error
+		id, err = insertPageScan(tx, documentID, filename, contentType, image, triage, now)
+		return err
 	})
 	if err != nil {
 		return 0, err
@@ -197,8 +180,68 @@ func (s *Store) AddPageScan(documentID int64, filename, contentType string, imag
 	return id, nil
 }
 
-// ClaimPageScan atomically takes the oldest pending scan and marks it
-// processing, for a worker about to send it to the model.
+// NewPageScan is one photo for AddPageScans. Read supplies its bytes and is
+// called exactly once, when that photo is stored.
+type NewPageScan struct {
+	Filename, ContentType string
+	Read                  func() ([]byte, error)
+}
+
+// AddPageScans stores a batch of uploaded photos as pending, all or none.
+// Each photo is read only as it is stored and dropped straight after, so a
+// batch of a whole book's pages is never in memory at once.
+func (s *Store) AddPageScans(documentID int64, photos []NewPageScan, triage bool, now time.Time) error {
+	return s.inTransaction(func(tx *sql.Tx) error {
+		if err := requireDocument(tx, documentID); err != nil {
+			return err
+		}
+		for _, photo := range photos {
+			image, err := photo.Read()
+			if err != nil {
+				return fmt.Errorf("store: read photo %s: %w", photo.Filename, err)
+			}
+			if _, err := insertPageScan(tx, documentID, photo.Filename, photo.ContentType, image, triage, now); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// requireDocument is ErrNotFound unless documentID exists.
+func requireDocument(tx *sql.Tx, documentID int64) error {
+	var exists int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM documents WHERE id = ?`, documentID).Scan(&exists); err != nil {
+		return fmt.Errorf("store: look up document %d: %w", documentID, err)
+	}
+	if exists == 0 {
+		return fmt.Errorf("store: document %d: %w", documentID, ErrNotFound)
+	}
+	return nil
+}
+
+// insertPageScan adds one pending scan row and returns its id.
+func insertPageScan(tx *sql.Tx, documentID int64, filename, contentType string, image []byte, triage bool, now time.Time) (int64, error) {
+	outcome, err := tx.Exec(`
+		INSERT INTO page_scans
+		    (document_id, filename, content_type, image, status, triage, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		documentID, filename, contentType, image, ScanPending, triage,
+		formatTime(now), formatTime(now),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("store: add page scan to document %d: %w", documentID, err)
+	}
+	id, err := outcome.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("store: read id of new page scan: %w", err)
+	}
+	return id, nil
+}
+
+// ClaimPageScan atomically takes the oldest pending scan whose retry_after
+// (see FailPageScan) has passed and marks it processing, for a worker about
+// to send it to the model.
 //
 // The select-then-conditional-update-then-retry shape defends against two
 // workers claiming the same row: if the UPDATE's WHERE ... AND status =
@@ -219,8 +262,10 @@ func (s *Store) ClaimPageScan(now time.Time) (PageScan, []byte, bool, error) {
 		for {
 			var id int64
 			err := tx.QueryRow(`
-				SELECT id FROM page_scans WHERE status = ? ORDER BY id LIMIT 1`,
-				ScanPending,
+				SELECT id FROM page_scans
+				WHERE status = ? AND (retry_after IS NULL OR retry_after <= ?)
+				ORDER BY id LIMIT 1`,
+				ScanPending, formatTime(now),
 			).Scan(&id)
 			if errors.Is(err, sql.ErrNoRows) {
 				return nil
@@ -268,9 +313,14 @@ func (s *Store) ClaimPageScan(now time.Time) (PageScan, []byte, bool, error) {
 // and a re-read would need a new photo anyway. Blanking the column rather
 // than keeping several megabytes per page is the point — a failed or
 // pending scan keeps its photo, because its retry is what needs it.
+//
+// The scan is left unapplied until ApplyScanPassages has written its
+// passages — see UnappliedPageScans for why that matters once the photo is
+// gone.
 func (s *Store) CompletePageScan(id int64, result string, now time.Time) error {
 	outcome, err := s.db.Exec(`
-		UPDATE page_scans SET status = ?, result = ?, error = '', image = x'', updated_at = ?
+		UPDATE page_scans SET status = ?, result = ?, error = '', image = x'', applied = 0,
+		    retry_after = NULL, updated_at = ?
 		WHERE id = ?`,
 		ScanDone, result, formatTime(now), id,
 	)
@@ -284,17 +334,24 @@ func (s *Store) CompletePageScan(id int64, result string, now time.Time) error {
 }
 
 // FailPageScan records a failed attempt. retry puts the scan back to pending
-// for another try; otherwise it becomes failed for good, until the reader
-// asks for RetryPageScan by hand.
-func (s *Store) FailPageScan(id int64, message string, retry bool, now time.Time) error {
+// for another try, claimable again from retryAt on (a zero retryAt means at
+// once); otherwise it becomes failed for good, until the reader asks for
+// RetryPageScan by hand.
+//
+// The wait is kept on the row rather than left to whichever goroutine saw
+// the failure: a goroutine sleeping off its own backoff does not stop
+// another one claiming the same scan the moment it is pending again.
+func (s *Store) FailPageScan(id int64, message string, retry bool, retryAt, now time.Time) error {
 	status := ScanFailed
+	var after any
 	if retry {
 		status = ScanPending
+		after = formatTime(retryAt)
 	}
 	outcome, err := s.db.Exec(`
-		UPDATE page_scans SET status = ?, error = ?, updated_at = ?
+		UPDATE page_scans SET status = ?, error = ?, retry_after = ?, updated_at = ?
 		WHERE id = ?`,
-		status, message, formatTime(now), id,
+		status, message, after, formatTime(now), id,
 	)
 	if err != nil {
 		return fmt.Errorf("store: fail page scan %d: %w", id, err)
@@ -331,7 +388,7 @@ func (s *Store) ResetProcessingScans(now time.Time) (int, error) {
 // the old one's reading. ErrNotFound for anything else.
 func (s *Store) RetryPageScan(id int64, now time.Time) error {
 	outcome, err := s.db.Exec(`
-		UPDATE page_scans SET status = ?, attempts = 0, error = '', updated_at = ?
+		UPDATE page_scans SET status = ?, attempts = 0, error = '', retry_after = NULL, updated_at = ?
 		WHERE id = ? AND status = ? AND length(image) > 0`,
 		ScanPending, formatTime(now), id, ScanFailed,
 	)
@@ -342,6 +399,26 @@ func (s *Store) RetryPageScan(id int64, now time.Time) error {
 		return fmt.Errorf("store: page scan %d: %w", id, ErrNotFound)
 	}
 	return nil
+}
+
+// RetryFailedPageScans is RetryPageScan for every failed scan of a document
+// at once — after an outage, a large batch can leave dozens of them, and
+// retrying each by hand is the wrong amount of clicking. Returns how many
+// were put back to pending.
+func (s *Store) RetryFailedPageScans(documentID int64, now time.Time) (int, error) {
+	outcome, err := s.db.Exec(`
+		UPDATE page_scans SET status = ?, attempts = 0, error = '', retry_after = NULL, updated_at = ?
+		WHERE document_id = ? AND status = ? AND length(image) > 0`,
+		ScanPending, formatTime(now), documentID, ScanFailed,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("store: retry failed scans of document %d: %w", documentID, err)
+	}
+	n, err := outcome.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("store: count retried scans of document %d: %w", documentID, err)
+	}
+	return int(n), nil
 }
 
 // PageScan reads one scan's metadata, without its image — see
@@ -429,25 +506,29 @@ func (s *Store) SetPageScanResult(id int64, result string, now time.Time) error 
 	return nil
 }
 
-// DocumentsWithPageScans lists every document id that has at least one scan,
-// for the worker's own startup re-assembly pass over books it was in the
-// middle of.
-func (s *Store) DocumentsWithPageScans() ([]int64, error) {
-	rows, err := s.db.Query(`SELECT DISTINCT document_id FROM page_scans ORDER BY document_id`)
+// UnappliedPageScans lists every done scan whose passages were never
+// written — the process stopped between CompletePageScan and
+// ApplyScanPassages, or the apply itself failed. The photo is already gone by
+// then, so re-applying from the stored result is the only way that page's
+// passages ever arrive; the worker does so for each of these when it starts.
+// Oldest first, so passages are applied in the order their scans finished.
+func (s *Store) UnappliedPageScans() ([]PageScan, error) {
+	rows, err := s.db.Query(`SELECT `+pageScanColumns+` FROM page_scans
+		WHERE status = ? AND applied = 0 ORDER BY id`, ScanDone)
 	if err != nil {
-		return nil, fmt.Errorf("store: list documents with page scans: %w", err)
+		return nil, fmt.Errorf("store: list unapplied page scans: %w", err)
 	}
 	defer rows.Close()
 
-	var ids []int64
+	var scans []PageScan
 	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("store: scan document id: %w", err)
+		scan, err := scanPageScan(rows.Scan)
+		if err != nil {
+			return nil, fmt.Errorf("store: scan page scan row: %w", err)
 		}
-		ids = append(ids, id)
+		scans = append(scans, scan)
 	}
-	return ids, rows.Err()
+	return scans, rows.Err()
 }
 
 // DismissNotePending clears note_pending without a note ever being typed in —
@@ -510,6 +591,11 @@ type ScanPassage struct {
 type ScanApplyOptions struct {
 	FloorDays  int
 	SpreadDays int
+
+	// PagePrefixes are the ref prefixes ("scan:p94", "scan:s12.0") of the
+	// pages fromScan now supplies to the book, after retakes are collapsed —
+	// see rule 5 of ApplyScanPassages. Nil skips that rule.
+	PagePrefixes []string
 }
 
 // ScanApplyResult reports what one ApplyScanPassages call changed.
@@ -552,16 +638,26 @@ func (s *Store) ScanElementChapters(documentID int64) (map[string]string, error)
 // Matches with substr rather than LIKE: oldPrefix is built from a reader-
 // typed label, which may itself contain '_' or '%', both of which LIKE would
 // read as wildcards rather than literal characters.
+//
+// A row whose new ref is already taken — the page number typed in is one
+// another photo already supplied — keeps its old ref rather than tripping
+// the (document_id, external_ref) unique index and failing the whole
+// correction halfway, after the label itself was already saved.
 func (s *Store) RenameScanRefs(documentID int64, oldPrefix, newPrefix string, now time.Time) (int, error) {
 	prefixLen := len(oldPrefix)
 	outcome, err := s.db.Exec(`
 		UPDATE elements SET
 		    external_ref = ? || substr(external_ref, ?),
 		    updated_at = ?
-		WHERE document_id = ? AND substr(COALESCE(external_ref, ''), 1, ?) = ?`,
+		WHERE document_id = ? AND substr(COALESCE(external_ref, ''), 1, ?) = ?
+		  AND NOT EXISTS (
+		      SELECT 1 FROM elements taken
+		      WHERE taken.document_id = elements.document_id
+		        AND taken.external_ref = ? || substr(elements.external_ref, ?))`,
 		newPrefix, prefixLen+1,
 		formatTime(now),
 		documentID, prefixLen, oldPrefix,
+		newPrefix, prefixLen+1,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("store: rename scan refs of document %d: %w", documentID, err)
@@ -606,6 +702,14 @@ func (s *Store) RenameScanRefs(documentID int64, oldPrefix, newPrefix string, no
 //     note across first if the passage's own row has none yet. A ref that
 //     has grown a child (a cloze, an extract someone pulled from it) is left
 //     standing rather than deleted out from under it.
+//  5. A page fromScan supplies replaces whatever was read from that page
+//     before: an imported passage under one of options.PagePrefixes that
+//     this assembly no longer produces — a retake read fewer marks than the
+//     blurry first shot did — is removed, unless the reader has made it
+//     their own since in any way at all; see removeRetakenPassages.
+//
+// fromScan is marked applied (see UnappliedPageScans) in the same
+// transaction.
 //
 // fromScan's own triage flag (page_scans.triage) decides suspended-for-
 // triage vs. queued-outright for every passage this call inserts.
@@ -634,6 +738,18 @@ func (s *Store) ApplyScanPassages(documentID, fromScan int64, passages []ScanPas
 			if err := applyOneScanPassage(tx, documentID, rootID, triage, options, passage, now, &result); err != nil {
 				return err
 			}
+		}
+
+		if len(options.PagePrefixes) > 0 {
+			removed, err := removeRetakenPassages(tx, documentID, options.PagePrefixes, passages)
+			if err != nil {
+				return err
+			}
+			result.Removed += removed
+		}
+
+		if _, err := tx.Exec(`UPDATE page_scans SET applied = 1 WHERE id = ?`, fromScan); err != nil {
+			return fmt.Errorf("store: mark scan %d applied: %w", fromScan, err)
 		}
 		return nil
 	})
@@ -664,6 +780,19 @@ func applyOneScanPassage(tx *sql.Tx, documentID, rootID int64, triage bool,
 
 	switch {
 	case err == nil:
+		// A passage whose wording changed has new text in it — most often the
+		// second half of a page-turn sentence, read after the first half was
+		// already saved — and handwriting beside that new text deserves the
+		// same flag it would have got had both pages been read together.
+		// Gated on the wording changing so that a mere re-run (a page number
+		// typed in, another photo finishing) never re-raises a flag the
+		// reader already dismissed.
+		if quote != passage.Text && passage.NotePending && note == "" {
+			if _, err := tx.Exec(`UPDATE elements SET note_pending = 1 WHERE id = ?`, id); err != nil {
+				return fmt.Errorf("store: mark note pending for %s: %w", passage.Ref, err)
+			}
+		}
+
 		changed := quote != passage.Text || page != passage.Page || ordinal != passage.Ordinal
 		newContentHTML := contentHTML
 		if !startBlock.Valid {
@@ -800,6 +929,84 @@ func absorbScanRef(tx *sql.Tx, documentID int64, ref, passageQuote, passageNote 
 		return false, fmt.Errorf("store: delete absorbed ref %s: %w", ref, err)
 	}
 	return true, nil
+}
+
+// removeRetakenPassages runs rule 5 of ApplyScanPassages: an imported
+// passage under one of prefixes that passages (and their absorbed refs) no
+// longer account for is removed — but only if it is untouched since import.
+//
+// "Untouched" has to cover every way the reader can have made a passage their
+// own, because deleting an element cascades: cloze_ranges and activity_log
+// both reference it ON DELETE CASCADE. A first version checked only for a
+// note, a corrected wording and a child element, and so would have silently
+// taken a passage's cloze cards (which are rows on the passage itself, not
+// children) and its review history with it. The full list:
+//
+//   - no note, and no corrected wording (edited_quote);
+//   - no child element (an extract taken from it);
+//   - no cloze deletions;
+//   - never reviewed: no activity_log rows, and no repetitions;
+//   - no triage decision. An import queued outright stamps triaged_at and
+//     created_at from the same instant, so only a later triaged_at is the
+//     reader deciding; the two being equal (or triaged_at unset) is not.
+//
+// A misread passage the reader did act on stays, and is theirs to delete by
+// hand. Losing a retake's tidiness is the cheaper failure of the two.
+//
+// Matched with substr rather than LIKE for the same reason RenameScanRefs
+// is, and against prefix+":m" so that "scan:p94" never reaches into
+// "scan:p940".
+func removeRetakenPassages(tx *sql.Tx, documentID int64, prefixes []string, passages []ScanPassage) (int, error) {
+	produced := make(map[string]bool)
+	for _, passage := range passages {
+		produced[passage.Ref] = true
+		for _, ref := range passage.AbsorbedRefs {
+			produced[ref] = true
+		}
+	}
+
+	var stale []int64
+	for _, prefix := range prefixes {
+		head := prefix + ":m"
+		rows, err := tx.Query(`
+			SELECT e.id, e.external_ref FROM elements e
+			WHERE e.document_id = ? AND e.origin = ?
+			  AND substr(COALESCE(e.external_ref, ''), 1, ?) = ?
+			  AND e.note = '' AND e.edited_quote = ''
+			  AND e.reps = 0
+			  AND (e.triaged_at IS NULL OR e.triaged_at = e.created_at)
+			  AND NOT EXISTS (SELECT 1 FROM elements c WHERE c.parent_id = e.id)
+			  AND NOT EXISTS (SELECT 1 FROM cloze_ranges z WHERE z.element_id = e.id)
+			  AND NOT EXISTS (SELECT 1 FROM activity_log a WHERE a.element_id = e.id)`,
+			documentID, OriginImport, len(head), head,
+		)
+		if err != nil {
+			return 0, fmt.Errorf("store: list passages under %s: %w", prefix, err)
+		}
+		for rows.Next() {
+			var (
+				id  int64
+				ref string
+			)
+			if err := rows.Scan(&id, &ref); err != nil {
+				rows.Close()
+				return 0, fmt.Errorf("store: scan passage under %s: %w", prefix, err)
+			}
+			if !produced[ref] {
+				stale = append(stale, id)
+			}
+		}
+		if err := rows.Close(); err != nil {
+			return 0, fmt.Errorf("store: list passages under %s: %w", prefix, err)
+		}
+	}
+
+	for _, id := range stale {
+		if _, err := tx.Exec(`DELETE FROM elements WHERE id = ?`, id); err != nil {
+			return 0, fmt.Errorf("store: remove retaken passage %d: %w", id, err)
+		}
+	}
+	return len(stale), nil
 }
 
 // containsScanID reports whether target is among ids.

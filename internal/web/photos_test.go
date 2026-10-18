@@ -460,7 +460,7 @@ func TestRetryScanResetsAFailedScanAndWakes(t *testing.T) {
 	}
 	scanID := scans[0].ID
 
-	if err := db.FailPageScan(scanID, "model timed out", false, time.Now()); err != nil {
+	if err := db.FailPageScan(scanID, "model timed out", false, time.Time{}, time.Now()); err != nil {
 		t.Fatalf("FailPageScan: %v", err)
 	}
 	calls.wakes = 0 // ignore the upload's own wake
@@ -479,6 +479,46 @@ func TestRetryScanResetsAFailedScanAndWakes(t *testing.T) {
 	}
 	if scan.Status != store.ScanPending {
 		t.Errorf("status = %q, want pending", scan.Status)
+	}
+	if calls.wakes != 1 {
+		t.Errorf("WakeScanner called %d times, want 1", calls.wakes)
+	}
+}
+
+func TestRetryFailedScansRetriesEveryFailedPhoto(t *testing.T) {
+	server, db, calls := newTestServerWithScans(t)
+
+	response := postPhotos(t, server, "/import/photos", []photoFile{
+		{filename: "a.png", data: tinyPNG(t)},
+		{filename: "b.png", data: tinyPNG(t)},
+	}, url.Values{"title": {"Retry All Book"}})
+	id := documentIDFromScansRedirect(t, response)
+	scans, err := db.PageScans(id)
+	if err != nil {
+		t.Fatalf("PageScans: %v", err)
+	}
+	for _, scan := range scans {
+		if err := db.FailPageScan(scan.ID, "outage", false, time.Time{}, time.Now()); err != nil {
+			t.Fatalf("FailPageScan: %v", err)
+		}
+	}
+
+	page := get(t, server, "/documents/"+strconv.FormatInt(id, 10))
+	if !strings.Contains(page.Body.String(), "Retry all 2 failed photos") {
+		t.Errorf("contents page does not offer to retry both failed photos")
+	}
+
+	calls.wakes = 0
+	retry := post(t, server, "/documents/"+strconv.FormatInt(id, 10)+"/scans/retry", nil)
+	if retry.Code != http.StatusSeeOther {
+		t.Fatalf("status %d, body %s", retry.Code, retry.Body.String())
+	}
+	counts, err := db.CountPageScans(id)
+	if err != nil {
+		t.Fatalf("CountPageScans: %v", err)
+	}
+	if counts.Pending != 2 || counts.Failed != 0 {
+		t.Errorf("counts = %+v, want both pending", counts)
 	}
 	if calls.wakes != 1 {
 		t.Errorf("WakeScanner called %d times, want 1", calls.wakes)
@@ -733,7 +773,7 @@ func TestDocumentPageRendersScanSections(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddPageScan: %v", err)
 	}
-	if err := db.FailPageScan(failedID, "model timed out", false, now); err != nil {
+	if err := db.FailPageScan(failedID, "model timed out", false, time.Time{}, now); err != nil {
 		t.Fatalf("FailPageScan: %v", err)
 	}
 

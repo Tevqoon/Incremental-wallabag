@@ -241,6 +241,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /documents/{id}/images/{imageID}", s.handleDocumentImage)
 	mux.HandleFunc("GET /documents/{id}/scans/progress", s.handleScansProgress)
 	mux.HandleFunc("GET /documents/{id}/scans/{scanID}/image", s.handleScanImage)
+	mux.HandleFunc("POST /documents/{id}/scans/retry", s.handleRetryFailedScans)
 	mux.HandleFunc("POST /documents/{id}/scans/{scanID}/retry", s.handleRetryScan)
 	mux.HandleFunc("POST /documents/{id}/scans/{scanID}/label", s.handleLabelScan)
 	mux.HandleFunc("GET /extracts", s.handleExtracts)
