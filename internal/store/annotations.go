@@ -345,8 +345,10 @@ type AnnotatedFilter struct {
 	// Source restricts to one provider by name; empty means all of them.
 	Source string
 
-	// Since lists only documents with at least one annotation changed
-	// strictly after this instant. Zero lists everything.
+	// Since lists only documents with at least one annotation changed or
+	// deleted strictly after this instant — including a document none of
+	// whose annotations are left, so a consumer learns to empty it. Zero
+	// lists every document that has annotations now.
 	//
 	// Strictly after, not at or after, so that feeding the previous
 	// response's newest AnnotationsUpdatedAt straight back in returns what
@@ -365,9 +367,10 @@ type AnnotatedDocument struct {
 	// Annotations counts the passages hanging off this document.
 	Annotations int
 
-	// AnnotationsUpdatedAt is the newest updated_at among them. This is the
-	// value that tells an external consumer whether its own copy is stale,
-	// and the one to feed back as AnnotatedFilter.Since.
+	// AnnotationsUpdatedAt is the newest updated_at among them, or the
+	// newest deletion of one, whichever is later. This is the value that
+	// tells an external consumer whether its own copy is stale, and the one
+	// to feed back as AnnotatedFilter.Since.
 	//
 	// Deliberately not the document's own SourceUpdatedAt: that moves when
 	// the provider touches the article, which says nothing about whether any
@@ -377,7 +380,8 @@ type AnnotatedDocument struct {
 }
 
 // AnnotatedDocuments lists documents that have annotations, newest change
-// first.
+// first — and, given a Since, documents that lost annotations after it,
+// even their last one (see the deletions table, migration 021).
 //
 // This exists for consumers that mirror annotations somewhere else — the JSON
 // API's document feed, and through it an org-roam export — where the unit of
@@ -398,20 +402,39 @@ func (s *Store) AnnotatedDocuments(filter AnnotatedFilter) ([]AnnotatedDocument,
 		since = filter.Since.UTC().Format(timeFormat)
 	}
 
+	// "changed" is the later of the newest surviving annotation and the
+	// newest deletion. Without a since only documents with annotations are
+	// listed, as before; with one, a document whose annotations all went
+	// after it is listed too, with a count of zero.
 	rows, err := s.db.Query(`
+		WITH live AS (
+		    SELECT document_id, COUNT(*) AS n, MAX(updated_at) AS at
+		    FROM elements WHERE parent_id IS NOT NULL
+		    GROUP BY document_id
+		), gone AS (
+		    SELECT document_id, MAX(deleted_at) AS at
+		    FROM deletions WHERE kind = 'annotation'
+		    GROUP BY document_id
+		), changed AS (
+		    SELECT d.id AS document_id, COALESCE(live.n, 0) AS n,
+		           MAX(COALESCE(live.at, ''), COALESCE(gone.at, '')) AS at
+		    FROM documents d
+		    LEFT JOIN live ON live.document_id = d.id
+		    LEFT JOIN gone ON gone.document_id = d.id
+		)
 		SELECT d.id, d.source, d.external_id, d.url, d.title, d.author,
 		       d.language, d.has_content, d.is_archived, d.is_starred,
 		       d.reading_time, d.published_at, d.source_updated_at,
 		       d.imported_at, d.missing_upstream, d.display_title, d.subtitle,
-		       COUNT(e.id), MAX(e.updated_at)
+		       c.n, NULLIF(c.at, '')
 		FROM documents d
-		JOIN elements e ON e.document_id = d.id AND e.parent_id IS NOT NULL
+		JOIN changed c ON c.document_id = d.id
 		WHERE (? = '' OR d.source = ?)
-		GROUP BY d.id
-		HAVING (? IS NULL OR MAX(e.updated_at) > ?)
-		ORDER BY MAX(e.updated_at) DESC, d.id DESC
+		  AND (c.n > 0 OR ? IS NOT NULL)
+		  AND (? IS NULL OR c.at > ?)
+		ORDER BY c.at DESC, d.id DESC
 		LIMIT ?`,
-		filter.Source, filter.Source, since, since, limit,
+		filter.Source, filter.Source, since, since, since, limit,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("store: list annotated documents: %w", err)
@@ -444,6 +467,68 @@ func (s *Store) AnnotatedDocuments(filter AnnotatedFilter) ([]AnnotatedDocument,
 		documents = append(documents, row)
 	}
 	return documents, rows.Err()
+}
+
+// Deletion is one row of the deletions table: an annotation or a whole
+// document that is gone, for a mirror to forget.
+type Deletion struct {
+	// Kind is "annotation" or "document".
+	Kind string
+
+	// ID is the deleted element's id for an annotation, the document's id
+	// for a document.
+	ID int64
+
+	// DocumentID is the document an annotation belonged to; for a document,
+	// its own id again.
+	DocumentID int64
+
+	// ExternalRef is the upstream id it carried, if any: an annotation's
+	// external_ref, a document's external_id.
+	ExternalRef string
+
+	DeletedAt time.Time
+}
+
+// Deletions lists annotations and documents deleted strictly after since
+// (zero for all of them), oldest first, so a consumer can apply them in
+// order and keep the last DeletedAt as its next since. limit caps the rows;
+// zero or less means no cap.
+func (s *Store) Deletions(since time.Time, limit int) ([]Deletion, error) {
+	if limit <= 0 {
+		limit = -1
+	}
+	var after any
+	if !since.IsZero() {
+		after = since.UTC().Format(timeFormat)
+	}
+
+	rows, err := s.db.Query(`
+		SELECT kind, ref_id, document_id, external_ref, deleted_at
+		FROM deletions
+		WHERE (? IS NULL OR deleted_at > ?)
+		ORDER BY deleted_at, id
+		LIMIT ?`,
+		after, after, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: list deletions: %w", err)
+	}
+	defer rows.Close()
+
+	var deletions []Deletion
+	for rows.Next() {
+		var (
+			row       Deletion
+			deletedAt sql.NullString
+		)
+		if err := rows.Scan(&row.Kind, &row.ID, &row.DocumentID, &row.ExternalRef, &deletedAt); err != nil {
+			return nil, fmt.Errorf("store: scan deletion: %w", err)
+		}
+		row.DeletedAt = parseTime(deletedAt)
+		deletions = append(deletions, row)
+	}
+	return deletions, rows.Err()
 }
 
 // RootElement returns a document's root topic — the queue entry standing for

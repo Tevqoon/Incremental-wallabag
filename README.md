@@ -288,6 +288,7 @@ or capture templates. That knowledge stays in Emacs, which already has it.
 ```
 GET   /api/documents                 documents that have annotations
 GET   /api/documents/{id}            one document, with all of its annotations
+GET   /api/deletions                 annotations and documents deleted
 GET   /api/annotations/{id}          one annotation
 PATCH /api/annotations/{id}          edit title, note, chapter or text
 ```
@@ -298,6 +299,16 @@ document's passages — and feeding it back as `since` returns only what has
 moved since, which is what makes an exporter incremental rather than a full
 rewrite every run. `?since` is strict, so handing back the value you were just
 given returns nothing rather than the row that produced it.
+
+Deleting counts as a change. A document that lost an annotation shows up in
+`?since` with `annotations_updated_at` moved on, and one that lost its last
+annotation shows up too, with an `annotation_count` of 0, so a mirror that
+rewrites a document's file from `GET /api/documents/{id}` drops the passage
+or empties the file. A deleted document never appears in that feed again,
+so `GET /api/deletions?since=<RFC3339>` lists what is gone, oldest first:
+each entry has a `kind` (`annotation` or `document`), the `id` it was served
+under, its `document_id`, its upstream `external_id` if it had one, and
+`deleted_at` to keep as the next `since`. It takes `?limit=` too.
 
 `PATCH` takes any of `title`, `note`, `chapter`, `text`. Fields you leave out
 are left alone; sending `""` clears one. An unknown field is a 400 rather than

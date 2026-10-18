@@ -190,6 +190,7 @@ type annotationPatch struct {
 // prefix.
 func (s *Server) registerAPI(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/documents", s.handleAPIDocuments)
+	mux.HandleFunc("GET /api/deletions", s.handleAPIDeletions)
 	mux.HandleFunc("GET /api/documents/{id}", s.handleAPIDocument)
 	mux.HandleFunc("GET /api/annotations/{id}", s.handleAPIAnnotation)
 	mux.HandleFunc("PATCH /api/annotations/{id}", s.handleAPIEditAnnotation)
@@ -199,7 +200,8 @@ func (s *Server) registerAPI(mux *http.ServeMux) {
 // first.
 //
 // Query parameters: since (RFC3339, only documents whose annotations changed
-// after it), source (a provider name), limit.
+// or were deleted after it — including one with none left), source (a
+// provider name), limit.
 func (s *Server) handleAPIDocuments(w http.ResponseWriter, r *http.Request) {
 	filter := store.AnnotatedFilter{Source: r.FormValue("source")}
 
@@ -547,6 +549,64 @@ func apiTime(t time.Time) string {
 		return ""
 	}
 	return t.Format(time.RFC3339)
+}
+
+// apiDeletion is one entry of GET /api/deletions — see store.Deletion.
+type apiDeletion struct {
+	// Kind is "annotation" or "document".
+	Kind string `json:"kind"`
+
+	// ID is what the deleted thing was served as: an annotation's id, or a
+	// document's.
+	ID         int64  `json:"id"`
+	DocumentID int64  `json:"document_id"`
+	ExternalID string `json:"external_id,omitempty"`
+	DeletedAt  string `json:"deleted_at"`
+}
+
+// handleAPIDeletions lists annotations and documents deleted since a point,
+// oldest first, so a mirror can forget them: a deleted document is never in
+// the document feed again, and nothing else would tell a consumer its copy
+// should go.
+//
+// Query parameters: since (RFC3339, strictly after), limit.
+func (s *Server) handleAPIDeletions(w http.ResponseWriter, r *http.Request) {
+	var since time.Time
+	if raw := r.FormValue("since"); raw != "" {
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			s.apiError(w, http.StatusBadRequest,
+				fmt.Sprintf("since must be an RFC3339 timestamp: %v", err))
+			return
+		}
+		since = parsed
+	}
+	limit := 0
+	if raw := r.FormValue("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 {
+			s.apiError(w, http.StatusBadRequest, "limit must be a non-negative integer")
+			return
+		}
+		limit = parsed
+	}
+
+	deletions, err := s.store.Deletions(since, limit)
+	if err != nil {
+		s.apiFail(w, err)
+		return
+	}
+	payload := make([]apiDeletion, 0, len(deletions))
+	for _, deletion := range deletions {
+		payload = append(payload, apiDeletion{
+			Kind:       deletion.Kind,
+			ID:         deletion.ID,
+			DocumentID: deletion.DocumentID,
+			ExternalID: deletion.ExternalRef,
+			DeletedAt:  apiTime(deletion.DeletedAt),
+		})
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{"deletions": payload})
 }
 
 // apiDate renders a due date in the same YYYY-MM-DD form the store keeps it
