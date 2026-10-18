@@ -23,6 +23,47 @@ func testStore(t *testing.T) *Store {
 	return db
 }
 
+func queuedCount(t *testing.T, db *Store, sourceName string) int {
+	t.Helper()
+	writes, err := db.PendingWrites(sourceName, 1000)
+	if err != nil {
+		t.Fatalf("PendingWrites(%s): %v", sourceName, err)
+	}
+	return len(writes)
+}
+
+// TestMigrationDropsQueuedUploadWrites: the rows the old behaviour left behind
+// are removed by migration 021, and a real provider's rows are left alone.
+//
+// The migration's SQL is run directly rather than by rewinding user_version and
+// reopening: a rewind would re-run every later migration too, and an ALTER
+// TABLE ADD COLUMN cannot be applied twice.
+func TestMigrationDropsQueuedUploadWrites(t *testing.T) {
+	db := testStore(t)
+	for _, name := range []string{SourceUpload, SourceUpload, "wallabag"} {
+		if _, err := db.db.Exec(`
+			INSERT INTO pending_writes (source, external_id, operation, payload, created_at)
+			VALUES (?, 'x', 'archive', '1', ?)`, name, formatTime(time.Now())); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	statements, err := migrationFiles.ReadFile("migrations/021_drop_upload_writes.sql")
+	if err != nil {
+		t.Fatalf("read migration: %v", err)
+	}
+	if _, err := db.db.Exec(string(statements)); err != nil {
+		t.Fatalf("run migration: %v", err)
+	}
+
+	if got := queuedCount(t, db, SourceUpload); got != 0 {
+		t.Errorf("upload writes after migration = %d, want 0", got)
+	}
+	if got := queuedCount(t, db, "wallabag"); got != 1 {
+		t.Errorf("wallabag writes after migration = %d, want 1", got)
+	}
+}
+
 func TestMigrationsAreIdempotent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test.db")
 

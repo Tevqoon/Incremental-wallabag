@@ -1,0 +1,17 @@
+-- Uploaded and photographed books have no provider, so the writes queued for
+-- them could never be delivered. Before the enqueue guard, enqueueWrite and
+-- enqueueHighlightCreate queued them anyway: every archive, tag change,
+-- highlight deletion and document deletion on such a book left a row in
+-- pending_writes under source = 'upload'. PendingWrites filters by the
+-- provider's name and no provider answers to 'upload', so no drain ever
+-- selected one. Checked against the production database before this
+-- migration: 54 such rows going back to August (7 archive, 7 tag_add, 39
+-- highlight_delete, 1 entry_delete), every one still at zero attempts — they
+-- were never even tried.
+--
+-- Each row describes a change that already happened locally, in the same
+-- transaction that queued it, and there is nowhere for it to go, so deleting
+-- them loses nothing. New upload writes are no longer queued at all — the
+-- enqueue functions refuse the source — so the rows removed here are only the
+-- leftovers from before that guard, and nothing refills them.
+DELETE FROM pending_writes WHERE source = 'upload';
