@@ -1852,11 +1852,57 @@ func (s *Store) DeleteExtract(id int64) error {
 			}
 		}
 
+		// Everything under it goes too, by cascade, and an extract pulled
+		// from this one was pushed upstream as an annotation of its own. Left
+		// there, the next sync finds an annotation with no local row and
+		// imports it straight back as a fresh highlight.
+		descendantRefs, err := descendantExternalRefs(tx, id)
+		if err != nil {
+			return err
+		}
+		for _, ref := range descendantRefs {
+			if err := enqueueWrite(tx, docSource, ref, OpHighlightDelete, ""); err != nil {
+				return err
+			}
+		}
+
 		if _, err := tx.Exec(`DELETE FROM elements WHERE id = ?`, id); err != nil {
 			return fmt.Errorf("store: delete element %d: %w", id, err)
 		}
 		return nil
 	})
+}
+
+// descendantExternalRefs returns the upstream ids of every element below id,
+// at any depth — what DeleteExtract's cascade takes with it.
+//
+// Read into a slice and the rows closed before the caller enqueues anything:
+// with the pool capped at one connection, a write issued while this SELECT is
+// still open would wait on the connection the SELECT itself holds.
+func descendantExternalRefs(tx *sql.Tx, id int64) ([]string, error) {
+	rows, err := tx.Query(`
+		WITH RECURSIVE below(id) AS (
+		    SELECT id FROM elements WHERE parent_id = ?
+		    UNION
+		    SELECT e.id FROM elements e JOIN below b ON e.parent_id = b.id
+		)
+		SELECT e.external_ref FROM elements e JOIN below b ON e.id = b.id
+		WHERE COALESCE(e.external_ref, '') != ''
+		ORDER BY e.id`, id)
+	if err != nil {
+		return nil, fmt.Errorf("store: list descendants of element %d: %w", id, err)
+	}
+	defer rows.Close()
+
+	var refs []string
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			return nil, fmt.Errorf("store: scan descendant of element %d: %w", id, err)
+		}
+		refs = append(refs, ref)
+	}
+	return refs, rows.Err()
 }
 
 // SummariseQuote builds a short title from a passage's opening words.
