@@ -1433,6 +1433,13 @@ func TestArticleImagesAreFetchedAndServedLocally(t *testing.T) {
 		t.Errorf("%s: Cache-Control = %q, want a long-lived, immutable value",
 			match[1], image.Header().Get("Cache-Control"))
 	}
+	if !strings.Contains(image.Header().Get("Content-Security-Policy"), "sandbox") {
+		t.Errorf("%s: Content-Security-Policy = %q, want the image sandboxed",
+			match[1], image.Header().Get("Content-Security-Policy"))
+	}
+	if got := image.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("%s: X-Content-Type-Options = %q, want nosniff", match[1], got)
+	}
 
 	// A second read must not fetch the image again — that is the entire
 	// point of caching it.

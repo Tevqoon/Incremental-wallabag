@@ -416,7 +416,14 @@ func (s *Server) handleDocumentImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The content type is whatever the article's own server said, so an
+	// image/svg+xml with a script in it would run in increader's origin if
+	// anyone opened this URL directly. An <img> never runs it; the sandbox
+	// stops a direct visit from doing so either, and nosniff stops a
+	// mislabelled body from being read as anything else.
 	w.Header().Set("Content-Type", image.ContentType)
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	w.Write(image.Data)
 }
