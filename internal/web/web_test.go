@@ -1010,6 +1010,39 @@ func TestGradeReschedulesAndMovesOn(t *testing.T) {
 	}
 }
 
+// TestGradeTwiceFromTheSamePageCountsOnce: a double tap posts the same
+// grade twice — htmx queues the second behind the first — and so does
+// grading again from a page reached with Back. Both carry the schedule the
+// page was rendered with, which the first grade has already moved on from.
+func TestGradeTwiceFromTheSamePageCountsOnce(t *testing.T) {
+	server, db, _ := newTestServer(t, true)
+
+	page := get(t, server, "/read/1").Body.String()
+	before, _ := db.ElementByID(1)
+	seen := scheduleToken(before.Schedule)
+	if !strings.Contains(page, seen) {
+		t.Fatalf("the reader page does not carry the schedule token %q", seen)
+	}
+
+	for i := 0; i < 2; i++ {
+		response := post(t, server, "/elements/1/grade", url.Values{"grade": {"next"}, "seen": {seen}})
+		if response.Code != http.StatusSeeOther {
+			t.Fatalf("grade %d: status %d", i+1, response.Code)
+		}
+	}
+	after, _ := db.ElementByID(1)
+	if after.Schedule.Reps != 1 {
+		t.Errorf("reps = %d after the same grade twice, want 1", after.Schedule.Reps)
+	}
+
+	// A grade made from the page as it now stands still applies.
+	post(t, server, "/elements/1/grade", url.Values{"grade": {"next"}, "seen": {scheduleToken(after.Schedule)}})
+	again, _ := db.ElementByID(1)
+	if again.Schedule.Reps != 2 {
+		t.Errorf("reps = %d after a fresh grade, want 2", again.Schedule.Reps)
+	}
+}
+
 func TestGradeDismissRemovesFromQueue(t *testing.T) {
 	server, db, _ := newTestServer(t, true)
 

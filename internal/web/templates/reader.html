@@ -180,7 +180,7 @@
         <div class="grade-buttons">
           <button class="primary"
                   hx-post="/elements/{{.Element.ID}}/grade"
-                  hx-vals='js:{grade:"done", block: topBlock()}'
+                  hx-vals='js:{grade:"done", seen:"{{scheduleToken .Element.Schedule}}", block: topBlock()}'
                   title="Finished with this. Archives it in wallabag too.">
             Done<small>{{if .Element.IsRoot}}archive{{else}}finish{{end}}</small>
           </button>
@@ -208,9 +208,9 @@
       <!-- Set apart because they are rare and hard to undo; next to Done is
            how they get pressed by accident. -->
       <button hx-post="/elements/{{.Element.ID}}/grade"
-              hx-vals='js:{grade:"suspend", block: topBlock()}'
+              hx-vals='js:{grade:"suspend", seen:"{{scheduleToken .Element.Schedule}}", block: topBlock()}'
               title="Park indefinitely; keeps its interval and resumes where it left off">Suspend</button>
-      <button class="danger" hx-post="/elements/{{.Element.ID}}/grade" hx-vals='{"grade":"dismiss"}'
+      <button class="danger" hx-post="/elements/{{.Element.ID}}/grade" hx-vals='{"grade":"dismiss", "seen":"{{scheduleToken .Element.Schedule}}"}'
               title="Abandon unread. Archives it in wallabag too.">Dismiss</button>
     </div>
   </footer>
@@ -255,7 +255,7 @@
 {{define "schedule-buttons"}}
 <div id="schedule-buttons" class="grade-buttons schedule-buttons">
   <button hx-post="/elements/{{.Element.ID}}/grade"
-          hx-vals='js:{grade:"sooner", block: topBlock()}'
+          hx-vals='js:{grade:"sooner", seen:"{{scheduleToken .Element.Schedule}}", block: topBlock()}'
           title="More interesting than expected; bring it back sooner">
     Sooner<small>{{index .Intervals "sooner"}}</small>
   </button>
@@ -269,7 +269,7 @@
   {{end}}
   <button class="primary"
           hx-post="/elements/{{.Element.ID}}/grade"
-          hx-vals='js:{grade:"next", block: topBlock()}'
+          hx-vals='js:{grade:"next", seen:"{{scheduleToken .Element.Schedule}}", block: topBlock()}'
           title="Read a slice; come back on schedule">
     Next<small>{{index .Intervals "next"}}</small>
   </button>

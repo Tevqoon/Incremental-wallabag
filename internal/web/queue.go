@@ -351,6 +351,18 @@ func (s *Server) handleGrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The reader page says which schedule it was showing. A grade that
+	// arrives once that schedule has already moved on is the same decision
+	// made twice — a double tap, which htmx queues behind the first request
+	// rather than dropping, or a grade bar reached again with Back — and
+	// applying it would count a second repetition the reader never did.
+	// Bury is exempt: doing it twice is harmless, and it moves nothing the
+	// token reflects.
+	if seen := r.FormValue("seen"); seen != "" && grade != ir.GradeBury && seen != scheduleToken(element.Schedule) {
+		s.redirect(w, r, redirectTarget(r, nextPath(queueOf(element))))
+		return
+	}
+
 	if block, err := strconv.Atoi(r.FormValue("block")); err == nil && block >= 0 {
 		if err := s.store.SetReadBlock(id, block); err != nil {
 			s.fail(w, err)
@@ -389,6 +401,17 @@ func (s *Server) handleGrade(w http.ResponseWriter, r *http.Request) {
 // Pulled out so the library's bulk actions bar can apply the very same grade
 // a reader would give one article at a time, to many at once, without a
 // second implementation of what "Done" or "Suspend" actually does.
+// scheduleToken is what a grade changes about an element, as one string —
+// see handleGrade. Next and Sooner move reps, Done, Dismiss and Suspend move
+// state, and a backlog preset moves the due date.
+func scheduleToken(schedule ir.Schedule) string {
+	due := ""
+	if !schedule.DueOn.IsZero() {
+		due = schedule.DueOn.Format("2006-01-02")
+	}
+	return fmt.Sprintf("%s/%d/%s", schedule.State, schedule.Reps, due)
+}
+
 func (s *Server) applyGrade(element store.Element, grade ir.Grade) error {
 	// The whole scheduling decision is one pure function call. Everything
 	// stateful — reading the row, writing it back — stays here.
