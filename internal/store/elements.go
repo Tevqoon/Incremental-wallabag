@@ -1024,6 +1024,12 @@ type highlightImport struct {
 func insertHighlights(tx *sql.Tx, documentID, parentID int64, highlights []source.Highlight, options highlightImport, now time.Time) (int, error) {
 	imported := 0
 
+	// Every ref this batch carries — see adoptableByQuote.
+	incoming := make(map[string]bool, len(highlights))
+	for _, highlight := range highlights {
+		incoming[highlight.ExternalID] = true
+	}
+
 	for _, highlight := range highlights {
 		quote := strings.TrimSpace(highlight.Quote)
 		note := strings.TrimSpace(highlight.Note)
@@ -1108,12 +1114,7 @@ func insertHighlights(tx *sql.Tx, documentID, parentID int64, highlights []sourc
 		var existingID int64
 		err = sql.ErrNoRows
 		if quote != "" {
-			err = tx.QueryRow(`
-				SELECT id FROM elements
-				WHERE document_id = ? AND parent_id = ? AND quote = ?
-				LIMIT 1`,
-				documentID, parentID, quote,
-			).Scan(&existingID)
+			existingID, err = adoptableByQuote(tx, documentID, parentID, quote, incoming)
 		}
 		switch {
 		case err == nil:
@@ -1123,6 +1124,16 @@ func insertHighlights(tx *sql.Tx, documentID, parentID int64, highlights []sourc
 				highlight.ExternalID, formatTime(now), existingID,
 			); err != nil {
 				return imported, fmt.Errorf("store: adopt new ref for highlight %s: %w", highlight.ExternalID, err)
+			}
+			// A book export's ids are hashed from the note as well as the
+			// passage, so fixing a note in KOReader and re-uploading arrives
+			// here — same passage, new id — rather than at the refresh
+			// above. The correction is the point of the re-upload, so it
+			// lands here too.
+			if hasBookMetadata(highlight) {
+				if err := refreshAnnotation(tx, documentID, highlight, now); err != nil {
+					return imported, err
+				}
 			}
 			continue
 		case !errors.Is(err, sql.ErrNoRows):
@@ -1187,6 +1198,46 @@ func insertHighlights(tx *sql.Tx, documentID, parentID int64, highlights []sourc
 	}
 
 	return imported, nil
+}
+
+// adoptableByQuote finds a row insertHighlights may move a new ref onto: the
+// same passage under the same parent, whose own ref is not one this batch
+// still carries. sql.ErrNoRows when there is none.
+//
+// The second condition is what lets one book hold the same words twice — a
+// single-word highlight made on two pages, say. Without it the second
+// highlight adopted the first's row instead of getting its own, and every
+// re-import after that moved the row's ref back and forth between the two
+// while the second passage was never stored at all. A row whose ref is still
+// in the batch is that highlight's own, not a stale copy of this one.
+func adoptableByQuote(tx *sql.Tx, documentID, parentID int64, quote string, incoming map[string]bool) (int64, error) {
+	rows, err := tx.Query(`
+		SELECT id, COALESCE(external_ref, '') FROM elements
+		WHERE document_id = ? AND parent_id = ? AND quote = ?
+		ORDER BY id`,
+		documentID, parentID, quote,
+	)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			id  int64
+			ref string
+		)
+		if err := rows.Scan(&id, &ref); err != nil {
+			return 0, err
+		}
+		if ref == "" || !incoming[ref] {
+			return id, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	return 0, sql.ErrNoRows
 }
 
 // annotationTitle names an imported annotation for a list.

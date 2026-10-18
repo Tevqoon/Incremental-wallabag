@@ -757,3 +757,84 @@ func TestCountByStateCountsEverySourceWhenUnfiltered(t *testing.T) {
 		t.Errorf("untriaged = %d, want 3", entries[0].UntriagedCount)
 	}
 }
+
+// TestReimportWithAnEditedNoteLandsTheNote: a KOReader export's ids hash the
+// note too, so a note fixed in KOReader comes back under a new id. It is
+// matched to the stored passage by its quote, and the new note must land
+// rather than only the new id.
+func TestReimportWithAnEditedNoteLandsTheNote(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	first, err := db.ImportAnnotations(book(), ImportOptions{Triage: true}, now)
+	if err != nil {
+		t.Fatalf("first import: %v", err)
+	}
+
+	updated := book()
+	updated.Highlights[0].ExternalID = "k-1-renoted"
+	updated.Highlights[0].Note = "the mirror does it, and the light"
+	second, err := db.ImportAnnotations(updated, ImportOptions{Triage: true}, now)
+	if err != nil {
+		t.Fatalf("second import: %v", err)
+	}
+	if second.Imported != 0 {
+		t.Errorf("imported %d, want 0 (the edited annotation is the same passage)", second.Imported)
+	}
+
+	annotations, err := db.DocumentAnnotations(first.DocumentID)
+	if err != nil {
+		t.Fatalf("DocumentAnnotations: %v", err)
+	}
+	if len(annotations) != 3 {
+		t.Fatalf("stored %d annotations, want 3", len(annotations))
+	}
+	for _, annotation := range annotations {
+		if annotation.Quote != "the painter is standing back" {
+			continue
+		}
+		if annotation.ExternalRef != "k-1-renoted" {
+			t.Errorf("external_ref = %q, want the new id adopted", annotation.ExternalRef)
+		}
+		if annotation.Note != "the mirror does it, and the light" {
+			t.Errorf("note = %q, want the corrected note", annotation.Note)
+		}
+		return
+	}
+	t.Fatal("the passage is gone")
+}
+
+// TestTheSameWordsTwiceAreTwoAnnotations: a book can hold the same passage
+// twice — a one-word highlight on two pages. The second must be stored as
+// its own annotation, not adopted onto the first, and a re-import must leave
+// both where they are.
+func TestTheSameWordsTwiceAreTwoAnnotations(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	twice := book()
+	twice.Highlights = []source.Highlight{
+		{ExternalID: "k-a", Quote: "Dasein", Page: "12", Ordinal: 1},
+		{ExternalID: "k-b", Quote: "Dasein", Page: "80", Ordinal: 2},
+	}
+	for round := 1; round <= 2; round++ {
+		if _, err := db.ImportAnnotations(twice, ImportOptions{Triage: true}, now); err != nil {
+			t.Fatalf("import %d: %v", round, err)
+		}
+		document, err := db.DocumentByExternalID(SourceUpload, twice.ExternalID)
+		if err != nil {
+			t.Fatalf("DocumentByExternalID: %v", err)
+		}
+		annotations, err := db.DocumentAnnotations(document.ID)
+		if err != nil {
+			t.Fatalf("DocumentAnnotations: %v", err)
+		}
+		pages := map[string]string{}
+		for _, annotation := range annotations {
+			pages[annotation.ExternalRef] = annotation.Page
+		}
+		if len(annotations) != 2 || pages["k-a"] != "12" || pages["k-b"] != "80" {
+			t.Errorf("after import %d: refs and pages = %v, want k-a on 12 and k-b on 80", round, pages)
+		}
+	}
+}
