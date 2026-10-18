@@ -67,9 +67,12 @@ func (s *Store) inTransaction(fn func(*sql.Tx) error) error {
 // Takes a transaction rather than opening its own, so callers can commit it
 // alongside the local change it corresponds to.
 func enqueueWrite(tx *sql.Tx, sourceName, externalID, operation, payload string) error {
-	if externalID == "" {
+	if externalID == "" || sourceName == SourceUpload {
 		// A document with no provider identity — none exist today, but a
-		// locally created one would — has nothing to write back to.
+		// locally created one would — has nothing to write back to. Nor does
+		// an uploaded book: its external_id is a file's identity, not an
+		// upstream entry, and no provider ever drains "upload" writes, so
+		// queuing one only leaves a row that sits there for good.
 		return nil
 	}
 
@@ -116,9 +119,9 @@ func (s *Store) EnqueueWrite(sourceName, externalID, operation, payload string) 
 // later, because that pairing is exactly what lets a successful write be
 // matched back to the row it needs to update — see SetExternalRef.
 func enqueueHighlightCreate(tx *sql.Tx, elementID int64, sourceName, externalID, quote string) error {
-	if externalID == "" {
+	if externalID == "" || sourceName == SourceUpload {
 		// The document has no provider identity, so there is nothing to push
-		// this to.
+		// this to — see enqueueWrite.
 		return nil
 	}
 	_, err := tx.Exec(`

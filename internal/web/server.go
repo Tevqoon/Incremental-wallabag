@@ -681,6 +681,10 @@ var templateFuncs = template.FuncMap{
 	// left. Kept this narrow deliberately — arithmetic belongs in handlers.
 	"sub": func(a, b int) int { return a - b },
 
+	// scheduleToken stamps a grade button with the schedule it was rendered
+	// against, so a repeated grade can be told apart — see handleGrade.
+	"scheduleToken": scheduleToken,
+
 	// percent renders a 0..1 priority as a whole number for display.
 	"percent": func(value float64) int { return int(value*100 + 0.5) },
 

@@ -1024,6 +1024,12 @@ type highlightImport struct {
 func insertHighlights(tx *sql.Tx, documentID, parentID int64, highlights []source.Highlight, options highlightImport, now time.Time) (int, error) {
 	imported := 0
 
+	// Every ref this batch carries — see adoptableByQuote.
+	incoming := make(map[string]bool, len(highlights))
+	for _, highlight := range highlights {
+		incoming[highlight.ExternalID] = true
+	}
+
 	for _, highlight := range highlights {
 		quote := strings.TrimSpace(highlight.Quote)
 		note := strings.TrimSpace(highlight.Note)
@@ -1108,12 +1114,7 @@ func insertHighlights(tx *sql.Tx, documentID, parentID int64, highlights []sourc
 		var existingID int64
 		err = sql.ErrNoRows
 		if quote != "" {
-			err = tx.QueryRow(`
-				SELECT id FROM elements
-				WHERE document_id = ? AND parent_id = ? AND quote = ?
-				LIMIT 1`,
-				documentID, parentID, quote,
-			).Scan(&existingID)
+			existingID, err = adoptableByQuote(tx, documentID, parentID, quote, incoming, hasPosition(highlight))
 		}
 		switch {
 		case err == nil:
@@ -1123,6 +1124,16 @@ func insertHighlights(tx *sql.Tx, documentID, parentID int64, highlights []sourc
 				highlight.ExternalID, formatTime(now), existingID,
 			); err != nil {
 				return imported, fmt.Errorf("store: adopt new ref for highlight %s: %w", highlight.ExternalID, err)
+			}
+			// A book export's ids are hashed from the note as well as the
+			// passage, so fixing a note in KOReader and re-uploading arrives
+			// here — same passage, new id — rather than at the refresh
+			// above. The correction is the point of the re-upload, so it
+			// lands here too.
+			if hasBookMetadata(highlight) {
+				if err := refreshAnnotation(tx, documentID, highlight, now); err != nil {
+					return imported, err
+				}
 			}
 			continue
 		case !errors.Is(err, sql.ErrNoRows):
@@ -1189,6 +1200,55 @@ func insertHighlights(tx *sql.Tx, documentID, parentID int64, highlights []sourc
 	return imported, nil
 }
 
+// adoptableByQuote finds a row insertHighlights may move a new ref onto: the
+// same passage under the same parent. sql.ErrNoRows when there is none.
+//
+// For a positioned highlight (see hasPosition) a row whose own ref is still in
+// this batch is not adoptable. That is what lets one book hold the same words
+// twice — a single-word highlight made on two pages, say. Without it the second
+// highlight adopted the first's row instead of getting its own, and every
+// re-import after that moved the row's ref back and forth between the two
+// while the second passage was never stored at all.
+//
+// An unpositioned highlight must still adopt such a row, because for wallabag
+// the same words arriving twice in one batch is the normal trace of a
+// highlight whose id changed, not two highlights: UpdateHighlightLocation
+// creates the replacement before deleting the original, and when that
+// best-effort delete fails the next listing carries both ids for the one
+// passage. Refusing to adopt there gave the new id a second local row with a
+// fresh schedule — the duplicate this adoption exists to prevent. A wallabag
+// highlight carries no page, chapter or ordinal, so it never takes the
+// positioned branch.
+func adoptableByQuote(tx *sql.Tx, documentID, parentID int64, quote string, incoming map[string]bool, positioned bool) (int64, error) {
+	rows, err := tx.Query(`
+		SELECT id, COALESCE(external_ref, '') FROM elements
+		WHERE document_id = ? AND parent_id = ? AND quote = ?
+		ORDER BY id`,
+		documentID, parentID, quote,
+	)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			id  int64
+			ref string
+		)
+		if err := rows.Scan(&id, &ref); err != nil {
+			return 0, err
+		}
+		if ref == "" || !positioned || !incoming[ref] {
+			return id, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	return 0, sql.ErrNoRows
+}
+
 // annotationTitle names an imported annotation for a list.
 //
 // A book annotation's chapter is a far better label than the first eighty
@@ -1226,6 +1286,15 @@ func annotationHTML(quote, note string) string {
 
 // hasBookMetadata reports whether a highlight carries anything only a book
 // import produces — the signal that re-importing it is worth a write.
+// hasPosition reports whether a highlight says where in its work it sits, which
+// is what makes the same words twice two highlights rather than one — see
+// adoptableByQuote. Narrower than hasBookMetadata on purpose: that also counts
+// a note, and a wallabag annotation's comment arrives as a note while saying
+// nothing about position.
+func hasPosition(highlight source.Highlight) bool {
+	return highlight.Page != "" || highlight.Chapter != "" || highlight.Ordinal > 0
+}
+
 func hasBookMetadata(highlight source.Highlight) bool {
 	return highlight.Chapter != "" || highlight.Page != "" ||
 		highlight.Color != "" || highlight.Ordinal > 0 ||
@@ -1852,11 +1921,57 @@ func (s *Store) DeleteExtract(id int64) error {
 			}
 		}
 
+		// Everything under it goes too, by cascade, and an extract pulled
+		// from this one was pushed upstream as an annotation of its own. Left
+		// there, the next sync finds an annotation with no local row and
+		// imports it straight back as a fresh highlight.
+		descendantRefs, err := descendantExternalRefs(tx, id)
+		if err != nil {
+			return err
+		}
+		for _, ref := range descendantRefs {
+			if err := enqueueWrite(tx, docSource, ref, OpHighlightDelete, ""); err != nil {
+				return err
+			}
+		}
+
 		if _, err := tx.Exec(`DELETE FROM elements WHERE id = ?`, id); err != nil {
 			return fmt.Errorf("store: delete element %d: %w", id, err)
 		}
 		return nil
 	})
+}
+
+// descendantExternalRefs returns the upstream ids of every element below id,
+// at any depth — what DeleteExtract's cascade takes with it.
+//
+// Read into a slice and the rows closed before the caller enqueues anything:
+// with the pool capped at one connection, a write issued while this SELECT is
+// still open would wait on the connection the SELECT itself holds.
+func descendantExternalRefs(tx *sql.Tx, id int64) ([]string, error) {
+	rows, err := tx.Query(`
+		WITH RECURSIVE below(id) AS (
+		    SELECT id FROM elements WHERE parent_id = ?
+		    UNION
+		    SELECT e.id FROM elements e JOIN below b ON e.parent_id = b.id
+		)
+		SELECT e.external_ref FROM elements e JOIN below b ON e.id = b.id
+		WHERE COALESCE(e.external_ref, '') != ''
+		ORDER BY e.id`, id)
+	if err != nil {
+		return nil, fmt.Errorf("store: list descendants of element %d: %w", id, err)
+	}
+	defer rows.Close()
+
+	var refs []string
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			return nil, fmt.Errorf("store: scan descendant of element %d: %w", id, err)
+		}
+		refs = append(refs, ref)
+	}
+	return refs, rows.Err()
 }
 
 // SummariseQuote builds a short title from a passage's opening words.

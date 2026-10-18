@@ -3122,3 +3122,123 @@ func TestSpreadDueExtractsRejectsAnEmptyWindow(t *testing.T) {
 		t.Error("a zero-day window was accepted")
 	}
 }
+
+// TestDeleteExtractQueuesRemovalOfWhatItTakesWithIt: an extract pulled from
+// the deleted one was pushed upstream too, and goes by cascade. Without its
+// own delete queued, the next sync would import it straight back.
+func TestDeleteExtractQueuesRemovalOfWhatItTakesWithIt(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{{
+		ExternalID: "1", Title: "An article", UpdatedAt: now,
+		Highlights: []source.Highlight{{ExternalID: "97418", Quote: "A passage, and more."}},
+	}}, 0, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+	extracts, _ := db.ChildrenOf(1)
+	if len(extracts) != 1 {
+		t.Fatalf("got %d extracts, want 1", len(extracts))
+	}
+	childID, err := db.CreateExtract(NewExtract{
+		ParentID: extracts[0].ID, DocumentID: 1, Quote: "A passage", ContentHTML: "<p>A passage</p>",
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+	if err := db.SetExternalRef(childID, "97500"); err != nil {
+		t.Fatalf("SetExternalRef: %v", err)
+	}
+
+	if err := db.DeleteExtract(extracts[0].ID); err != nil {
+		t.Fatalf("DeleteExtract: %v", err)
+	}
+
+	writes, err := db.PendingWrites("wallabag", 10)
+	if err != nil {
+		t.Fatalf("PendingWrites: %v", err)
+	}
+	deleted := map[string]bool{}
+	for _, write := range writes {
+		if write.Operation == OpHighlightDelete {
+			deleted[write.ExternalID] = true
+		}
+	}
+	if !deleted["97418"] || !deleted["97500"] || len(writes) != 2 {
+		t.Errorf("queued %+v, want highlight deletes for 97418 and its child 97500", writes)
+	}
+}
+
+// TestUploadedBooksQueueNoWrites: an uploaded book has no upstream, so
+// nothing done to it should leave a write that no provider will ever drain.
+func TestUploadedBooksQueueNoWrites(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+
+	documentID, err := db.CreateScannedBook("A paper book", "", "", now)
+	if err != nil {
+		t.Fatalf("CreateScannedBook: %v", err)
+	}
+	root, err := db.RootElement(documentID)
+	if err != nil {
+		t.Fatalf("RootElement: %v", err)
+	}
+	extractID, err := db.CreateExtract(NewExtract{
+		ParentID: root.ID, DocumentID: documentID, Quote: "Mine.", ContentHTML: "<p>Mine.</p>",
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+	if err := db.DeleteExtract(extractID); err != nil {
+		t.Fatalf("DeleteExtract: %v", err)
+	}
+	if err := db.DeleteDocument(documentID); err != nil {
+		t.Fatalf("DeleteDocument: %v", err)
+	}
+
+	var queued int
+	if err := db.DB().QueryRow(`SELECT COUNT(*) FROM pending_writes`).Scan(&queued); err != nil {
+		t.Fatalf("count pending writes: %v", err)
+	}
+	if queued != 0 {
+		t.Errorf("%d writes queued for an uploaded book, want 0", queued)
+	}
+}
+
+// TestFailedRelocationDeleteDoesNotDuplicateTheHighlight pins the case the
+// adoption-by-quote path exists for. UpdateHighlightLocation creates a
+// replacement annotation before deleting the original; when that best-effort
+// delete fails, the next listing carries both ids for the one passage. Both
+// must land on the single row already there — a second row would be a
+// duplicate highlight with a fresh schedule of its own. Book highlights, which
+// carry a position, are allowed to repeat words as separate highlights (see
+// TestTheSameWordsTwiceAreTwoAnnotations); a wallabag highlight never does.
+func TestFailedRelocationDeleteDoesNotDuplicateTheHighlight(t *testing.T) {
+	db := testStore(t)
+	now := time.Now()
+	article := source.Document{ExternalID: "1", Title: "An article", UpdatedAt: now,
+		Highlights: []source.Highlight{{ExternalID: "old", Quote: "the same passage", Note: "a comment"}}}
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{article}, 0, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	later := now.Add(time.Minute)
+	article.UpdatedAt = later
+	article.Highlights = []source.Highlight{
+		{ExternalID: "old", Quote: "the same passage", Note: "a comment"},
+		{ExternalID: "new", Quote: "the same passage", Note: "a comment"},
+	}
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{article}, 0, 0, later); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+
+	var rows int
+	if err := db.db.QueryRow(
+		`SELECT count(*) FROM elements WHERE parent_id IS NOT NULL AND quote = 'the same passage'`,
+	).Scan(&rows); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if rows != 1 {
+		t.Errorf("%d local rows for one wallabag highlight, want 1", rows)
+	}
+}
