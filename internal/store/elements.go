@@ -1734,6 +1734,16 @@ func (s *Store) BackfillHighlightPushes(sourceName string) (queued int, err erro
 // Idempotent: an extract that already has one queued is left alone rather
 // than duplicated, the same guarantee BackfillHighlightPushes gives its own
 // operation, and what makes this safe to run from Reconcile on every pass.
+//
+// An extract the provider has already said it cannot place
+// (MarkLocationUnresolved) is skipped while its document has not changed
+// upstream since. Retrying is pointless until the article itself changes —
+// the quote is either in the provider's rendering or it is not, and asking
+// again does not alter that — and a change upstream is the one thing that
+// could make it locatable again, so the document's own update time moving
+// past the mark is what lifts the skip. Without the skip the extract would
+// be queued, refused and queued again on every pass, one wasted fetch of the
+// article each time.
 func (s *Store) QueueLocationUpdates(sourceName string, locationless []string) (queued int, err error) {
 	if len(locationless) == 0 {
 		return 0, nil
@@ -1774,7 +1784,10 @@ func (s *Store) QueueLocationUpdates(sourceName string, locationless []string) (
 				  AND NOT EXISTS (
 				      SELECT 1 FROM pending_writes pw
 				      WHERE pw.element_id = e.id AND pw.operation = ?
-				  )`,
+				  )
+				  AND (e.location_unresolved_at IS NULL
+				       OR (d.source_updated_at IS NOT NULL
+				           AND d.source_updated_at > e.location_unresolved_at))`,
 				sourceName, OpHighlightUpdateLocation)
 			if err != nil {
 				return nil, fmt.Errorf("store: find extracts needing a location: %w", err)
@@ -1811,6 +1824,33 @@ func (s *Store) QueueLocationUpdates(sourceName string, locationless []string) (
 		return nil
 	})
 	return queued, err
+}
+
+// MarkLocationUnresolved records that the provider could not place an
+// extract's highlight in its own rendering of the document, so
+// QueueLocationUpdates stops asking until the document changes upstream.
+//
+// The mark is the later of now and the document's own source_updated_at,
+// not now alone. QueueLocationUpdates compares the mark with the provider's
+// update time, which is the provider's clock; if that clock runs ahead of
+// this machine's, a mark of plain now would already be older than the
+// document's current update time and the skip would never take hold. Taking
+// the larger keeps "has the document changed since" meaning exactly that,
+// at the cost of noticing the next real change a skew's worth later.
+func (s *Store) MarkLocationUnresolved(elementID int64, now time.Time) error {
+	result, err := s.db.Exec(`
+		UPDATE elements SET location_unresolved_at = MAX(
+		    ?, COALESCE((SELECT d.source_updated_at FROM documents d
+		                 WHERE d.id = elements.document_id), ''))
+		WHERE id = ?`,
+		formatTime(now), elementID)
+	if err != nil {
+		return fmt.Errorf("store: mark location unresolved on element %d: %w", elementID, err)
+	}
+	if n, err := result.RowsAffected(); err == nil && n == 0 {
+		return fmt.Errorf("store: element %d: %w", elementID, ErrNotFound)
+	}
+	return nil
 }
 
 // DeleteExtract permanently removes an extract or item, and everything under

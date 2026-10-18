@@ -142,6 +142,11 @@ func (s *Source) DeleteHighlight(ctx context.Context, highlightExternalID string
 // still missing a location, which is a worse failure for a best-effort
 // operation to risk.
 //
+// If the quote cannot be located in the entry's content, nothing is created
+// or deleted and the error wraps source.ErrUnlocatable; see the comment in
+// the body for why that is not the best-effort empty-range fallback
+// CreateHighlight uses for a brand-new extract.
+//
 // A failure to delete the old annotation is deliberately not returned as an
 // error once the new one exists, even though that leaves a duplicate
 // behind. The caller's outbox retries a failed write by calling this again
@@ -151,7 +156,34 @@ func (s *Source) DeleteHighlight(ctx context.Context, highlightExternalID string
 // delete eventually succeeds or the attempt cap gives up. A stray duplicate
 // annotation is a smaller, quieter problem than that.
 func (s *Source) UpdateHighlightLocation(ctx context.Context, highlightExternalID, documentExternalID, quote string) (string, error) {
-	newID, err := s.CreateHighlight(ctx, documentExternalID, quote)
+	id, err := entryID(documentExternalID)
+	if err != nil {
+		return "", err
+	}
+
+	// Content and ranges come first, before anything upstream is touched,
+	// and unlike CreateHighlight a miss here is not papered over with empty
+	// ranges. Replacing an annotation with another that has no location is
+	// worse than doing nothing: the new one is reported locationless on the
+	// next reconcile just as the old one was, which queued this write again,
+	// and every pass recreated the annotation under a fresh id (18 highlights
+	// churning on the production account, ~36 wasted API calls per pass).
+	//
+	// A failure to fetch the content is a different thing from a quote that
+	// is not in it, and is returned as it is — it may be ErrUnavailable,
+	// which the syncer treats as an outage and retries — rather than being
+	// reported as unlocatable, which would mark the highlight as hopeless
+	// because of a transient network error.
+	content, err := s.Content(ctx, documentExternalID)
+	if err != nil {
+		return "", err
+	}
+	ranges := computeRanges(content, quote)
+	if ranges == nil {
+		return "", fmt.Errorf("wallabag: highlight in entry %d: %w", id, source.ErrUnlocatable)
+	}
+
+	newID, err := s.createHighlight(ctx, id, quote, ranges)
 	if err != nil {
 		return "", err
 	}
@@ -294,8 +326,17 @@ func (s *Source) CreateHighlight(ctx context.Context, documentExternalID, quote 
 			ranges = found
 		}
 	}
+	return s.createHighlight(ctx, id, quote, ranges)
+}
 
-	path := fmt.Sprintf("/api/annotations/%d.json", id)
+// createHighlight posts the annotation with ranges already worked out, so a
+// caller that has fetched the content for its own reasons
+// (UpdateHighlightLocation, which must not create anything when no range can
+// be computed) does not fetch it a second time. The quote field is still
+// truncateQuote'd here, whatever was located: ranges say where the passage
+// is, and the quote is only the text wallabag keeps beside them.
+func (s *Source) createHighlight(ctx context.Context, entry int, quote string, ranges []serializedRange) (string, error) {
+	path := fmt.Sprintf("/api/annotations/%d.json", entry)
 	body := struct {
 		Text   string            `json:"text"`
 		Quote  string            `json:"quote"`

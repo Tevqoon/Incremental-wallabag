@@ -571,6 +571,30 @@ func (s *Syncer) drainWrites(ctx context.Context, provider source.Source) int {
 				s.logger.Error("could not drop a write", "id", write.ID, "error", err)
 			}
 
+		case errors.Is(err, source.ErrUnlocatable):
+			// The provider answered, and said it cannot place this highlight
+			// in the document: it left everything upstream as it was. Retrying
+			// cannot change that, so the write is completed rather than
+			// charged an attempt, and the element is marked so the next
+			// reconcile does not simply queue the same write again (see
+			// QueueLocationUpdates). Without both, the highlight was replaced
+			// by an equally unplaced copy on every pass.
+			//
+			// Not an outage, so it does not count towards one: the reset at
+			// the top of the loop has already cleared probing, because this
+			// is not ErrUnavailable. The provider demonstrably answered.
+			s.logger.Info("highlight cannot be located upstream, leaving it as it is until the document changes",
+				"source", write.Source, "annotation", write.ExternalID, "element", write.ElementID.Int64)
+			if write.ElementID.Valid {
+				if err := s.store.MarkLocationUnresolved(write.ElementID.Int64, time.Now()); err != nil {
+					s.logger.Error("could not record an unlocatable highlight",
+						"element", write.ElementID.Int64, "error", err)
+				}
+			}
+			if err := s.store.CompleteWrite(write.ID); err != nil {
+				s.logger.Error("could not complete a write", "id", write.ID, "error", err)
+			}
+
 		case errors.Is(err, source.ErrUnavailable):
 			// A 5xx, a 429 or a network error is either the provider being
 			// down or this one request being rejected, and the two need

@@ -571,6 +571,100 @@ func TestUpdateHighlightLocationReplacesTheAnnotation(t *testing.T) {
 	}
 }
 
+// requestLog counts the requests that reach a fake wallabag by method and
+// path, so a test can assert that something was NOT called.
+type requestLog struct{ seen []string }
+
+func (l *requestLog) wrap(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		l.seen = append(l.seen, r.Method+" "+r.URL.Path)
+		h.ServeHTTP(w, r)
+	})
+}
+
+// mutations returns the requests that would have changed something upstream.
+func (l *requestLog) mutations() []string {
+	var out []string
+	for _, line := range l.seen {
+		if strings.HasPrefix(line, "POST /api/annotations") || strings.HasPrefix(line, "DELETE ") {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// TestUpdateHighlightLocationUnlocatableChangesNothing is the other half of
+// replacing an annotation to relocate it. When the quote cannot be found in
+// the entry's content, a replacement would carry empty ranges and be reported
+// locationless on the next reconcile exactly like the original, which queued
+// this write again: 18 highlights on the production account were recreated
+// under fresh ids on every pass that way. So nothing may be created or
+// deleted, and the error must say why, wrapped, for the syncer to act on.
+func TestUpdateHighlightLocationUnlocatableChangesNothing(t *testing.T) {
+	var log requestLog
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /oauth/v2/token", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(tokenResponse{AccessToken: "tok", ExpiresIn: 3600})
+	})
+	mux.HandleFunc("GET /api/entries/42.json", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(Entry{ID: 42, Content: "<p>an entirely different article</p>"})
+	})
+	mux.HandleFunc("POST /api/annotations/42.json", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"id": 999})
+	})
+	mux.HandleFunc("DELETE /api/annotations/111.json", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"id": 111})
+	})
+
+	server := httptest.NewServer(log.wrap(mux))
+	defer server.Close()
+
+	adapter := NewSource(testClient(t, server.URL))
+
+	newID, err := adapter.UpdateHighlightLocation(context.Background(), "111", "42", "a passage that is not there")
+	if !errors.Is(err, source.ErrUnlocatable) {
+		t.Fatalf("err = %v, want one wrapping source.ErrUnlocatable", err)
+	}
+	if newID != "" {
+		t.Errorf("newID = %q, want empty", newID)
+	}
+	if mutations := log.mutations(); len(mutations) != 0 {
+		t.Errorf("requests that change wallabag = %v, want none", mutations)
+	}
+}
+
+// TestUpdateHighlightLocationContentFailureIsNotUnlocatable: failing to fetch
+// the content says nothing about whether the quote is in it. Reporting that as
+// unlocatable would give up on the highlight over a transient error.
+func TestUpdateHighlightLocationContentFailureIsNotUnlocatable(t *testing.T) {
+	var log requestLog
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /oauth/v2/token", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(tokenResponse{AccessToken: "tok", ExpiresIn: 3600})
+	})
+	mux.HandleFunc("GET /api/entries/42.json", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	})
+
+	server := httptest.NewServer(log.wrap(mux))
+	defer server.Close()
+
+	adapter := NewSource(testClient(t, server.URL))
+
+	_, err := adapter.UpdateHighlightLocation(context.Background(), "111", "42", "a passage")
+	if err == nil {
+		t.Fatal("err = nil, want the content fetch failure")
+	}
+	if errors.Is(err, source.ErrUnlocatable) {
+		t.Errorf("err = %v, a failed fetch must not be reported as unlocatable", err)
+	}
+	if mutations := log.mutations(); len(mutations) != 0 {
+		t.Errorf("requests that change wallabag = %v, want none", mutations)
+	}
+}
+
 // TestUpdateHighlightLocationSurvivesAFailedCleanup: if removing the old
 // annotation fails after the new one was already created, that must not be
 // reported as an error. The caller's outbox would otherwise retry by calling

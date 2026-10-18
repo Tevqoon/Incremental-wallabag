@@ -48,6 +48,11 @@ type writingSource struct {
 
 	failWith error
 
+	// unlocatable, when it holds a quote, makes UpdateHighlightLocation fail
+	// for that quote with source.ErrUnlocatable and change nothing, as
+	// wallabag's adapter does for a quote it cannot find in the entry.
+	unlocatable map[string]bool
+
 	// failOnly, when non-zero, limits failWith to the first failOnly write
 	// calls; later ones succeed. Zero means every call fails.
 	failOnly int
@@ -153,6 +158,9 @@ func (w *writingSource) CreateHighlight(_ context.Context, entryID, quote string
 
 func (w *writingSource) UpdateHighlightLocation(_ context.Context, oldID, entryID, quote string) (string, error) {
 	w.calls++
+	if w.unlocatable[quote] {
+		return "", fmt.Errorf("fake: %w", source.ErrUnlocatable)
+	}
 	if w.failWith != nil {
 		return "", w.failWith
 	}
@@ -979,5 +987,65 @@ func TestALoneUnavailableWriteStillBacksOff(t *testing.T) {
 	}
 	if !syncer.coolingDown() {
 		t.Error("not cooling down after a lone write found the provider unavailable")
+	}
+}
+
+// TestUnlocatableRelocationIsCompletedAndMarked: a provider that cannot place
+// a highlight leaves everything as it was, and retrying cannot change that.
+// The write must therefore be completed (not charged an attempt and left to be
+// retried to the cap), the element marked so the next reconcile does not queue
+// it again, and the drain must carry on to the writes behind it — the provider
+// answered, so this is nothing like an outage.
+func TestUnlocatableRelocationIsCompletedAndMarked(t *testing.T) {
+	db, logger := testSetup(t)
+	seed(t, db)
+	now := time.Now()
+
+	if _, err := db.CreateExtract(store.NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "An unplaceable passage.",
+		ContentHTML: "<p>An unplaceable passage.</p>",
+		Origin:      store.OriginManual, ExternalRef: "h1",
+	}, now); err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+	if _, err := db.CreateExtract(store.NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "A placeable passage.",
+		ContentHTML: "<p>A placeable passage.</p>",
+		Origin:      store.OriginManual, ExternalRef: "h2",
+	}, now); err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+	if queued, err := db.QueueLocationUpdates("wallabag", []string{"h1", "h2"}); err != nil || queued != 2 {
+		t.Fatalf("QueueLocationUpdates = %d, %v; want 2", queued, err)
+	}
+
+	provider := newWritingSource()
+	provider.unlocatable = map[string]bool{"An unplaceable passage.": true}
+	syncer := New(db, logger, provider)
+
+	published := syncer.drainWrites(context.Background(), provider)
+
+	if published != 1 {
+		t.Errorf("published %d, want 1: only the placeable highlight was replaced", published)
+	}
+	if len(provider.relocatedHighlights) != 1 || !strings.HasPrefix(provider.relocatedHighlights[0], "h2->") {
+		t.Errorf("relocated = %v, want the drain to carry on and relocate h2", provider.relocatedHighlights)
+	}
+	remaining, err := db.PendingWrites("wallabag", 10)
+	if err != nil {
+		t.Fatalf("PendingWrites: %v", err)
+	}
+	if len(remaining) != 0 {
+		t.Errorf("pending = %+v, want the unlocatable write completed, not left to retry", remaining)
+	}
+	if syncer.coolingDown() {
+		t.Error("cooling down after an unlocatable highlight, which is not an outage")
+	}
+
+	// Marked: the next reconcile reports h1 locationless again, and must not
+	// queue it. (The same call with an unmarked element is what queued it
+	// above.)
+	if queued, err := db.QueueLocationUpdates("wallabag", []string{"h1"}); err != nil || queued != 0 {
+		t.Errorf("QueueLocationUpdates after the mark = %d, %v; want 0", queued, err)
 	}
 }

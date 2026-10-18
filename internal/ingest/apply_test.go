@@ -50,6 +50,19 @@ func (r *requestRecorder) all() []string {
 	return out
 }
 
+// fakeEntryContent is what the fake serves as every entry's body. It holds
+// every quote the Apply tests re-anchor, because UpdateHighlightLocation now
+// refuses to replace an annotation whose quote it cannot find in this content
+// (source.ErrUnlocatable) instead of recreating it with empty ranges — a
+// fixture that did not contain the quotes would turn every re-anchor into
+// that refusal. The missing one is deliberately absent: Apply never sends it.
+const fakeEntryContent = "<p>Full content.</p>" +
+	"<p>stale quote one</p><p>stale quote two</p>" +
+	"<p>the first one</p><p>the middle one fails</p><p>the third one</p>" +
+	"<p>one</p><p>two</p>" +
+	"<p>a passage worth keeping, and a good deal more of it besides.</p>" +
+	"<p>the unique one</p><p>the ambiguous one</p>"
+
 // fakeWallabagOptions configures the one thing each Apply test actually
 // varies: which writes the fake server should fail.
 type fakeWallabagOptions struct {
@@ -107,7 +120,7 @@ func newFakeWallabag(t *testing.T, opts fakeWallabagOptions) (*httptest.Server, 
 		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/api/entries/"):
 			id := entryIDFromPath(r.URL.Path, "/api/entries/")
 			recorder.record("GET /api/entries/" + fmt.Sprint(id) + ".json")
-			json.NewEncoder(w).Encode(wallabag.Entry{ID: id, Content: "<p>Full content.</p>"})
+			json.NewEncoder(w).Encode(wallabag.Entry{ID: id, Content: fakeEntryContent})
 
 		case r.Method == "POST" && strings.HasPrefix(r.URL.Path, "/api/annotations/"):
 			id := entryIDFromPath(r.URL.Path, "/api/annotations/")

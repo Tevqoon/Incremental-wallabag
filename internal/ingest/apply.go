@@ -108,6 +108,11 @@ type Applied struct {
 //     block the others, would turn "8 of 9 annotations re-anchored, 1
 //     network blip" into "0 of 9", for no benefit to anyone.
 //
+//     A re-anchor that cannot place its quote in the new content now fails
+//     with source.ErrUnlocatable and changes nothing upstream, so it is
+//     counted as an annotation failure and the old annotation — and its
+//     ranges — survive, rather than being replaced by an empty-ranged copy.
+//
 //  3. Tags — only for an existing entry (ActionUpdate / ActionAnnotationsOnly).
 //     A brand-new entry's tags already went out with its NewEntry.Tags on
 //     create (see entryForm), but EntryUpdate carries no Tags field at all
@@ -119,8 +124,9 @@ type Applied struct {
 // because there is nothing to do, conflict because BuildPlan already refused
 // to decide which entry this post belongs to.
 //
-// Accepted rather than "fixed": CreateHighlight (internal/wallabag/write.go)
-// re-fetches the entry's whole body once per annotation it creates, so an
+// Accepted rather than "fixed": UpdateHighlightLocation
+// (internal/wallabag/write.go) re-fetches the entry's whole body once per
+// annotation it replaces, so an
 // entry with eight stale annotations does eight full-body fetches over the
 // course of step 2. Wasteful in the abstract, and entirely fine for a
 // command an operator runs about once a month — forking a second,

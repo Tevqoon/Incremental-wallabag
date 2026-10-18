@@ -481,3 +481,127 @@ func TestSourceResolveRange(t *testing.T) {
 		t.Error("ResolveRange succeeded with malformed JSON, want failure")
 	}
 }
+
+// The tests below use \u escapes for soft hyphens (U+00AD) rather than typed
+// literals: they are invisible, so a literal in source could not be checked by
+// eye. All text here is synthetic; the real articles that showed the bug are
+// someone's private reading material and are not copied into the repo.
+
+// TestComputeRangesIgnoresSoftHyphensInContent: wallabag's stored content can
+// carry soft hyphens inside words that the quote the reader selected does not
+// (confirmed on a real Financial Times article, 651 of them). The match must
+// still be found, and — the part that is easy to get wrong — its offsets must
+// be into the raw text, soft hyphens counted, because that is what the
+// range is serialised against and what wallabag's reader draws with.
+func TestComputeRangesIgnoresSoftHyphensInContent(t *testing.T) {
+	// Two soft hyphens sit BEFORE the passage, so offsets into a stripped
+	// copy would come out two short.
+	html := "<p>Isem\u00adbard\u00adx oper\u00adates a fran\u00adchise model.</p>"
+	quote := "operates a franchise"
+
+	got := computeRanges(html, quote)
+	// Raw text: "Isem" 4 + shy 1 + "bard" 4 + shy 1 + "x " 2 = 12 before the
+	// passage; the passage itself is 22 UTF-16 units with its two soft
+	// hyphens ("oper" shy "ates a fran" shy "chise").
+	want := []serializedRange{{Start: "/p[1]", StartOffset: "12", End: "/p[1]", EndOffset: "34"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("computeRanges = %+v, want %+v", got, want)
+	}
+
+	recovered, ok := recoverQuote(html, got)
+	if !ok {
+		t.Fatal("recoverQuote reported failure")
+	}
+	if recovered != quote {
+		t.Errorf("recoverQuote = %q, want %q", recovered, quote)
+	}
+}
+
+// TestComputeRangesIgnoresSoftHyphensInQuote is the mirror image: a quote
+// that carries soft hyphens (also confirmed on a real article) against
+// content that does not.
+func TestComputeRangesIgnoresSoftHyphensInQuote(t *testing.T) {
+	html := "<p>Before. </p><p>Isembard operates a franchise model.</p>"
+	quote := "oper\u00adates a fran\u00adchise"
+
+	got := computeRanges(html, quote)
+	want := []serializedRange{{Start: "/p[2]", StartOffset: "9", End: "/p[2]", EndOffset: "29"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("computeRanges = %+v, want %+v", got, want)
+	}
+
+	recovered, ok := recoverQuote(html, got)
+	if !ok {
+		t.Fatal("recoverQuote reported failure")
+	}
+	if recovered != "operates a franchise" {
+		t.Errorf("recoverQuote = %q, want %q", recovered, "operates a franchise")
+	}
+}
+
+// TestComputeRangesIgnoresInvisiblesAcrossNodes: the stripped copy is built
+// from the flattened text of the whole article, so a match that spans an
+// element boundary with invisible characters on both sides of it must still
+// resolve to the right nodes.
+func TestComputeRangesIgnoresInvisiblesAcrossNodes(t *testing.T) {
+	html := "<p>First\u200b paragraph ends.</p><p>\ufeffSecond par\u00adagraph starts.</p>"
+	quote := "ends.\n\nSecond paragraph"
+
+	ranges := computeRanges(html, quote)
+	if ranges == nil {
+		t.Fatal("computeRanges could not locate the quote")
+	}
+	recovered, ok := recoverQuote(html, ranges)
+	if !ok {
+		t.Fatal("recoverQuote reported failure")
+	}
+	normalize := func(s string) string { return strings.Join(strings.Fields(s), " ") }
+	if normalize(recovered) != normalize(quote) {
+		t.Errorf("recoverQuote = %q, want %q", recovered, quote)
+	}
+}
+
+// TestComputeRangesLocatesQuoteEndingInTruncationMarker: a highlight read back
+// from wallabag past the length limit carries the marker truncateQuote added,
+// which is not in the article. Everything before it is a faithful prefix.
+func TestComputeRangesLocatesQuoteEndingInTruncationMarker(t *testing.T) {
+	html := "<p>Intro.</p><p>A long passage that goes on and on for a good while.</p>"
+	quote := "A long passage that goes on…"
+
+	ranges := computeRanges(html, quote)
+	want := []serializedRange{{Start: "/p[2]", StartOffset: "0", End: "/p[2]", EndOffset: "27"}}
+	if !reflect.DeepEqual(ranges, want) {
+		t.Fatalf("computeRanges = %+v, want %+v", ranges, want)
+	}
+	recovered, ok := recoverQuote(html, ranges)
+	if !ok || recovered != "A long passage that goes on" {
+		t.Errorf("recoverQuote = %q, %v; want the prefix without the marker", recovered, ok)
+	}
+
+	// The same quote, with soft hyphens of its own as well: the two fixes
+	// compose, as they had to on the real highlight that had both.
+	hyphenated := "A long pas\u00adsage that goes on…"
+	if got := computeRanges(html, hyphenated); !reflect.DeepEqual(got, want) {
+		t.Errorf("computeRanges with soft hyphen and marker = %+v, want %+v", got, want)
+	}
+}
+
+// TestLocateQuoteAllReturnsRawOffsets: QuoteOccurrences is the public face of
+// the same locator, so its offsets must be raw too, and every occurrence must
+// be found.
+func TestLocateQuoteAllReturnsRawOffsets(t *testing.T) {
+	// "ab" + shy (2 bytes) + "c" = 5 bytes; "abc" follows after one space.
+	html := "<p>ab\u00adc abc</p>"
+
+	got := QuoteOccurrences(html, "abc")
+	want := []int{0, 6}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("QuoteOccurrences = %v, want %v", got, want)
+	}
+
+	// End offsets: the first match covers all five raw bytes, soft hyphen
+	// included, and stops short of anything after it.
+	if matches := locateQuoteAll("ab\u00adc abc", "abc"); !reflect.DeepEqual(matches, [][]int{{0, 5}, {6, 9}}) {
+		t.Errorf("locateQuoteAll = %v, want [[0 5] [6 9]]", matches)
+	}
+}

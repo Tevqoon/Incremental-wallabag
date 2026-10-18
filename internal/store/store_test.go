@@ -2431,6 +2431,102 @@ func TestQueueLocationUpdatesFindsExtractsNeedingOne(t *testing.T) {
 	}
 }
 
+// TestQueueLocationUpdatesSkipsUnresolvedUntilDocumentChanges: a highlight the
+// provider has said it cannot place must not be queued again on every
+// reconcile — that is the loop that recreated 18 annotations per pass — but
+// a change to the document upstream is the one thing that could make the
+// quote locatable, so it lifts the skip.
+func TestQueueLocationUpdatesSkipsUnresolvedUntilDocumentChanges(t *testing.T) {
+	db := testStore(t)
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "1", Title: "An article", UpdatedAt: now.Add(-time.Hour)},
+	}, 0, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+	id, err := db.CreateExtract(NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "A passage the provider cannot place.",
+		ContentHTML: "<p>A passage the provider cannot place.</p>",
+		Origin:      OriginManual, ExternalRef: "h1",
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+
+	// The write that failed to place it is completed, as the syncer does.
+	if err := db.MarkLocationUnresolved(id, now); err != nil {
+		t.Fatalf("MarkLocationUnresolved: %v", err)
+	}
+
+	queued, err := db.QueueLocationUpdates("wallabag", []string{"h1"})
+	if err != nil {
+		t.Fatalf("QueueLocationUpdates: %v", err)
+	}
+	if queued != 0 {
+		t.Fatalf("queued %d for a marked extract on an unchanged document, want 0", queued)
+	}
+
+	// Re-synced with the same update time: still unchanged upstream.
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "1", Title: "An article", UpdatedAt: now.Add(-time.Hour)},
+	}, 0, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments (unchanged): %v", err)
+	}
+	if queued, _ := db.QueueLocationUpdates("wallabag", []string{"h1"}); queued != 0 {
+		t.Fatalf("queued %d after an unchanged resync, want 0", queued)
+	}
+
+	// The article is edited upstream after the mark.
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "1", Title: "An article", UpdatedAt: now.Add(time.Hour)},
+	}, 0, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments (changed): %v", err)
+	}
+	queued, err = db.QueueLocationUpdates("wallabag", []string{"h1"})
+	if err != nil {
+		t.Fatalf("QueueLocationUpdates (changed): %v", err)
+	}
+	if queued != 1 {
+		t.Errorf("queued %d once the document changed upstream, want 1", queued)
+	}
+}
+
+// TestMarkLocationUnresolvedHoldsWhenProviderClockRunsAhead: the mark is
+// compared with the provider's own update time, so a provider clock ahead of
+// ours must not make a fresh mark look older than the document it was made
+// against.
+func TestMarkLocationUnresolvedHoldsWhenProviderClockRunsAhead(t *testing.T) {
+	db := testStore(t)
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+
+	if _, err := db.UpsertDocuments("wallabag", []source.Document{
+		{ExternalID: "1", Title: "An article", UpdatedAt: now.Add(10 * time.Minute)},
+	}, 0, 0, now); err != nil {
+		t.Fatalf("UpsertDocuments: %v", err)
+	}
+	id, err := db.CreateExtract(NewExtract{
+		ParentID: 1, DocumentID: 1, Quote: "A passage.", ContentHTML: "<p>A passage.</p>",
+		Origin: OriginManual, ExternalRef: "h1",
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateExtract: %v", err)
+	}
+	if err := db.MarkLocationUnresolved(id, now); err != nil {
+		t.Fatalf("MarkLocationUnresolved: %v", err)
+	}
+	if queued, _ := db.QueueLocationUpdates("wallabag", []string{"h1"}); queued != 0 {
+		t.Errorf("queued %d, want 0: the document has not changed since it was marked", queued)
+	}
+}
+
+func TestMarkLocationUnresolvedMissingElement(t *testing.T) {
+	db := testStore(t)
+	if err := db.MarkLocationUnresolved(999, time.Now()); !errors.Is(err, ErrNotFound) {
+		t.Errorf("MarkLocationUnresolved(999) = %v, want ErrNotFound", err)
+	}
+}
+
 // TestBackfillHighlightPushesQueuesMissedExtracts covers the gap CreateExtract
 // alone cannot: an extract made before the push-back feature existed, or one
 // whose write was somehow lost, has no external_ref and nothing queued for
