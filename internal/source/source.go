@@ -21,6 +21,14 @@ import (
 // specific provider. Providers wrap it with %w.
 var ErrGone = errors.New("source: document no longer exists")
 
+// ErrUnavailable reports that the provider itself could not be reached or is
+// failing as a whole — a network error, a 5xx, a rate limit — rather than
+// rejecting one request in particular. Every other queued write would fail
+// the same way right now, so the syncer stops draining on it instead of
+// spending each write's retry budget on the same outage. Providers wrap it
+// with %w.
+var ErrUnavailable = errors.New("source: provider unavailable")
+
 // Source is a provider of readable documents.
 //
 // Go note: interface satisfaction in Go is structural and implicit. There is no

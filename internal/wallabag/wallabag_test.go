@@ -3,6 +3,7 @@ package wallabag
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,8 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/Tevqoon/increader/internal/source"
 )
 
 // TestTimeUnmarshal pins the timestamp format. wallabag emits an offset without
@@ -731,5 +734,45 @@ func TestTrimTruncationMarkerStripsWhatTruncateQuoteAdds(t *testing.T) {
 				t.Errorf("TrimTruncationMarker(%q) = %q, want %q", test.quote, got, test.want)
 			}
 		})
+	}
+}
+
+// TestServerTroubleIsUnavailable: a 5xx or 429 says the server is failing as
+// a whole, which the syncer stops draining on; a 4xx is this request's own
+// problem and is not.
+func TestServerTroubleIsUnavailable(t *testing.T) {
+	for _, tc := range []struct {
+		status      int
+		unavailable bool
+	}{
+		{http.StatusServiceUnavailable, true},
+		{http.StatusTooManyRequests, true},
+		{http.StatusBadRequest, false},
+	} {
+		mux := http.NewServeMux()
+		mux.HandleFunc("POST /oauth/v2/token", func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(tokenResponse{AccessToken: "tok", ExpiresIn: 3600})
+		})
+		mux.HandleFunc("DELETE /api/annotations/97418.json", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(tc.status)
+		})
+		server := httptest.NewServer(mux)
+
+		err := NewSource(testClient(t, server.URL)).DeleteHighlight(context.Background(), "97418")
+		server.Close()
+		if err == nil {
+			t.Fatalf("status %d: expected an error", tc.status)
+		}
+		if got := errors.Is(err, source.ErrUnavailable); got != tc.unavailable {
+			t.Errorf("status %d: unavailable = %v, want %v (%v)", tc.status, got, tc.unavailable, err)
+		}
+	}
+
+	// A server that cannot be reached at all is unavailable too.
+	server := httptest.NewServer(http.NotFoundHandler())
+	server.Close()
+	err := NewSource(testClient(t, server.URL)).DeleteHighlight(context.Background(), "97418")
+	if !errors.Is(err, source.ErrUnavailable) {
+		t.Errorf("unreachable server: err = %v, want ErrUnavailable", err)
 	}
 }

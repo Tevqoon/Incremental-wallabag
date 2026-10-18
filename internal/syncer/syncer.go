@@ -28,6 +28,11 @@ const writeBatch = 200
 // real cost for no real benefit over checking once a day.
 const reconcileInterval = 24 * time.Hour
 
+// unavailableCooldown is how long a provider found unavailable is left alone
+// by the drains a local change nudges — see drainWrites. Scheduled and manual
+// syncs still drain, so the queue is retried at least every sync interval.
+const unavailableCooldown = 5 * time.Minute
+
 // Syncer imports from a fixed set of sources.
 type Syncer struct {
 	store   *store.Store
@@ -58,6 +63,10 @@ type Syncer struct {
 	// read the same pending row before either completes it, publishing the
 	// same change upstream twice.
 	drainMu sync.Mutex
+
+	// unavailableUntil is when a nudged drain may next try the provider after
+	// one found it unavailable. Guarded by drainMu.
+	unavailableUntil time.Time
 }
 
 // New builds a syncer over the given sources.
@@ -471,7 +480,11 @@ func (s *Syncer) Run(ctx context.Context, interval time.Duration) {
 		case <-s.nudge:
 			// A change was made that needs sending upstream. Publish only —
 			// a full fetch here would make every star and tag edit pull the
-			// whole library.
+			// whole library. Skipped while a provider is cooling down after
+			// an outage, so reading on through one does not spend the queue.
+			if s.coolingDown() {
+				continue
+			}
 			for _, provider := range s.sources {
 				if published := s.drainWrites(ctx, provider); published > 0 {
 					s.logger.Info("published queued changes",
@@ -550,6 +563,24 @@ func (s *Syncer) drainWrites(ctx context.Context, provider source.Source) int {
 				s.logger.Error("could not drop a write", "id", write.ID, "error", err)
 			}
 
+		case errors.Is(err, source.ErrUnavailable):
+			// The provider is down or refusing everyone, not this entry: the
+			// rest of the batch would fail the same way. Only this write's
+			// attempt is counted — a write that alone keeps hitting a 500
+			// still reaches the cap and stops blocking the queue — and the
+			// rest wait. Carrying on used to charge every queued write an
+			// attempt per drain, and with a drain nudged by every grade, an
+			// outage in the middle of a reading session abandoned the whole
+			// queue after eight clicks.
+			s.logger.Warn("provider unavailable, leaving the queue for later",
+				"source", write.Source, "entry", write.ExternalID,
+				"operation", write.Operation, "attempts", write.Attempts+1, "error", err)
+			if err := s.store.FailWrite(write.ID, err); err != nil {
+				s.logger.Error("could not record a write failure", "id", write.ID, "error", err)
+			}
+			s.unavailableUntil = time.Now().Add(unavailableCooldown)
+			return published
+
 		default:
 			s.logger.Warn("write failed, will retry",
 				"source", write.Source, "entry", write.ExternalID,
@@ -562,6 +593,14 @@ func (s *Syncer) drainWrites(ctx context.Context, provider source.Source) int {
 	}
 
 	return published
+}
+
+// coolingDown reports whether a drain recently found a provider unavailable,
+// so a nudge should not try again yet.
+func (s *Syncer) coolingDown() bool {
+	s.drainMu.Lock()
+	defer s.drainMu.Unlock()
+	return time.Now().Before(s.unavailableUntil)
 }
 
 // applyWrite dispatches one queued change to the provider. The returned

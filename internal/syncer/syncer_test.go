@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -868,5 +869,41 @@ func TestPublishNudgeDoesNotBlock(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Publish blocked; a request handler would have stalled on it")
+	}
+}
+
+// TestUnavailableProviderStopsTheDrain: an outage costs the queue one
+// attempt per drain, on the write that found it, rather than one per queued
+// write — and nudged drains leave the provider alone for a while after.
+func TestUnavailableProviderStopsTheDrain(t *testing.T) {
+	db, logger := testSetup(t)
+	seed(t, db)
+
+	if err := db.SetArchived(1, "wallabag", "77", true, time.Now()); err != nil {
+		t.Fatalf("SetArchived: %v", err)
+	}
+	if err := db.AttachTag(1, "wallabag", "77", "philosophy"); err != nil {
+		t.Fatalf("AttachTag: %v", err)
+	}
+
+	provider := newWritingSource()
+	provider.failWith = fmt.Errorf("%w: connection refused", source.ErrUnavailable)
+	syncer := New(db, logger, provider)
+	if published := syncer.drainWrites(context.Background(), provider); published != 0 {
+		t.Errorf("published %d, want 0", published)
+	}
+	if provider.calls != 1 {
+		t.Errorf("provider called %d times, want 1 (the drain stops at the outage)", provider.calls)
+	}
+
+	writes, err := db.PendingWrites("wallabag", 10)
+	if err != nil {
+		t.Fatalf("PendingWrites: %v", err)
+	}
+	if len(writes) != 2 || writes[0].Attempts != 1 || writes[1].Attempts != 0 {
+		t.Errorf("writes = %+v, want the first charged one attempt and the second untouched", writes)
+	}
+	if !syncer.coolingDown() {
+		t.Error("not cooling down after finding the provider unavailable")
 	}
 }
