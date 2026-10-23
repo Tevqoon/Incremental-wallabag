@@ -145,6 +145,63 @@ const imageZoomComponentName = "Image2ToDOM"
 // keeping.
 const imageZoomButtonsClass = "image-link-expand"
 
+// buttonWrapperClass is the class on the <p> Substack wraps around a
+// call-to-action button inside a post body — "Subscribe now" (href
+// .../subscribe?) and "Share" (href carrying action=share and a share token
+// signed for the account the post was fetched with). Confirmed against live
+// wallabag round trips on 2026-10-23: wallabag drops both on save, so
+// sending them only made every stored entry differ from what this package
+// produces — and the share token is the operator's own, not something to
+// upload anywhere.
+const buttonWrapperClass = "button-wrapper"
+
+// paywallJumpComponentName marks the empty <div class="paywall-jump"> a
+// paywalled post's body carries where the free preview ends. No content,
+// and wallabag drops it on save the same way.
+const paywallJumpComponentName = "PaywallToDOM"
+
+// preformattedHintClass is the class on the <label> Substack's editor puts
+// at the top of every preformatted block, reading "Text within this block
+// will maintain its original spacing when published" — editor UI, hidden by
+// Substack's own CSS, that a reader without that CSS shows as visible text
+// once per block. Wallabag drops it on save. Matched together with
+// contenteditable="false" so an ordinary element that merely reuses a
+// "hide-text" class is left alone.
+const preformattedHintClass = "hide-text"
+
+// isPostFurniture reports whether n is one of the post-body chrome elements
+// above: a call-to-action button wrapper, the paywall marker, or a
+// preformatted block's editor hint label.
+func isPostFurniture(n *html.Node) bool {
+	if n.Type != html.ElementNode {
+		return false
+	}
+	var classes []string
+	var componentName, contentEditable string
+	for _, attr := range n.Attr {
+		switch attr.Key {
+		case "class":
+			classes = strings.Fields(attr.Val)
+		case "data-component-name":
+			componentName = attr.Val
+		case "contenteditable":
+			contentEditable = attr.Val
+		}
+	}
+	if componentName == paywallJumpComponentName {
+		return true
+	}
+	for _, class := range classes {
+		switch {
+		case class == buttonWrapperClass && n.DataAtom == atom.P:
+			return true
+		case class == preformattedHintClass && n.DataAtom == atom.Label && contentEditable == "false":
+			return true
+		}
+	}
+	return false
+}
+
 // isImageZoomLink reports whether n is the <a> Substack wraps around an
 // inline image to make it click-to-zoom — see imageZoomComponentName.
 func isImageZoomLink(n *html.Node) bool {
@@ -312,7 +369,7 @@ func stripChoreNodes(n *html.Node) {
 // children against the switch below, never the node it was handed.
 func handleChoreNode(parent, node *html.Node) {
 	switch {
-	case isSubscribeChrome(node), isImageZoomButtons(node):
+	case isSubscribeChrome(node), isImageZoomButtons(node), isPostFurniture(node):
 		parent.RemoveChild(node)
 	case isImageZoomLink(node):
 		unwrap(parent, node)

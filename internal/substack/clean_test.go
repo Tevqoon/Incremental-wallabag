@@ -48,6 +48,37 @@ func TestCleanBody(t *testing.T) {
 			wantNotIn: []string{"subscription-widget", "Subscribe now", "email-input"},
 		},
 		{
+			// Shapes from live posts on 2026-10-23; the share token here is a
+			// placeholder, not a real one.
+			name: "strips Subscribe and Share call-to-action buttons",
+			html: `<p>Real article text.</p>` +
+				`<p class="button-wrapper" data-attrs="{}" data-component-name="ButtonCreateButton"><a class="button primary" href="https://example.substack.com/subscribe?"><span>Subscribe now</span></a></p>` +
+				`<p class="button-wrapper" data-attrs="{}" data-component-name="ButtonCreateButton"><a class="button primary" href="https://example.substack.com/p/x?utm_content=share&amp;action=share&amp;token=PLACEHOLDER"><span>Share</span></a></p>`,
+			wantIn:    []string{"Real article text."},
+			wantNotIn: []string{"button-wrapper", "Subscribe now", "Share", "token="},
+		},
+		{
+			name:      "strips the paywall marker",
+			html:      `<p>Free preview text.</p><div class="paywall-jump" data-component-name="PaywallToDOM"></div><p>More text.</p>`,
+			wantIn:    []string{"Free preview text.", "More text."},
+			wantNotIn: []string{"paywall-jump", "PaywallToDOM"},
+		},
+		{
+			name: "strips a preformatted block's editor hint label but keeps the block's text",
+			html: `<div class="preformatted-block" data-component-name="PreformattedTextBlockToDOM">` +
+				`<label class="hide-text" contenteditable="false">Text within this block will maintain its original spacing when published</label>` +
+				`<pre class="text">Verse line one
+  verse line two</pre></div>`,
+			wantIn:    []string{"preformatted-block", "Verse line one\n  verse line two"},
+			wantNotIn: []string{"hide-text", "maintain its original spacing"},
+		},
+		{
+			name:      "leaves a hide-text element that is not an editor label alone",
+			html:      `<p>Real article text. <span class="hide-text">kept aside</span></p>`,
+			wantIn:    []string{"kept aside"},
+			wantNotIn: nil,
+		},
+		{
 			name:      "strips a show-subscribe element",
 			html:      `<p>Real article text.</p><div class="show-subscribe"><p>Subscribe to continue reading.</p></div>`,
 			wantIn:    []string{"Real article text."},
