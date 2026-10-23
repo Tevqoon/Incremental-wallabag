@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"strings"
+	"unicode"
 
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
@@ -80,4 +81,68 @@ func demoteH1(n *html.Node) {
 		}
 		demoteH1(child)
 	}
+}
+
+// sameVisibleText reports whether a and b, two HTML bodies, read the same:
+// equal text once tags are dropped, entities decoded, and whitespace and
+// invisible formatting characters removed. Markup-only differences —
+// attributes, entity spelling, element nesting, whitespace between blocks
+// (wallabag adds a newline between every pair) — never make two bodies
+// differ by this test; added, removed or edited words always do.
+//
+// Whitespace is dropped outright rather than collapsed: whether two blocks
+// or an inline element's edges are separated by whitespace in the markup
+// differs between serialisers without changing what a reader sees, and a
+// change that only moves whitespace is not one worth rewriting an entry
+// for.
+func sameVisibleText(a, b string) bool {
+	return visibleText(a) == visibleText(b)
+}
+
+// invisibleFormatting mirrors internal/substack's own copy (unexported
+// there, as here): characters that change nothing a reader sees, which
+// cleanBody strips from what it sends but an entry stored by some other
+// route may still carry.
+var invisibleFormatting = map[rune]bool{
+	'\u00ad': true, // soft hyphen
+	'\u200b': true, // zero-width space
+	'\u200c': true, // zero-width non-joiner
+	'\u200d': true, // zero-width joiner
+	'\u2060': true, // word joiner
+	'\ufeff': true, // byte-order mark / zero-width no-break space
+}
+
+// visibleText returns contentHTML's text content with whitespace and
+// invisible formatting removed. Text inside <script>, <style> and
+// <template> is skipped, since none of it is shown to a reader. A body that
+// cannot be parsed falls back to itself, so it only ever compares equal to
+// an identical body.
+func visibleText(contentHTML string) string {
+	context := &html.Node{Type: html.ElementNode, Data: "body", DataAtom: atom.Body}
+	nodes, err := html.ParseFragment(strings.NewReader(contentHTML), context)
+	if err != nil {
+		return contentHTML
+	}
+	var text strings.Builder
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		switch {
+		case n.Type == html.TextNode:
+			text.WriteString(strings.Map(func(r rune) rune {
+				if unicode.IsSpace(r) || invisibleFormatting[r] {
+					return -1
+				}
+				return r
+			}, n.Data))
+		case n.Type == html.ElementNode && (n.DataAtom == atom.Script || n.DataAtom == atom.Style || n.DataAtom == atom.Template):
+			return
+		}
+		for child := n.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	for _, n := range nodes {
+		walk(n)
+	}
+	return text.String()
 }

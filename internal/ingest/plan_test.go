@@ -497,3 +497,85 @@ func TestDropExistingPreviews(t *testing.T) {
 		t.Errorf("dropped = %q, want only stub-existing", dropped)
 	}
 }
+
+// TestBuildPlanComparesVisibleText pins the rule an already-stored entry is
+// held to: it is rewritten only when its visible text changed. The
+// "formatting only" pair reproduces, in miniature, every difference a live
+// diff of wallabag's stored copies against cleanBody's output found on
+// 2026-10-23 — entity spelling inside attributes, a newline between blocks,
+// a space before "/>", trimmed trailing spaces, image attributes wallabag
+// adds and removes, absolutised footnote links, and an empty <em> it drops.
+func TestBuildPlanComparesVisibleText(t *testing.T) {
+	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
+	sent := `<p>He lacked<em> </em>streets and now I’m here. </p>` +
+		`<figure><img src="https://img.example/a.jpg" data-attrs="{&#34;src&#34;:&#34;a&#34;}" loading="lazy" fetchpriority="high" sizes="100vw"/></figure>` +
+		`<p>A claim<a href="#footnote-1" class="footnote-anchor">1</a>.</p>`
+	stored := `<p>He lacked streets and now I’m here.</p>` + "\n" +
+		`<figure><img src="https://img.example/a.jpg" data-attrs="{&quot;src&quot;:&quot;a&quot;}" sizes="100vw" referrerpolicy="no-referrer" /></figure>` + "\n" +
+		`<p>A claim<a href="https://example.substack.com/p/a-post#footnote-1" class="footnote-anchor">1</a>.</p>`
+
+	tests := []struct {
+		name       string
+		incoming   string
+		stored     string
+		wantAction Action
+		wantGrew   bool
+	}{
+		{name: "formatting only", incoming: sent, stored: stored, wantAction: ActionSkip},
+		{name: "a word changed", incoming: strings.Replace(sent, "streets", "roads", 1), stored: stored, wantAction: ActionUpdate},
+		{
+			name:       "a paywall stub grows into the full article",
+			incoming:   sent + strings.Repeat("<p>The rest of the article, finally unlocked.</p>", 20),
+			stored:     "<p><em>This post is paywalled: only its free preview was imported.</em></p>" + stored,
+			wantAction: ActionUpdate,
+			wantGrew:   true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			post := source.Document{URL: "https://example.substack.com/p/a-post", ContentHTML: test.incoming}
+			snap := Snapshot{
+				BySlug:  map[string][]wallabag.Entry{"a-post": {{ID: 1, URL: post.URL}}},
+				Details: map[int]wallabag.Entry{1: {ID: 1, Content: test.stored}},
+			}
+			item := BuildPlan([]source.Document{post}, snap, now).Items[0]
+			if item.Action != test.wantAction {
+				t.Errorf("Action = %q, want %q", item.Action, test.wantAction)
+			}
+			if item.ContentGrew != test.wantGrew {
+				t.Errorf("ContentGrew = %v, want %v", item.ContentGrew, test.wantGrew)
+			}
+		})
+	}
+}
+
+// TestBuildPlanAnchorsAgainstStoredContentWhenTextUnchanged checks that an
+// entry left as it is has its annotations judged against what wallabag
+// actually stores — not against the incoming body it is not getting —
+// so a highlight whose ranges resolve in the stored copy is not re-anchored
+// just because the incoming markup is serialised differently.
+func TestBuildPlanAnchorsAgainstStoredContentWhenTextUnchanged(t *testing.T) {
+	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
+	quote := "The quick brown fox jumps over the lazy dog."
+	stored := "<p>" + quote + "</p>"
+	// Same text, but the sentence is split across an extra element, so the
+	// stored ranges (/p[1], offsets into one text node) do not resolve here.
+	incoming := "<div><p>The quick brown fox</p></div><p>jumps over the lazy dog.</p>"
+	post := source.Document{URL: "https://example.substack.com/p/a-post", ContentHTML: incoming}
+	snap := Snapshot{
+		BySlug: map[string][]wallabag.Entry{"a-post": {{ID: 1, URL: post.URL}}},
+		Details: map[int]wallabag.Entry{1: {
+			ID: 1, Content: stored,
+			Annotations: []wallabag.Annotation{{ID: 500, Quote: quote, Ranges: anchoredRange(0, len(quote))}},
+		}},
+	}
+
+	item := BuildPlan([]source.Document{post}, snap, now).Items[0]
+	if item.Action != ActionSkip {
+		t.Errorf("Action = %q, want %q", item.Action, ActionSkip)
+	}
+	if len(item.Annotations) != 1 || item.Annotations[0].Verdict != VerdictAnchored {
+		t.Errorf("Annotations = %+v, want one VerdictAnchored", item.Annotations)
+	}
+}

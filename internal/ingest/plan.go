@@ -162,9 +162,9 @@ type Item struct {
 	Action Action
 
 	// ContentFull reports whether the matched entry's content already
-	// equals this post's own content — meaningless (left false) for
-	// ActionCreate and ActionConflict, where there is no matched content to
-	// compare.
+	// reads the same as this post's own content (same visible text, see
+	// sameVisibleText) — meaningless (left false) for ActionCreate and
+	// ActionConflict, where there is no matched content to compare.
 	ContentFull bool
 
 	// OldBytes and NewBytes are len(full.Content) and len(post.ContentHTML)
@@ -299,7 +299,15 @@ func planOne(post source.Document, snap Snapshot) Item {
 		return item
 	}
 
-	item.ContentFull = full.Content == post.ContentHTML
+	// Compared by visible text, not bytes: wallabag re-serialises whatever
+	// it stores (entity spelling, whitespace between blocks, image
+	// attributes, absolutised footnote links), so a byte comparison never
+	// matched and every run re-uploaded every entry unchanged. A diff of
+	// four live entries on 2026-10-23 found no text difference behind any
+	// of those byte deltas. The operator's rule is that an already-stored
+	// entry is only rewritten when its text actually changed — a paywall
+	// stub growing into the full article being the case that matters.
+	item.ContentFull = sameVisibleText(full.Content, post.ContentHTML)
 	item.OldBytes = len(full.Content)
 	item.NewBytes = len(post.ContentHTML)
 
@@ -317,9 +325,18 @@ func planOne(post source.Document, snap Snapshot) Item {
 	item.ContentGrew = item.EntryID != 0 &&
 		item.NewBytes >= int(float64(item.OldBytes)*contentGrowthRatio)
 
+	// Annotations are judged against the content the entry will hold after
+	// this run: the incoming body when it is about to replace the stored
+	// one, otherwise the stored body itself, which is what wallabag will
+	// keep drawing them against.
+	anchorContent := post.ContentHTML
+	if item.ContentFull {
+		anchorContent = full.Content
+	}
+
 	var annotationsStale bool
 	for _, ann := range full.Annotations {
-		annPlan := planAnnotation(ann, post.ContentHTML)
+		annPlan := planAnnotation(ann, anchorContent)
 		item.Annotations = append(item.Annotations, annPlan)
 		if annPlan.Verdict != VerdictAnchored {
 			annotationsStale = true
