@@ -463,3 +463,37 @@ func TestBuildPlanIsIdempotentAfterACompletedApply(t *testing.T) {
 		t.Errorf("Action = %q, want %q — a completed apply must classify as skip on the next run", got, ActionSkip)
 	}
 }
+
+// TestDropExistingPreviews pins the one rule a paywall preview stub is held
+// to: it may create an entry, never replace one. A stub whose slug already
+// has an entry — under any URL shape slugOf unifies — is dropped; a stub
+// with no entry, and every full post, is kept.
+func TestDropExistingPreviews(t *testing.T) {
+	posts := []source.Document{
+		{URL: "https://example.substack.com/p/stub-existing"},
+		{URL: "https://example.substack.com/p/stub-new"},
+		{URL: "https://example.substack.com/p/full-existing"},
+	}
+	previews := []string{
+		"https://example.substack.com/p/stub-existing",
+		"https://example.substack.com/p/stub-new",
+	}
+	snap := Snapshot{BySlug: map[string][]wallabag.Entry{
+		"stub-existing": {{ID: 1, URL: "https://www.example.com/p/stub-existing?utm_source=x"}},
+		"full-existing": {{ID: 2, URL: "https://example.substack.com/p/full-existing"}},
+	}}
+
+	kept, dropped := DropExistingPreviews(posts, previews, snap)
+
+	var keptURLs []string
+	for _, post := range kept {
+		keptURLs = append(keptURLs, post.URL)
+	}
+	wantKept := []string{"https://example.substack.com/p/stub-new", "https://example.substack.com/p/full-existing"}
+	if strings.Join(keptURLs, " ") != strings.Join(wantKept, " ") {
+		t.Errorf("kept = %q, want %q", keptURLs, wantKept)
+	}
+	if len(dropped) != 1 || dropped[0] != "https://example.substack.com/p/stub-existing" {
+		t.Errorf("dropped = %q, want only stub-existing", dropped)
+	}
+}

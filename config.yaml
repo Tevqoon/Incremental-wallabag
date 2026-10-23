@@ -94,8 +94,10 @@ sources:
 #     # Substack.
 #     host: example.substack.com
 #
-#     # The substack.sid cookie from a browser signed into an account with
-#     # an active paid subscription to host, above.
+#     # The substack.sid cookie from a browser signed into your Substack
+#     # account. With an active paid subscription to host, above, paywalled
+#     # posts are imported in full; without one, free posts still are and
+#     # paywalled ones come in as preview stubs until a paid run replaces them.
 #     #
 #     # IMPORTANT: the value legitimately begins with "s%3A" (the
 #     # URL-escaped form of "s:") — that prefix is part of the cookie

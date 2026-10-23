@@ -451,3 +451,36 @@ func planAnnotation(ann wallabag.Annotation, newContent string) AnnotationPlan {
 		TrimmedMatch: trimmedMatch,
 	}
 }
+
+// DropExistingPreviews removes from posts every paywall preview stub whose
+// slug already has an entry in snap, returning what is left and the URLs of
+// the stubs it removed. previews names the stubs by URL — see
+// substack.Result.Previews.
+//
+// A stub may only ever create an entry, never replace one: whatever wallabag
+// already holds under that slug — the full article from an earlier paid run,
+// wallabag's own extraction of the page, or the same stub from an earlier
+// run — is at least as complete as a preview. Left in, BuildPlan would see
+// the differing content and plan an update over it. Dropping it here, before
+// BuildPlan, keeps that decision out of BuildPlan's own rules, which assume
+// every post they see is the real article.
+func DropExistingPreviews(posts []source.Document, previews []string, snap Snapshot) ([]source.Document, []string) {
+	if len(previews) == 0 {
+		return posts, nil
+	}
+	isPreview := make(map[string]bool, len(previews))
+	for _, previewURL := range previews {
+		isPreview[previewURL] = true
+	}
+
+	kept := make([]source.Document, 0, len(posts))
+	var dropped []string
+	for _, post := range posts {
+		if isPreview[post.URL] && len(snap.BySlug[slugOf(post.URL)]) > 0 {
+			dropped = append(dropped, post.URL)
+			continue
+		}
+		kept = append(kept, post)
+	}
+	return kept, dropped
+}

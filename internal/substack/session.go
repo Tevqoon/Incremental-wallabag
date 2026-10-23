@@ -301,7 +301,12 @@ func (i *Importer) diagnoseSubscriptionFailure(ctx context.Context, subscription
 // other should read this paragraph first — they check different things,
 // and only one of them (stage 2) is actually proven to detect "paid
 // access" rather than merely failing to detect its absence.
-func (i *Importer) verifySubscriptionState(ctx context.Context, logger *slog.Logger) ([]string, error) {
+//
+// A session that is valid but has no paid access is not an error: paid
+// reports false and Ingest carries on importing free posts in full and
+// paywalled ones as preview stubs (see Ingest). Only a session that does
+// not work at all, or a publication that does not exist, fails here.
+func (i *Importer) verifySubscriptionState(ctx context.Context, logger *slog.Logger) (paid bool, warnings []string, err error) {
 	raw, err := i.fetchRaw(ctx, "/api/v1/subscription", true)
 	if err != nil {
 		// A 401 or 404 here is exactly the ambiguous case
@@ -312,14 +317,14 @@ func (i *Importer) verifySubscriptionState(ctx context.Context, logger *slog.Log
 		// network failure) is reported as-is: there is no ambiguity to
 		// resolve, only a plain failure to report.
 		if errors.Is(err, errUnauthorized) || errors.Is(err, errNotFound) {
-			return nil, i.diagnoseSubscriptionFailure(ctx, err)
+			return false, nil, i.diagnoseSubscriptionFailure(ctx, err)
 		}
-		return nil, fmt.Errorf("substack: check subscription state for %s: %w", i.cfg.Host, err)
+		return false, nil, fmt.Errorf("substack: check subscription state for %s: %w", i.cfg.Host, err)
 	}
 
 	var state subscriptionState
 	if err := json.Unmarshal(raw, &state); err != nil {
-		return nil, fmt.Errorf("substack: decode subscription state for %s: %w", i.cfg.Host, err)
+		return false, nil, fmt.Errorf("substack: decode subscription state for %s: %w", i.cfg.Host, err)
 	}
 
 	logger.Debug("subscription state",
@@ -331,21 +336,25 @@ func (i *Importer) verifySubscriptionState(ctx context.Context, logger *slog.Log
 	)
 
 	if state.looksFree() {
-		return nil, fmt.Errorf(
-			"substack: the session is valid but has no paid access to %s (membership_state=%q) — a paid subscription to this publication is required to backfill its paywalled posts",
+		return false, []string{fmt.Sprintf(
+			"the session is valid but has no paid access to %s (membership_state=%q) — importing free posts in full and paywalled posts as preview stubs; run again with a paid subscription to replace the stubs with the full articles",
 			i.cfg.Host, state.MembershipState,
-		)
+		)}, nil
 	}
 
-	var warnings []string
 	if expiry, soon := state.expiresWithin(time.Now(), soonExpiryWindow); soon {
 		warnings = append(warnings, fmt.Sprintf(
 			"subscription to %s expires %s — run again before then to keep backfilling paywalled posts",
 			i.cfg.Host, expiry.Format("2006-01-02"),
 		))
 	}
-	return warnings, nil
+	return true, warnings, nil
 }
+
+// errPaywallNotUnlocked is what verifySession wraps when its probe post did
+// not visibly unlock — see verifySession's own doc comment for how Ingest
+// handles it differently from every other stage 2 failure.
+var errPaywallNotUnlocked = errors.New("substack: paywall not unlocked")
 
 // sessionCanaryMinRatio is how much larger an authenticated fetch's
 // body_html must be than the same slug's unauthenticated fetch for
@@ -404,6 +413,12 @@ const sessionCanaryMinRatio = 1.2
 // it does not, there is no notion of it working for some paid posts and not
 // others, so one confirmation is exactly as much evidence as fetching every
 // paid post twice would be, at a small fraction of the cost.
+//
+// A probe that does not visibly unlock is reported as an error wrapping
+// errPaywallNotUnlocked, which Ingest treats the same as stage 1 finding no
+// paid access — free posts in full, paywalled posts as preview stubs —
+// rather than aborting the run. Any other error (the probe fetch itself
+// failing) still aborts it.
 func (i *Importer) verifySession(ctx context.Context, logger *slog.Logger, posts []archivePost) error {
 	var target *archivePost
 	for idx := range posts {
@@ -454,8 +469,8 @@ func (i *Importer) verifySession(ctx context.Context, logger *slog.Logger, posts
 		// post itself did not visibly unlock. That mismatch is exactly why
 		// stage 2 exists rather than trusting stage 1 alone.
 		return fmt.Errorf(
-			"substack: the account reports paid access to %s but a live fetch of %q still returned what looks like a preview (authenticated body_html %d bytes vs %d unauthenticated, ratio below %.1fx) — membership_state passed stage 1, yet this post did not visibly unlock; the account may not actually be entitled to this specific publication despite what it reports, or Substack may be serving a stale response — try again, and if it persists, verify paid access to this exact publication manually",
-			i.cfg.Host, target.Slug, authLen, anonLen, sessionCanaryMinRatio,
+			"%w: the account reports paid access to %s but a live fetch of %q still returned what looks like a preview (authenticated body_html %d bytes vs %d unauthenticated, ratio below %.1fx) — membership_state passed stage 1, yet this post did not visibly unlock; the account may not actually be entitled to this specific publication despite what it reports, or Substack may be serving a stale response — if it persists, verify paid access to this exact publication manually",
+			errPaywallNotUnlocked, i.cfg.Host, target.Slug, authLen, anonLen, sessionCanaryMinRatio,
 		)
 	}
 	logger.Info("stage 2 session verified", "slug", target.Slug, "authenticated_bytes", authLen, "anonymous_bytes", anonLen)

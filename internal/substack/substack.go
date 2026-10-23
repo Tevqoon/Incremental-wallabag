@@ -22,6 +22,12 @@
 // in its own response (see verifySession's own doc comment in session.go
 // for the finding), so this package establishes trust once, up front,
 // rather than trying to detect a preview after the fact.
+//
+// A run without paid access — no subscription at all, or one that has
+// lapsed — still imports what it can: free posts in full, and paywalled
+// posts as preview stubs listed in Result.Previews, so a caller can make
+// sure a stub never overwrites anything already stored. A later run with
+// paid access replaces those stubs with the full articles.
 package substack
 
 import (
@@ -55,7 +61,9 @@ type Config struct {
 	Host string
 
 	// SessionID is the substack.sid cookie value from a browser logged into
-	// an account with an active paid subscription to Host. This is a
+	// the operator's account — with an active paid subscription to Host for
+	// paywalled posts to come back in full (see Result.Previews for what
+	// happens without one). This is a
 	// secret: it is the entire credential this package holds, equivalent to
 	// a password, and it must never be written to a log line, an error
 	// message, a Result, or a String() method — see Config.String() below
@@ -190,6 +198,14 @@ type Result struct {
 	// and therefore not trusted — see post's own cache-skip rule in post.go.
 	Fetched int
 
+	// Previews lists the canonical URLs of the documents Ingest returned
+	// as paywall preview stubs rather than full articles: only_paid posts
+	// fetched in a run without confirmed paid access, each carrying
+	// previewNotice ahead of the preview body. Such a document must only
+	// ever create a new entry, never replace an existing one — whatever is
+	// already stored is at least as complete as the preview.
+	Previews []string
+
 	// SkippedNonNewsletter is how many archive entries were not imported
 	// because their type was not "newsletter" — restacks, most commonly,
 	// which have no body of their own and whose slugs 404 rather than
@@ -199,11 +215,17 @@ type Result struct {
 	// Warnings collects non-fatal problems encountered along the way: a
 	// single post's fetch failing partway through the run, cleanBody being
 	// unable to parse a body, or the archive walk being cut off by
-	// maxArchiveOffset before it found a natural end. Ingest continues past
-	// every one of these; only a failed session verification stops the run
-	// outright, and that is reported as an error, not folded in here.
+	// maxArchiveOffset before it found a natural end, or the session having
+	// no paid access. Ingest continues past every one of these; only a
+	// session that does not work at all (or a publication that does not
+	// exist) stops the run outright, and that is reported as an error, not
+	// folded in here.
 	Warnings []string
 }
+
+// previewNotice heads the body of every paywall preview stub Ingest returns,
+// so a reader opening one knows the article stops early on purpose.
+const previewNotice = `<p><em>This post is paywalled: only its free preview was imported. Checking for new articles with a paid subscription replaces it with the full article.</em></p>`
 
 // Ingest walks the publication's archive, fetches every newsletter post it
 // finds, cleans each body, and returns them as source.Document values. It
@@ -219,11 +241,11 @@ func (i *Importer) Ingest(ctx context.Context, logger *slog.Logger) ([]source.Do
 	// Stage 1 of the two-stage session check, run before anything else in
 	// this call — including the archive walk — because it is the cheapest
 	// possible diagnosis (one request) and the archive walk's own request
-	// budget should not be spent against a cookie already known to be dead
-	// or paywall-less. See verifySubscriptionState's own doc comment in
-	// session.go for why this is not, by itself, sufficient — stage 2 below
-	// exists for exactly that reason.
-	subscriptionWarnings, err := i.verifySubscriptionState(ctx, logger)
+	// budget should not be spent against a cookie already known to be
+	// dead. See verifySubscriptionState's own doc comment in session.go for
+	// why this is not, by itself, sufficient — stage 2 below exists for
+	// exactly that reason.
+	paid, subscriptionWarnings, err := i.verifySubscriptionState(ctx, logger)
 	if err != nil {
 		return nil, Result{}, err
 	}
@@ -241,12 +263,21 @@ func (i *Importer) Ingest(ctx context.Context, logger *slog.Logger) ([]source.Do
 	// Stage 2: ground truth, measured directly, for what stage 1 could only
 	// fail to contradict rather than actually confirm. See verifySession's
 	// own doc comment in session.go for the full reasoning behind having
-	// both stages. A failure here aborts the whole run and imports nothing
-	// — there is no partial result worth trusting once the premise this
-	// package relies on (a working session means every subsequent paid
-	// fetch in this run is the real thing) does not hold.
-	if err := i.verifySession(ctx, logger, posts); err != nil {
-		return nil, result, err
+	// both stages. Skipped when stage 1 already found no paid access —
+	// there is nothing left for it to confirm. A probe that does not unlock
+	// demotes the run to the same footing: every paid fetch in it is a
+	// preview, and is reported as one below rather than trusted as the
+	// real thing.
+	if paid {
+		if err := i.verifySession(ctx, logger, posts); err != nil {
+			if !errors.Is(err, errPaywallNotUnlocked) {
+				return nil, result, err
+			}
+			paid = false
+			result.Warnings = append(result.Warnings, err.Error()+
+				" — importing free posts in full and paywalled posts as preview stubs")
+			logger.Warn("paid posts did not unlock; importing paywalled posts as preview stubs", "host", i.cfg.Host)
+		}
 	}
 
 	var documents []source.Document
@@ -262,7 +293,7 @@ func (i *Importer) Ingest(ctx context.Context, logger *slog.Logger) ([]source.Do
 			continue
 		}
 
-		body, fromCache, err := i.post(ctx, entry.Slug)
+		body, fromCache, err := i.post(ctx, entry.Slug, paid)
 		if err != nil {
 			msg := fmt.Sprintf("post %q: %v", entry.Slug, err)
 			result.Warnings = append(result.Warnings, msg)
@@ -278,6 +309,16 @@ func (i *Importer) Ingest(ctx context.Context, logger *slog.Logger) ([]source.Do
 
 		cleaned, warnings := cleanBody(body.BodyHTML)
 		result.Warnings = append(result.Warnings, warnings...)
+
+		// A paid post is the full article when it came from a trusted
+		// cache entry (post only trusts a paid one written under a
+		// confirmed session) or this run has paid access. Otherwise it is
+		// the free preview, marked as such in its own body and in
+		// Result.Previews.
+		if body.Audience == "only_paid" && !fromCache && !paid {
+			cleaned = previewNotice + cleaned
+			result.Previews = append(result.Previews, body.CanonicalURL)
+		}
 		documents = append(documents, toDocument(body, cleaned))
 	}
 

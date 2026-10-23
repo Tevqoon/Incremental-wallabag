@@ -135,7 +135,7 @@ func TestPostTrustsPreWrapperCacheFileAsMissing(t *testing.T) {
 		t.Fatalf("seed cache file: %v", err)
 	}
 
-	_, fromCache, err := importer.post(context.Background(), "legacy")
+	_, fromCache, err := importer.post(context.Background(), "legacy", true)
 	if err != nil {
 		t.Fatalf("post: %v", err)
 	}
@@ -147,13 +147,13 @@ func TestPostTrustsPreWrapperCacheFileAsMissing(t *testing.T) {
 	}
 }
 
-// TestIngestAbortsWhenSessionVerificationFails covers the canary's failure
-// path: when the authenticated and unauthenticated fetches of the probe
-// post come back indistinguishable (the lapsed-session case
-// newLapsedPaidPostFixture models), Ingest must abort the entire run before
-// fetching anything else — not just skip the probe post and continue with
-// the rest of the archive.
-func TestIngestAbortsWhenSessionVerificationFails(t *testing.T) {
+// TestIngestStubsPaidPostsWhenSessionVerificationFails covers the canary's
+// failure path: when the authenticated and unauthenticated fetches of the
+// probe post come back indistinguishable (the lapsed-session case
+// newLapsedPaidPostFixture models), Ingest must not trust any paid fetch as
+// the real thing — but it must still import every free post in full and
+// every paid one as a preview stub, rather than aborting the whole run.
+func TestIngestStubsPaidPostsWhenSessionVerificationFails(t *testing.T) {
 	fake := newFakeSubstack(t)
 	fake.archivePages[0] = []archiveFixture{
 		newArchiveFixture(1, "free-post", "newsletter", "everyone"),
@@ -167,27 +167,44 @@ func TestIngestAbortsWhenSessionVerificationFails(t *testing.T) {
 	importer := newTestImporter(t, fake.Server, nil)
 	logger := testLogger(&strings.Builder{})
 
-	documents, _, err := importer.Ingest(context.Background(), logger)
-	if err == nil {
-		t.Fatal("expected an error aborting the run")
+	documents, result, err := importer.Ingest(context.Background(), logger)
+	if err != nil {
+		t.Fatalf("Ingest: %v (a paywall that does not unlock must not abort the run)", err)
 	}
-	if !strings.Contains(err.Error(), "still returned what looks like a preview") {
-		t.Errorf("error = %q, want it to name the stage 2 canary failure", err.Error())
-	}
-	if len(documents) != 0 {
-		t.Errorf("len(documents) = %d, want 0 (nothing imported on a failed verification)", len(documents))
+	if len(documents) != 3 {
+		t.Fatalf("len(documents) = %d, want 3 (both free posts and a stub for the paid one)", len(documents))
 	}
 
-	// The probe post is fetched exactly twice — once with the cookie, once
-	// without, both via verifySession directly — and nothing else in the
-	// archive is ever requested at all: the abort happens before the
-	// per-post loop even starts.
-	if got := fake.postRequestCount("lapsed-probe"); got != 2 {
-		t.Errorf("lapsed-probe requested %d times, want 2 (authenticated + anonymous canary)", got)
+	foundWarning := false
+	for _, warning := range result.Warnings {
+		if strings.Contains(warning, "still returned what looks like a preview") {
+			foundWarning = true
+		}
+	}
+	if !foundWarning {
+		t.Errorf("Warnings = %q, want one naming the stage 2 canary failure", result.Warnings)
+	}
+
+	probeURL := "https://example.substack.com/p/lapsed-probe"
+	if len(result.Previews) != 1 || result.Previews[0] != probeURL {
+		t.Errorf("Previews = %q, want exactly [%q]", result.Previews, probeURL)
+	}
+	for _, doc := range documents {
+		stub := strings.HasPrefix(doc.ContentHTML, previewNotice)
+		if wantStub := doc.URL == probeURL; stub != wantStub {
+			t.Errorf("%s: carries the preview notice = %v, want %v", doc.URL, stub, wantStub)
+		}
+	}
+
+	// The probe post is fetched twice by verifySession (with and without
+	// the cookie) and once more by the per-post loop; the free posts once
+	// each.
+	if got := fake.postRequestCount("lapsed-probe"); got != 3 {
+		t.Errorf("lapsed-probe requested %d times, want 3 (authenticated + anonymous canary, then the import itself)", got)
 	}
 	for _, slug := range []string{"free-post", "another-free-post"} {
-		if got := fake.postRequestCount(slug); got != 0 {
-			t.Errorf("%s requested %d times, want 0 (the whole run must abort before reaching it)", slug, got)
+		if got := fake.postRequestCount(slug); got != 1 {
+			t.Errorf("%s requested %d times, want 1", slug, got)
 		}
 	}
 }
@@ -227,7 +244,7 @@ func TestFetchRetriesAfter429ThenSucceeds(t *testing.T) {
 
 	importer := newTestImporter(t, fake.Server, nil)
 
-	body, fromCache, err := importer.post(context.Background(), "flaky")
+	body, fromCache, err := importer.post(context.Background(), "flaky", true)
 	if err != nil {
 		t.Fatalf("post: %v", err)
 	}
@@ -253,7 +270,7 @@ func TestFetchGivesUpAfterMaxAttempts(t *testing.T) {
 		cfg.MaxAttempts = 3
 	})
 
-	_, _, err := importer.post(context.Background(), "always-500")
+	_, _, err := importer.post(context.Background(), "always-500", true)
 	if err == nil {
 		t.Fatal("expected an error after exhausting MaxAttempts")
 	}
@@ -277,7 +294,7 @@ func TestPostRejectsPathTraversalSlug(t *testing.T) {
 		"",
 	} {
 		t.Run(slug, func(t *testing.T) {
-			_, _, err := importer.post(context.Background(), slug)
+			_, _, err := importer.post(context.Background(), slug, true)
 			if err == nil {
 				t.Fatalf("post(%q): expected an error, got none", slug)
 			}

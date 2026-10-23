@@ -148,7 +148,9 @@ type Substack struct {
 	Host string `yaml:"host"`
 
 	// SessionCookie is the substack.sid cookie value from a browser signed
-	// into an account with an active paid subscription to Host. A secret —
+	// into the operator's Substack account. A paid subscription to Host is
+	// what unlocks paywalled posts in full; without one they are imported
+	// as preview stubs (see internal/substack.Result.Previews). A secret —
 	// see internal/substack.Config.SessionID for why it must never be
 	// logged or reported.
 	SessionCookie string `yaml:"session_cookie"`

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -281,39 +283,98 @@ func TestParseExpiry(t *testing.T) {
 }
 
 // TestIngestAbortsWhenSubscriptionIsFree covers stage 1's primary failure
-// mode: a session that authenticates fine but has no paid access to the
-// publication at all. This must abort before the archive is even walked —
-// asserted here by checking the archive endpoint was never requested.
-func TestIngestAbortsWhenSubscriptionIsFree(t *testing.T) {
+// TestIngestImportsFreePostsAndStubsWithoutPaidAccess covers a session that
+// authenticates fine but has no paid access to the publication at all. That
+// is not an error: free posts are imported in full, paid ones as preview
+// stubs listed in Result.Previews, and stage 2 is skipped outright since
+// there is no paid access for it to confirm. A cached paid post written
+// under an earlier, paid run is still the full article and is served as
+// such.
+func TestIngestImportsFreePostsAndStubsWithoutPaidAccess(t *testing.T) {
 	fake := newFakeSubstack(t)
 	fake.subscription = freeSubscriptionFixture()
-	// Deliberately not populated: if Ingest reached the archive walk at
-	// all, it would 400 against the fake server's own limit check, making
-	// any accidental archive request loudly visible as a different failure
-	// than the one this test is checking for.
+	fake.archivePages[0] = []archiveFixture{
+		newArchiveFixture(1, "free-post", "newsletter", "everyone"),
+		newArchiveFixture(2, "paid-post", "newsletter", "only_paid"),
+		newArchiveFixture(3, "cached-paid-post", "newsletter", "only_paid"),
+	}
+	fake.posts["free-post"] = newFreePostFixture(1, "free-post")
+	// Modelled as the lapsed fixture because that is what a session with no
+	// paid access actually gets: the preview, cookie or not.
+	fake.posts["paid-post"] = newLapsedPaidPostFixture(2, "paid-post")
+	fake.posts["cached-paid-post"] = newLapsedPaidPostFixture(3, "cached-paid-post")
 
 	importer := newTestImporter(t, fake.Server, nil)
-	logger := testLogger(&strings.Builder{})
 
-	_, result, err := importer.Ingest(context.Background(), logger)
-	if err == nil {
-		t.Fatal("expected an error")
+	fullBody := "<p>" + strings.Repeat(paidBodyPadding, 20) + "</p>"
+	full := newPaidPostFixture(3, "cached-paid-post", fullBody, "")
+	fullRaw, err := json.Marshal(full)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
 	}
-	if !strings.Contains(err.Error(), "no paid access") {
-		t.Errorf("error = %q, want it to say the account has no paid access", err.Error())
+	entry, err := json.Marshal(cacheEntry{FetchedAt: time.Now(), Authenticated: true, Post: fullRaw})
+	if err != nil {
+		t.Fatalf("marshal cache entry: %v", err)
 	}
-	if !strings.Contains(err.Error(), "free_signup") {
-		t.Errorf("error = %q, want it to name the actual membership_state", err.Error())
+	path := importer.cachePath("cached-paid-post")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("create cache dir: %v", err)
 	}
-	if result.Pages != 0 {
-		t.Errorf("Result.Pages = %d, want 0 (the archive must never be walked)", result.Pages)
+	if err := os.WriteFile(path, entry, 0o644); err != nil {
+		t.Fatalf("seed cache: %v", err)
 	}
 
-	for _, path := range fake.requestedPaths {
-		if strings.HasPrefix(path, "/api/v1/archive") {
-			t.Errorf("archive was requested (%s) despite stage 1 failing first", path)
+	documents, result, err := importer.Ingest(context.Background(), testLogger(&strings.Builder{}))
+	if err != nil {
+		t.Fatalf("Ingest: %v (no paid access must not abort the run)", err)
+	}
+	if len(documents) != 3 {
+		t.Fatalf("len(documents) = %d, want 3", len(documents))
+	}
+
+	foundWarning := false
+	for _, warning := range result.Warnings {
+		if strings.Contains(warning, "no paid access") && strings.Contains(warning, "free_signup") {
+			foundWarning = true
 		}
 	}
+	if !foundWarning {
+		t.Errorf("Warnings = %q, want one saying there is no paid access and naming membership_state", result.Warnings)
+	}
+
+	paidURL := "https://example.substack.com/p/paid-post"
+	if len(result.Previews) != 1 || result.Previews[0] != paidURL {
+		t.Errorf("Previews = %q, want exactly [%q]", result.Previews, paidURL)
+	}
+	for _, doc := range documents {
+		stub := strings.HasPrefix(doc.ContentHTML, previewNotice)
+		if wantStub := doc.URL == paidURL; stub != wantStub {
+			t.Errorf("%s: carries the preview notice = %v, want %v", doc.URL, stub, wantStub)
+		}
+		if strings.HasSuffix(doc.URL, "/cached-paid-post") && !strings.Contains(doc.ContentHTML, paidBodyPadding) {
+			t.Errorf("cached-paid-post content = %q, want the full cached article", doc.ContentHTML)
+		}
+	}
+
+	// Stage 2 never runs, so the paid post is fetched exactly once, by the
+	// import itself, and the trusted cached one not at all.
+	if got := fake.postRequestCount("paid-post"); got != 1 {
+		t.Errorf("paid-post requested %d times, want 1 (no stage 2 canary without paid access)", got)
+	}
+	if got := fake.postRequestCount("cached-paid-post"); got != 0 {
+		t.Errorf("cached-paid-post requested %d times, want 0 (its authenticated cache entry is trusted)", got)
+	}
+
+	// The preview is cached as untrusted, so the next run with paid access
+	// fetches the real article instead of reusing it.
+	_, authenticated, found, err := loadCachedPost(importer.cachePath("paid-post"))
+	if err != nil || !found {
+		t.Fatalf("loadCachedPost(paid-post): found=%v err=%v", found, err)
+	}
+	if authenticated {
+		t.Error("paid-post's preview was cached as Authenticated — a later paid run would trust it")
+	}
+
 	if fake.settingsRequests != 0 {
 		t.Errorf("settings was requested %d times, want 0 — subscription succeeded (200), so there is nothing for diagnoseSubscriptionFailure to resolve", fake.settingsRequests)
 	}

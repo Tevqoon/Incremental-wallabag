@@ -52,11 +52,11 @@ func TestNewErrorsDoNotLeakSessionID(t *testing.T) {
 }
 
 // TestIngestNeverLeaksSessionIDOnVerificationFailure runs a full Ingest
-// whose session canary fails — the error path that builds its own message
-// out of byte counts and a slug, the likeliest place a careless future edit
-// would accidentally interpolate more than that — and checks the session
-// cookie appears nowhere in the log output, the returned error, or a %+v
-// dump of the Result.
+// whose session canary fails — the path that builds its own warning out of
+// byte counts and a slug, the likeliest place a careless future edit would
+// accidentally interpolate more than that — and checks the session cookie
+// appears nowhere in the log output, the returned error, or a %+v dump of
+// the Result.
 func TestIngestNeverLeaksSessionIDOnVerificationFailure(t *testing.T) {
 	fake := newFakeSubstack(t)
 	fake.archivePages[0] = []archiveFixture{
@@ -72,8 +72,11 @@ func TestIngestNeverLeaksSessionIDOnVerificationFailure(t *testing.T) {
 	logger := testLogger(&logBuf)
 
 	_, result, err := importer.Ingest(context.Background(), logger)
-	if err == nil {
-		t.Fatal("expected a session verification error")
+	if err != nil {
+		t.Fatalf("Ingest: %v (a failed canary falls back to preview stubs, not an error)", err)
+	}
+	if len(result.Previews) == 0 {
+		t.Fatal("expected the probe post to come back as a preview stub — the test setup itself is broken if not")
 	}
 
 	assertNoSessionIDLeak(t, logBuf.String(), err, result, fake)
