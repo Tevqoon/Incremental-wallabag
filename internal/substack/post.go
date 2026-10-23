@@ -82,12 +82,13 @@ func (i *Importer) cachePath(slug string) string {
 // in Post itself can tell a later run whether a cached only_paid post is the
 // genuine article or a preview served while the subscription had lapsed.
 // Authenticated records that fact at write time, when it is actually known:
-// post only ever writes a cache entry after verifySession has confirmed the
-// session cookie works for this run, so every entry this package itself
-// writes has Authenticated true. False — or the field simply being absent,
-// which decodes to the same zero value — only happens for a file left
-// behind by a version of this package written before this wrapper existed
-// (see loadCachedPost), or one that was hand-edited.
+// Ingest tells post whether this run's session was confirmed to unlock paid
+// posts (stage 1 found paid access and verifySession's probe unlocked), and
+// post writes exactly that. False — or the field simply being absent, which
+// decodes to the same zero value — means a run without paid access wrote it
+// (a paid post's entry is then only a preview, and is refetched on the next
+// run), a file left behind by a version of this package written before this
+// wrapper existed (see loadCachedPost), or one that was hand-edited.
 //
 // FetchedAt is diagnostic only: nothing in this package's own logic reads it
 // back. It exists so an operator inspecting CacheDir by hand can tell how
@@ -111,17 +112,20 @@ type cacheEntry struct {
 // cached while lapsed, indistinguishable from the real thing by its own
 // content (see verifySession), with only the wrapper's own Authenticated
 // flag able to say so.
-func (i *Importer) post(ctx context.Context, slug string) (postBody, bool, error) {
+//
+// authenticated is whether this run's session is confirmed to unlock paid
+// posts; it is recorded on whatever this writes to the cache.
+func (i *Importer) post(ctx context.Context, slug string, authenticated bool) (postBody, bool, error) {
 	if err := validateSlug(slug); err != nil {
 		return postBody{}, false, err
 	}
 	path := i.cachePath(slug)
 
-	cached, authenticated, found, err := loadCachedPost(path)
+	cached, cachedAuthenticated, found, err := loadCachedPost(path)
 	if err != nil {
 		return postBody{}, false, err
 	}
-	if found && (cached.Audience != "only_paid" || authenticated) {
+	if found && (cached.Audience != "only_paid" || cachedAuthenticated) {
 		return cached, true, nil
 	}
 
@@ -136,14 +140,13 @@ func (i *Importer) post(ctx context.Context, slug string) (postBody, bool, error
 	}
 
 	// Every network fetch post makes goes out with the cookie (fetchRaw's
-	// withCookie=true above), and Ingest never reaches this loop at all
-	// unless verifySession already confirmed that cookie works — see
-	// Ingest's own ordering. So Authenticated is unconditionally true for
-	// anything this line writes; it is only ever false for a file this
-	// package did not just write itself.
+	// withCookie=true above), but the cookie only unlocks paid posts when
+	// Ingest's two-stage check confirmed it does — authenticated carries
+	// that verdict, so a preview fetched without paid access is never
+	// recorded as trustworthy.
 	entry := cacheEntry{
 		FetchedAt:     time.Now(),
-		Authenticated: true,
+		Authenticated: authenticated,
 		// The raw bytes exactly as Substack sent them are what gets
 		// wrapped and cached, not a re-marshaled fresh — round-tripping
 		// through postBody would silently drop every field this struct

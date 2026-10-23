@@ -351,6 +351,14 @@ func refreshSubstackArchive(ctx context.Context, db *store.Store, settings confi
 	if err != nil {
 		return "", err
 	}
+	// Without paid access, paywalled posts come back as preview stubs. A
+	// stub only ever creates an entry: one already in wallabag is left as
+	// it is, since it is at least as complete as the preview.
+	docs, keptExisting := ingest.DropExistingPreviews(docs, result.Previews, snap)
+	if len(result.Previews) > 0 {
+		fmt.Fprintf(&out, "substack: %d paywalled post(s) without paid access — %d new as preview stubs, %d already in wallabag left untouched\n",
+			len(result.Previews), len(result.Previews)-len(keptExisting), len(keptExisting))
+	}
 	now := time.Now()
 	plan := ingest.BuildPlan(docs, snap, now)
 	if err := ingest.WriteReport(&out, plan, nil); err != nil {
